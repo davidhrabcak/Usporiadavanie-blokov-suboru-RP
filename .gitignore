@@ -2,3 +2,4 @@ rp/.vscode/
 *.txt
 rp/segmentIn
 rp/segment
+rp/segment_*

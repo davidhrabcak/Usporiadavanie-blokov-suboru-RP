@@ -1,4 +1,5 @@
 from typing import *
+import subprocess
 import random
 
 d = {}
@@ -56,7 +57,6 @@ def reconstructAllTexts(chunks: List[str]) -> List[str]:
 
     for i, ch in enumerate(chunks):
         print(f"Trying starting chunk {i+1}/{len(chunks)}: {repr(ch)}")
-        if not ch[0].isupper(): continue
         rest = chunks[:i] + chunks[i+1:]
         backtrack(ch, rest, file, results)
     
@@ -66,11 +66,11 @@ def reconstructAllTexts(chunks: List[str]) -> List[str]:
 
 def main():
     global chunks
-    f = open("in.txt")
-    frank = f.read()
-    f.close()
-    chunks = [frank[i:i+16] for i in range(0, len(frank), 16)] # for external 16, for internal not found
+    subprocess.run(["./segment", "in.txt", "segmented_in.txt", "16"])
+    file = open("segmented_in.txt", "r")
+    chunks = file.read().split('\n')
     random.shuffle(chunks)
+
     #createSelfDictionary()
     createDictionary("dict_en.txt")
     results = reconstructAllTexts(chunks)
