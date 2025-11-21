@@ -66,9 +66,10 @@ def reconstructAllTexts(chunks: List[str]) -> List[str]:
 
 def main():
     global chunks
-    subprocess.run(["./segment", "in.txt", "segmented_in.txt", "16"])
-    file = open("segmented_in.txt", "r")
-    chunks = file.read().split('\n')
+    f = open("in.txt")
+    frank = f.read()
+    f.close()
+    chunks = [frank[i:i+16] for i in range(0, len(frank), 16)] # for external 16, for internal not found
     random.shuffle(chunks)
 
     #createSelfDictionary()
