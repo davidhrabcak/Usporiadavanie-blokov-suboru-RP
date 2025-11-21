@@ -1,10 +1,8 @@
 from typing import *
-import re
 import random
 
 d = {}
 chunks = []
-endingChars = ['.', '?', '!', '\n']
 
 def createSelfDictionary():
     for ch in chunks:
@@ -31,31 +29,10 @@ def checkValidityChunk(chunk: str) -> bool:
     return all(w.lower() in d for w in words if w.isalpha())
 
 def checkValidityText(current_text: str) -> bool:
-    #start and end check
-    if not current_text[0].isupper() or not current_text[-1] in endingChars:
-       return False
-
-    #all chunks test
     for chunk in chunks:
         if chunk not in current_text:
             return False
-    
-    #sentence check
-    dot_positions = [i for i, ch in enumerate(current_text) if ch == '.']
-    for i in dot_positions[:-1]:
-        j = i + 1
-
-        while j < len(current_text) and current_text[j].isspace():
-            j += 1
-
-        if j == len(current_text):
-            return True
-    
-    nxt = current_text[j]
-    if nxt != '.' or not nxt.isdigit() or not nxt.isupper():
-        return False
-    
-    words = re.findall(r"[A-Za-z]+", current_text)
+    words = current_text.split()
     return all(w.lower() in d for w in words if w.isalpha()) #words valid check
                 
 def backtrack(current_text: str, remaining: List[str], file, results: List[str]):
