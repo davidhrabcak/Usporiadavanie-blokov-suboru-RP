@@ -5,6 +5,12 @@ import random
 d = {}
 chunks = []
 
+def importFrequencyDictionary() -> Dict[str, List[str]]:
+    with open("dictionary_custom.txt") as f: #change namefile of custom dictionary
+        for line in f:
+            words = line.split()
+            d[words[0]] = words[1:]
+
 def createSelfDictionary():
     for ch in chunks:
         words = ch.split()
