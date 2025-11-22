@@ -53,7 +53,6 @@ def backtrack(current_text: str, remaining: List[str], file, results: List[str])
         for i, ch in enumerate(remaining):
             candidate = current_text + ch
             if checkValidityChunk(candidate):
-                #file.write(f"joined chunks to: {candidate}\n")
                 next_remaining = remaining[:i] + remaining[i+1:]
                 backtrack(candidate, next_remaining, file, results)
 
