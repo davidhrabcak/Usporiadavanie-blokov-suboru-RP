@@ -1,17 +1,16 @@
 from typing import *
-import subprocess
 import random
 
 d = {}
 chunks = []
 
-def importFrequencyDictionary() -> Dict[str, List[str]]:
+def importFrequencyDictionary():
     with open("dictionary_custom.txt") as f: #change namefile of custom dictionary
         for line in f:
             words = line.split()
             d[words[0]] = words[1:]
 
-def createSelfDictionary():
+def createDictionary():
     for ch in chunks:
         words = ch.split()
         words.pop()
@@ -68,7 +67,8 @@ def reconstructAllTexts(chunks: List[str]) -> List[str]:
     file.close()
     return results
 
-
+#TODO implement text reconstruction that uses frequency dictionary
+#TODO use segment.cpp for chunk creation
 def main():
     global chunks
     f = open("in.txt")
