@@ -24,6 +24,6 @@ int main(int argc, char const *argv[]) {
 
     system(command.c_str());
     system(command2.c_str());
-    //TODO file cleanup
+    system("rm segment_*");
     return 0;
 }

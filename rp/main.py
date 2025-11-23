@@ -40,7 +40,17 @@ def checkValidityText(current_text: str) -> bool:
             return False
     words = current_text.split()
     return all(w.lower() in d for w in words if w.isalpha()) #words valid check
-                
+
+def checkValidityFrequency(candidate: str, dict) -> bool:
+    words = chunks.split()
+
+    if len(words) > 2:
+        words = words[1:-1]
+    
+    for i, w in enumerate(words):
+        
+
+#uses standard dictionary created by method of choice
 def backtrack(current_text: str, remaining: List[str], file, results: List[str]):
         if not remaining:
             if checkValidityText:
@@ -51,7 +61,7 @@ def backtrack(current_text: str, remaining: List[str], file, results: List[str])
         
         for i, ch in enumerate(remaining):
             candidate = current_text + ch
-            if checkValidityChunk(candidate):
+            if checkValidityChunk(candidate): # checkValidityChunkFrequency(candidate, dict)
                 next_remaining = remaining[:i] + remaining[i+1:]
                 backtrack(candidate, next_remaining, file, results)
 
@@ -63,12 +73,15 @@ def reconstructAllTexts(chunks: List[str]) -> List[str]:
         print(f"Trying starting chunk {i+1}/{len(chunks)}: {repr(ch)}")
         rest = chunks[:i] + chunks[i+1:]
         backtrack(ch, rest, file, results)
+        #backtrackFrequency(ch, rest, file, results)
     
     file.close()
     return results
 
+
 #TODO implement text reconstruction that uses frequency dictionary
 #TODO use segment.cpp for chunk creation
+#TODO change reconstructAllTexts to return only one valid result
 def main():
     global chunks
     f = open("in.txt")
