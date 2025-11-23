@@ -41,14 +41,17 @@ def checkValidityText(current_text: str) -> bool:
     words = current_text.split()
     return all(w.lower() in d for w in words if w.isalpha()) #words valid check
 
-def checkValidityFrequency(candidate: str, dict) -> bool:
-    words = chunks.split()
+#uses default d as frequency dict
+def checkValidityChunkFrequency(candidate: str) -> bool:
+    words = candidate.split()
 
     if len(words) > 2:
         words = words[1:-1]
     
     for i, w in enumerate(words):
-        
+        if (words[i+1] not in d[w]):
+            return False
+    return True
 
 #uses standard dictionary created by method of choice
 def backtrack(current_text: str, remaining: List[str], file, results: List[str]):
@@ -78,19 +81,15 @@ def reconstructAllTexts(chunks: List[str]) -> List[str]:
     file.close()
     return results
 
-
-#TODO implement text reconstruction that uses frequency dictionary
-#TODO use segment.cpp for chunk creation
 #TODO change reconstructAllTexts to return only one valid result
+#TODO simplify and organize functions and structures for creating/importing dicts
 def main():
     global chunks
-    f = open("in.txt")
-    frank = f.read()
-    f.close()
-    chunks = [frank[i:i+16] for i in range(0, len(frank), 16)] # for external 16, for internal not found
-    random.shuffle(chunks)
-
+    with open("out.txt") as f: #filename of segment output
+        for line in f:
+            chunks.append(line)
     #createSelfDictionary()
+    #importFrequencyDictionary()
     createDictionary("dict_en.txt")
     results = reconstructAllTexts(chunks)
     print(results)
