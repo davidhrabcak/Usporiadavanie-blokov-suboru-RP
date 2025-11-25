@@ -1,5 +1,4 @@
 from typing import *
-import random
 
 d = {}
 chunks = []
@@ -10,7 +9,7 @@ def importFrequencyDictionary():
             words = line.split()
             d[words[0]] = words[1:]
 
-def createDictionary():
+def createInternalDictionary():
     for ch in chunks:
         words = ch.split()
         words.pop()
@@ -36,7 +35,7 @@ def checkValidityChunk(chunk: str) -> bool:
 
 def checkValidityText(current_text: str) -> bool:
     for chunk in chunks:
-        if chunk not in current_text:
+        if chunk.strip() not in current_text:
             return False
     words = current_text.split()
     return all(w.lower() in d for w in words if w.isalpha()) #words valid check
@@ -81,7 +80,7 @@ def reconstructAllTexts(chunks: List[str]) -> List[str]:
     file.close()
     return results
 
-#TODO change reconstructAllTexts to return only one valid result
+#TODO change reconstructAllTexts to return only one valid result ?? keep for now
 #TODO simplify and organize functions and structures for creating/importing dicts
 def main():
     global chunks
