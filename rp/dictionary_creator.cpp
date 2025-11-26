@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <algorithm>
 #include <set>
+#include <cctype>
 using namespace std;
 
 #define MAX_TOPLIST 10 // limits number of most frequent words for every first word
@@ -28,15 +29,11 @@ vector<string> split_text(string sen) {
 }
 
 string strip(string input) {
-    string result = input;
-    result.erase(remove_if(result.begin(), result.end(),
-        [](unsigned char c) { return !isalnum(c); }
-    ), result.end());
-
-    transform(result.begin(), result.end(), result.begin(),
+    
+    transform(input.begin(), input.end(), input.begin(),
     [](unsigned char c){ return std::tolower(c); });
 
-    return result;
+    return input;
 }
 
 int main(int argc, char const *argv[]) {
@@ -45,15 +42,19 @@ int main(int argc, char const *argv[]) {
     stringstream buffer;
     buffer << file.rdbuf();
     string data = buffer.str();
-    data.erase(remove_if(data.begin(), data.end(),
-        [](unsigned char c) { return allowed.find(c) != allowed.end(); }
-    ), data.end());
+    file.close();
+
     vector<string> words = split_text(data);
-    for (int i = 0; i < words.size(); i++) words[i] = strip(words[i]);
+    vector<string> words_clean;
+
+    for (auto& word : words) {
+        string clean = strip(word);
+        if (!clean.empty()) words_clean.push_back(clean);
+    }
 
     unordered_map<string, unordered_map<string, int>> freq;
-    for (int i = 0; i < words.size() - 1; i++) {
-        freq[words[i]][strip(words[i+1])]++;
+    for (int i = 0; i < words_clean.size() - 1; i++) {
+        freq[words_clean[i]][strip(words_clean[i+1])]++;
     }
 
     unordered_map<string, vector<string>> dict;
