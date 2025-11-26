@@ -36,6 +36,7 @@ string strip(string input) {
     return input;
 }
 
+//TODO needs testing - creation and use of frequency dictionary
 int main(int argc, char const *argv[]) {
     vector<string> sources;
     ifstream file("input_books.txt"); // input filename
