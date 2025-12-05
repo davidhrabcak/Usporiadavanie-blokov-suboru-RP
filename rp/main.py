@@ -1,96 +1,47 @@
-from typing import *
+from dictionary.standard_dictionary import StandardDictionary
+from dictionary.frequency_dictionary import FrequencyDictionary
+from validation.standard_validator import StandardValidator
+from validation.frequency_2_words_validator import FrequencyValidator
+from segment import Segmenter
+from backtrack import Backtrack
 
-d = {}
-chunks = []
-
-def importFrequencyDictionary():
-    with open("dictionary_custom.txt") as f: #change namefile of custom dictionary
-        for line in f:
-            words = line.split()
-            d[words[0]] = words[1:]
-
-def createInternalDictionary():
-    for ch in chunks:
-        words = ch.split()
-        words.pop()
-        del words[0]
-
-        for w in words:
-            d[w] = 1
-
-def createDictionary(langFile: str):
-    global d
-    f = open(langFile)
-    for w in f:
-        w = w.rstrip('\n')
-        w = w.rstrip(' ')
-        d[w] = 1
-
-def checkValidityChunk(chunk: str) -> bool:
-    words = chunk.split()
-    if len(words) > 2:
-        words = words[1:-1]
-
-    return all(w.lower() in d for w in words if w.isalpha())
-
-def checkValidityText(current_text: str) -> bool:
-    for chunk in chunks:
-        if chunk.strip() not in current_text:
-            return False
-    words = current_text.split()
-    return all(w.lower() in d for w in words if w.isalpha()) #words valid check
-
-#uses default d as frequency dict
-def checkValidityChunkFrequency(candidate: str) -> bool:
-    words = candidate.split()
-
-    if len(words) > 2:
-        words = words[1:-1]
-    
-    for i, w in enumerate(words):
-        if (words[i+1] not in d[w]):
-            return False
-    return True
-
-#uses standard dictionary created by method of choice
-def backtrack(current_text: str, remaining: List[str], file, results: List[str]):
-        if not remaining:
-            if checkValidityText:
-                print("found!\a")
-                results.append(current_text)
-                file.write(f"{current_text}\n")
-            return
-        
-        for i, ch in enumerate(remaining):
-            candidate = current_text + ch
-            if checkValidityChunk(candidate): # checkValidityChunkFrequency(candidate, dict)
-                next_remaining = remaining[:i] + remaining[i+1:]
-                backtrack(candidate, next_remaining, file, results)
-
-def reconstructAllTexts(chunks: List[str]) -> List[str]:
-    results = []
-    file = open("found.txt", "a")
-
-    for i, ch in enumerate(chunks):
-        print(f"Trying starting chunk {i+1}/{len(chunks)}: {repr(ch)}")
-        rest = chunks[:i] + chunks[i+1:]
-        backtrack(ch, rest, file, results)
-        #backtrackFrequency(ch, rest, file, results)
-    
-    file.close()
-    return results
-
-#TODO change reconstructAllTexts to return only one valid result ?? keep for now
-#TODO simplify and organize functions and structures for creating/importing dicts
 def main():
-    global chunks
-    with open("out.txt") as f: #filename of segment output
-        for line in f:
-            chunks.append(line)
-    #createSelfDictionary()
-    #importFrequencyDictionary()
-    createDictionary("dict_en.txt")
-    results = reconstructAllTexts(chunks)
-    print(results)
+    seg = Segmenter("in.txt", "chunk_file.txt", 16)
+    #If needed, create chunks
+    seg.segment()
+    # Load chunks
+    chunks = seg.get_chunks()
+    
+    # Setup dictionary and validator
+        # frequency dictionary
+    #dictionary = FrequencyDictionary()
+    #dictionary.load("dictionary_custom.txt")
+    #validator = FrequencyValidator(dictionary, chunks)
 
-if __name__ == "__main__": main()
+    # standard
+    dictionary = StandardDictionary()
+    dictionary.load("dict_en.txt")
+    validator = StandardValidator(dictionary)
+    print("Using standard dictionary validation")
+    
+    print(f"Dictionary size: {len(dictionary.data)} words")
+    
+    # Reconstruct texts
+    reconstructor = Backtrack(validator, chunks)
+    
+    # find all results
+    results = reconstructor.reconstruct_all("found.txt")
+    print(f"Found {len(results)} valid reconstructions")
+    with open("found.txt", "a") as f:
+        for found in results:
+            f.write(found + "\n")
+    
+    # find first result
+    #result = reconstructor.reconstruct_one(chunks, "found.txt"))
+    #if result:
+    #    print(f"Found reconstruction: {result}")
+    #else:
+    #    print("No valid reconstruction found")
+
+if __name__ == "__main__":
+    main()
