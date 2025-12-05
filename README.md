@@ -10,8 +10,10 @@ This project takes a text that has been segmented into multiple chunks and attem
 
 **How to use**
 
- 1. Run segment.cpp and segment your file to "chunk_file.txt" (or change input file in main)
- 2.  Choose method of validation and dictionary
+Every choice is made by commenting or uncommenting neccessary lines in main.py.
+
+ 1. If needed, segment an input file
+ 2. Choose method of validation and dictionary
  3. Choose reconstruction strategy (find first/find all valid)
  4. Run main - reconstructed texts will be saved to found.txt
 
