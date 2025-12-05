@@ -26,20 +26,21 @@ class Backtrack:
                     return results[0]
         return None
     
-    def _backtrack(self, current_text: str, remaining: List[str], file, 
-                   results: List[str], find_all: bool):
-        if not remaining:
-            if self.validator.validate_text(current_text, self.all_chunks):
-                print("Found valid reconstruction!\a")
-                results.append(current_text)
-                file.write(f"{current_text}\n")
-            return
+    def _backtrack(self, current_text: str, remaining: List[str], file,
+               results: List[str], find_all: bool) -> bool:
         
-        if not find_all and results:
-            return
+        if self.validator.check_text(current_text, self.all_chunks):
+            results.append(current_text)
+            return True
         
-        for i, chunk in enumerate(remaining):
-            candidate = current_text + chunk
+        for i, ch in enumerate(remaining):
+            candidate = current_text + ch
+
             if self.validator.validate_chunk(candidate):
                 next_remaining = remaining[:i] + remaining[i+1:]
-                self._backtrack(candidate, next_remaining, file, results, find_all)
+
+                found = self._backtrack(candidate, next_remaining, file, results, find_all)
+
+                if found and not find_all:
+                    return True
+        return False
