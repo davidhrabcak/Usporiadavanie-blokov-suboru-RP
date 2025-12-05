@@ -29,7 +29,7 @@ class Backtrack:
     def _backtrack(self, current_text: str, remaining: List[str], file,
                results: List[str], find_all: bool) -> bool:
         
-        if self.validator.check_text(current_text, self.all_chunks):
+        if self.validator.validate_text(current_text, self.all_chunks):
             results.append(current_text)
             return True
         

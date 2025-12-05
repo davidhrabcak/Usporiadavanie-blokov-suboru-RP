@@ -14,11 +14,8 @@ class StandardValidator(BaseValidator):
         return all(self.dictionary.contains(w) for w in words if w.isalpha())
     
     def validate_text(self, text: str, required_chunks: List[str]) -> bool:
-        
-       
         for chunk in required_chunks:
-            clean_chunk = chunk.strip()
-            if clean_chunk not in text:
+            if chunk not in text:
                 return False
         
         words = text.split()

@@ -25,10 +25,10 @@ class Segmenter():
                     result.append(line)
         return result
 
-def main():
-    seg = Segmenter("in.txt", "chunk_file.txt", 16)
-    seg.segment()
-    print(seg.get_chunks())
+#def main():
+#    seg = Segmenter("in.txt", "chunk_file.txt", 16)
+#    seg.segment()
+#    print(seg.get_chunks())
 
-if __name__ == "__main__":
-    main()
+#if __name__ == "__main__":
+#    main()
