@@ -20,5 +20,5 @@ Every choice is made by commenting or uncommenting neccessary lines in main.py.
 **Progress**
  - [ ] Dictionary creator for 3-word sequences
  - [ ] Text reconstruction algorithm that uses frequency the frequency dictionary
- - [ ] Clean up file structure
- - [ ] Rewrite everything to python
+ - [X] Clean up file structure
+ - [X] Rewrite everything to python
