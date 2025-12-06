@@ -1,11 +1,7 @@
 """used for typing method arguments"""
-from typing import List, Optional, Dict
-from dictionary.base_dictionary import BaseDictionary
+from typing import List, Dict
 
-
-#TODO nedomyslene ako bude fungovat contains - ako budeme vediet z coordinates,
-# ktore v poradi je slovo v trojici?
-class ThreeSequenceDictionary(BaseDictionary):
+class ThreeSequenceDictionary():
     """Dictionary that saves three word sequences instead of only 2"""
     def __init__(self):
         super().__init__()
