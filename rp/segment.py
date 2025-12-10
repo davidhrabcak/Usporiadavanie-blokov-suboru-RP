@@ -2,7 +2,7 @@
 import subprocess
 from typing import List
 
-class Segmenter():
+class Segmenter:
     """Handles segmentation of the original file and loading segment chunks"""
     def __init__(self, input_file, output_file, segment_size):
         self.input_file = input_file

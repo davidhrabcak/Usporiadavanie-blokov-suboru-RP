@@ -1,5 +1,5 @@
 """used for sorting the words by their frequencies, typing method arguments,
-   defaultdict is used to prevent missing entries errors"""
+   default dict is used to prevent missing entries errors"""
 import heapq
 from collections import defaultdict
 from typing import List

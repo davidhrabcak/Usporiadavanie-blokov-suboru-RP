@@ -3,7 +3,7 @@ from typing import List, Optional
 from validation.base_validator import BaseValidator
 
 class Backtrack:
-    """Perfroms backtracking algoritm"""
+    """Performs backtracking algorithm"""
     def __init__(self, validator: BaseValidator, all_chunks: List[str]):
         self.validator = validator
         self.all_chunks = all_chunks

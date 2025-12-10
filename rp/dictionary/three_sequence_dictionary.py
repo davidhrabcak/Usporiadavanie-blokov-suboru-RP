@@ -6,7 +6,7 @@ class ThreeSequenceDictionary():
     def __init__(self):
         super().__init__()
         self.sequences: List[(str, str, str)] = []
-        self.coordinates: Dict[int, List[str]] = {}
+        self.coordinates: Dict[str, List[int]] = {}
 
     def load(self, sequences_file: str, coordinates_file: str) -> None:
         """loads the dictionary from source files"""
@@ -22,7 +22,7 @@ class ThreeSequenceDictionary():
                 self.coordinates[words[0]] = list(map(int, words[1:]))
 
     def contains(self, first_word: str, next_words: List[str]) -> bool:
-        """returns if there is an entry with first_word"""
+        """returns if there is an entry with first_word where next_words are the following words in sequence"""
         coordinates = self.coordinates[first_word]
         for c in coordinates:
             sequence = self.sequences[c]
@@ -30,5 +30,6 @@ class ThreeSequenceDictionary():
             for w in next_words:
                 if w not in sequence:
                     continue
-                return True
+
+            return True
         return False
