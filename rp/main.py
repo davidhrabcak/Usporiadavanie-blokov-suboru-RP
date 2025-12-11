@@ -3,7 +3,7 @@ from dictionary.standard_dictionary import StandardDictionary
 from validation.standard_validator import StandardValidator
 #from validation.frequency_2_words_validator import FrequencyValidator
 from segment import Segmenter
-from backtrack import Backtrack
+from algorithm.backtrack import Backtrack
 
 def main():
     """Executes main logic"""

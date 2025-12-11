@@ -1,8 +1,9 @@
 """used for typing of method arguments"""
 from typing import List, Optional
 from validation.base_validator import BaseValidator
+from algorithm.base_algorithm import BaseAlgorithm
 
-class Backtrack:
+class Backtrack(BaseAlgorithm):
     """Performs backtracking algorithm"""
     def __init__(self, validator: BaseValidator, all_chunks: List[str]):
         self.validator = validator

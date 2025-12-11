@@ -14,14 +14,14 @@ def main():
             words = input_file.split()
             dictionary: Dict[str, List[int]] = {}
             for word1, word2, word3 in zip (words[i:], words[i+1:], words[i+2:]):
-                dictionary.setdefault(word1, []).append(i)
-                dictionary.setdefault(word2, []).append(i+1)
-                dictionary.setdefault(word3, []).append(i+2)
-                sequences.write(f"{word1} {word2} {word3}\n")
+                dictionary.setdefault(word1.lower(), []).append(i)
+                dictionary.setdefault(word2.lower(), []).append(i+1)
+                dictionary.setdefault(word3.lower(), []).append(i+2)
+                sequences.write(f"{word1.lower()} {word2.lower()} {word3.lower()}\n")
                 i += 1
 
             for key, value in dictionary.items():
-                coordinates.write(key)
+                coordinates.write(key.lower())
                 for v in value:
                     coordinates.write(f" {v} ")
                 coordinates.write("\n")
