@@ -18,7 +18,6 @@ Every choice is made by commenting or uncommenting neccessary lines in main.py.
  4. Run main - reconstructed texts will be saved to found.txt
 
 **Progress**
- - [ ] Dictionary creator for 3-word sequences
- - [ ] Text reconstruction algorithm that uses frequency the frequency dictionary
+ - [X] Dictionary creator for 3-word sequences
  - [X] Clean up file structure
  - [X] Rewrite everything to python
