@@ -3,7 +3,7 @@ from typing import List
 
 class BaseValidator(ABC):
     @abstractmethod
-    def validate_chunk(self, chunk: str) -> bool:
+    def validate_chunk(self, chunk1: str, chunk2: str) -> bool:
         pass
     
     @abstractmethod

@@ -40,11 +40,10 @@ class Backtrack(BaseAlgorithm):
                 return True
 
             for i, ch in enumerate(remaining):
-                candidate = current_text + ch
-
-                if self.validator.validate_chunk(candidate):
+                if self.validator.validate_chunk(current_text, ch):
                     next_remaining = remaining[:i] + remaining[i+1:]
 
+                    candidate = current_text + ch
                     found = self._backtrack(candidate, next_remaining, file, results, find_all)
 
                     if found and not find_all:

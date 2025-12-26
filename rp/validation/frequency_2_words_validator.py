@@ -7,8 +7,8 @@ class FrequencyValidator(BaseValidator):
         self.dictionary = dictionary
         self.all_chunks = chunks
     
-    def validate_chunk(self, chunk: str) -> bool:
-        words = chunk.split()
+    def validate_chunk(self, chunk1: str, chunk2: str) -> bool:
+        words = (chunk1 + chunk2).split()
         if len(words) <= 1:
             return True
         
