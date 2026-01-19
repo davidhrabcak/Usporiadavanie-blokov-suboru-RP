@@ -7,17 +7,15 @@ class FrequencyThreeWordsValidator:
         self.all_chunks = chunks
 
     def validate_chunk(self, chunk1: str, chunk2: str) -> bool:
-        words = (chunk1 + chunk2).split()
-        if len(words) < 3: return True
-        if (len(words) == 3 and words[0] in self.dictionary.dictionary):
-            return self.dictionary.contains(words[0], words[1:])
-        sequence = (chunk1[-2] + chunk1[-1] + chunk2[0] + chunk2[1]).split()
-        return self.dictionary.contains(sequence[0], sequence[1:])
+        if len(chunk1.split()) < 2 or len(chunk2.split()) < 2: return True
 
-    def _validate_sequence(self, words: List[str]) -> bool:
-        if len(words) < 3: return True
-        return self.dictionary.contains(words[0], words[1:])
+        if chunk1[-1] == ' ' or chunk2[0] == ' ':
+            words = [chunk1.split()[-2], chunk1.split()[-1], chunk2.split()[0], chunk2.split()[1]]
+            return (self.dictionary.contains(words[2], [words[1], words[3]]) and
+                    self.dictionary.contains(words[1], [words[0], words[2]]))
+        else:
+            words = [chunk1.split()[-2], chunk1.split()[-1] + chunk2.split()[0], chunk2.split()[1]]
+            return self.dictionary.contains(words[1], [words[0], words[2]])
 
     def validate_text(self, text: str, required_chunks: List[str]) -> bool:
-        if not self._validate_sequence(text.split()): return False
         return all(ch in text for ch in required_chunks)

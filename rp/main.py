@@ -7,7 +7,7 @@ from algorithm.backtrack import Backtrack
 
 def main():
     """Executes main logic"""
-    seg = Segmenter("in.txt", "chunk_file.txt", 16)
+    seg = Segmenter("in.txt", "chunk_file.txt", 2)
     #If needed, create chunks
     seg.segment()
     # Load chunks

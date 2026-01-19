@@ -2,6 +2,7 @@
 and accessing arguments the script has been called with"""
 from sys import argv
 from typing import Dict, List
+import re
 
 
 def main():
@@ -13,6 +14,7 @@ def main():
         words = input_file.split()
         dictionary: Dict[str, List[int]] = {}
         for word in words:
+            word =  re.sub(r"[^A-Za-z\-]", '', word)
             dictionary.setdefault(word.lower(), []).append(i)
             i += 1
 

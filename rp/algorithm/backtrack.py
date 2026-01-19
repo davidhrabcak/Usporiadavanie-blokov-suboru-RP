@@ -12,11 +12,10 @@ class Backtrack(BaseAlgorithm):
     def reconstruct_all(self, output_file: str) -> List[str]:
         """Reconstructs all valid text based on validator"""
         results = []
-        with open(output_file, "a", encoding="ascii") as file:
-            for i, chunk in enumerate(self.all_chunks):
-                print(f"Trying starting chunk {i+1}/{len(self.all_chunks)}: {repr(chunk)}")
-                remaining = self.all_chunks[:i] + self.all_chunks[i+1:]
-                self._backtrack(chunk, remaining, file, results, find_all=True)
+        for i, chunk in enumerate(self.all_chunks):
+            print(f"Trying starting chunk {i+1}/{len(self.all_chunks)}: {repr(chunk)}")
+            remaining = self.all_chunks[:i] + self.all_chunks[i+1:]
+            self._backtrack(chunk, remaining, output_file, results, True)
         return results
 
     def reconstruct_one(self, output_file: str) -> Optional[str]:
@@ -25,27 +24,30 @@ class Backtrack(BaseAlgorithm):
             print(f"Trying starting chunk {i+1}/{len(self.all_chunks)}: {repr(chunk)}")
             remaining = self.all_chunks[:i] + self.all_chunks[i+1:]
             results = []
-            self._backtrack(chunk, remaining, output_file, results, find_all=False)
+            self._backtrack(chunk, remaining, output_file, results, False)
             if results:
                 return results[0]
         return None
 
-    def _backtrack(self, current_text: str, remaining: List[str], file,
+    def _backtrack(self, current_text: str, remaining: List[str], file: str,
                results: List[str], find_all: bool) -> bool:
         """helper backtracking function"""
-        with open(file, "a", encoding="ascii") as f:
-            if self.validator.validate_text(current_text, self.all_chunks):
+
+
+        if self.validator.validate_text(current_text, self.all_chunks):
+            with open(file, "a") as f:
                 results.append(current_text)
+                print("Found chunk:" + current_text + " [end of chunk]")
                 f.write(current_text + '\n')
                 return True
 
-            for i, ch in enumerate(remaining):
-                if self.validator.validate_chunk(current_text, ch):
-                    next_remaining = remaining[:i] + remaining[i+1:]
+        for i, ch in enumerate(remaining):
+            if self.validator.validate_chunk(current_text, ch):
+                next_remaining = remaining[:i] + remaining[i+1:]
 
-                    candidate = current_text + ch
-                    found = self._backtrack(candidate, next_remaining, file, results, find_all)
+                candidate = current_text + ch
+                found = self._backtrack(candidate, next_remaining, file, results, find_all)
 
-                    if found and not find_all:
-                        return True
+                if found and not find_all:
+                    return True
         return False
