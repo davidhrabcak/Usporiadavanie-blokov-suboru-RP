@@ -2,7 +2,7 @@
 from typing import List, Dict
 import re
 
-class ThreeSequenceDictionary():
+class ThreeSequenceDictionary:
     """Dictionary that saves three word sequences instead of only 2"""
     def __init__(self):
         super().__init__()

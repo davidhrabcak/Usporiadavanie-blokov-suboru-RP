@@ -11,43 +11,49 @@ class Backtrack(BaseAlgorithm):
 
     def reconstruct_all(self, output_file: str) -> List[str]:
         """Reconstructs all valid text based on validator"""
-        results = []
-        for i, chunk in enumerate(self.all_chunks):
-            print(f"Trying starting chunk {i+1}/{len(self.all_chunks)}: {repr(chunk)}")
-            remaining = self.all_chunks[:i] + self.all_chunks[i+1:]
-            self._backtrack(chunk, remaining, output_file, results, True)
+        l = len(self.all_chunks)
+        results: List[str] = []
+        used = [False] * l
+
+        with open(output_file, "a") as f:
+            for i in range(l):
+                print(f"Trying starting chunk {i+1}/{l}: {repr(self.all_chunks[i])}")
+                used[i] = True
+                self._backtrack(self.all_chunks[i], used, f, results, find_all=True)
+                used[i] = False
+
         return results
 
     def reconstruct_one(self, output_file: str) -> Optional[str]:
         """Reconstructs first valid text based on validator"""
-        for i, chunk in enumerate(self.all_chunks):
-            print(f"Trying starting chunk {i+1}/{len(self.all_chunks)}: {repr(chunk)}")
-            remaining = self.all_chunks[:i] + self.all_chunks[i+1:]
-            results = []
-            self._backtrack(chunk, remaining, output_file, results, False)
-            if results:
-                return results[0]
+        used = [False] * len(self.all_chunks)
+
+        with open(output_file, "a") as f:
+            for i in range(len(self.all_chunks)):
+                used[i] = True
+                print(f"Trying starting chunk {i+1}/{len(self.all_chunks)}: {repr(self.all_chunks[i])}")
+                result = self._backtrack(self.all_chunks[i], used, f, [], find_all=False)
+                used[i] = False
+                if result: return result
+
         return None
 
-    def _backtrack(self, current_text: str, remaining: List[str], file: str,
-               results: List[str], find_all: bool) -> bool:
+
+    def _backtrack(self, current_text: str, used: List[bool], file, results: List[str], find_all: bool) -> List[str] | Optional[str]:
         """helper backtracking function"""
-
-
-        if self.validator.validate_text(current_text, self.all_chunks):
-            with open(file, "a") as f:
+        if all(used):
+            if self.validator.validate_text(current_text, self.all_chunks):
                 results.append(current_text)
-                print("Found chunk:" + current_text + " [end of chunk]")
-                f.write(current_text + '\n')
-                return True
+                file.write(current_text + "\n")
+                return current_text if not find_all else None
+            return None
+        for i in range(len(self.all_chunks)):
+            if not used[i]:
+                ch = self.all_chunks[i]
+                if self.validator.validate_chunk(current_text, ch):
+                    used[i] = True
+                    found = self._backtrack(current_text + ch, used, file, results, find_all)
+                    used[i] = False
+                    if found and not find_all: return found
 
-        for i, ch in enumerate(remaining):
-            if self.validator.validate_chunk(current_text, ch):
-                next_remaining = remaining[:i] + remaining[i+1:]
-
-                candidate = current_text + ch
-                found = self._backtrack(candidate, next_remaining, file, results, find_all)
-
-                if found and not find_all:
-                    return True
-        return False
+        return None

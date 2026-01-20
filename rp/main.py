@@ -7,7 +7,7 @@ from algorithm.backtrack import Backtrack
 
 def main():
     """Executes main logic"""
-    seg = Segmenter("in.txt", "chunk_file.txt", 2)
+    seg = Segmenter("in.txt", "chunk_file.txt", 32)
     #If needed, create chunks
     seg.segment()
     # Load chunks
@@ -31,18 +31,18 @@ def main():
     reconstructor = Backtrack(validator, chunks)
 
     # find all results
-    results = reconstructor.reconstruct_all("found.txt")
-    print(f"Found {len(results)} valid reconstructions")
-    with open("found.txt", "a", encoding="ascii") as f:
-        for found in results:
-            f.write(found + "\n")
+    #results = reconstructor.reconstruct_all("found.txt")
+    #print(f"Found {len(results)} valid reconstructions")
+    #with open("found.txt", "a", encoding="ascii") as f:
+    #    for found in results:
+    #        f.write(found + "\n")
 
-    # find first result
-    #result = reconstructor.reconstruct_one(chunks, "found.txt"))
-    #if result:
-    #    print(f"Found reconstruction: {result}")
-    #else:
-    #    print("No valid reconstruction found")
+    # find the first result
+    result = reconstructor.reconstruct_one("found.txt")
+    if result:
+        print(f"Found reconstruction: {result}")
+    else:
+        print("No valid reconstruction found")
 
 if __name__ == "__main__":
     main()
