@@ -21,7 +21,7 @@ class Segmenter:
         """Return chunks in output file"""
         result = []
 
-        with open(self.output_file, encoding="ascii") as f:
+        with open(self.output_file) as f:
             for line in f:
                 if len(line) > 1:
                     result.append(line[:-1])

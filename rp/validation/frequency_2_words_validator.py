@@ -1,5 +1,5 @@
 from .base_validator import BaseValidator
-from dictionary.frequency_dictionary import FrequencyDictionary
+from dictionary.two_sequence_dictionary import FrequencyDictionary
 from typing import List
 
 class FrequencyValidator(BaseValidator):

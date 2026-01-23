@@ -7,9 +7,9 @@ import re
 
 def main():
     """main of three segment file creator"""
-    with open(argv[1], "r", encoding="ascii") as f:
+    with open(argv[1], "r") as f:
         input_file = f.read()
-    with open(argv[2], "a", encoding="ascii") as coordinates:
+    with open(argv[2], "a") as coordinates:
         i = 0
         words = input_file.split()
         dictionary: Dict[str, List[int]] = {}

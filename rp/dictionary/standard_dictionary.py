@@ -11,7 +11,7 @@ class StandardDictionary(BaseDictionary):
 
     def load(self, source: str) -> None:
         """Loads dictionary from source file"""
-        with open(source, 'r', encoding="ascii") as f:
+        with open(source, 'r') as f:
             for line in f:
                 word = line.strip().lower()
                 if word:

@@ -8,7 +8,7 @@ class FrequencyDictionary(BaseDictionary):
 
     def load(self, source: str) -> None:
         """Loads created dictionary from a file"""
-        with open(source, 'r', encoding="ascii") as f:
+        with open(source, 'r') as f:
             for line in f:
                 words = line.split()
                 if len(words) >= 2:

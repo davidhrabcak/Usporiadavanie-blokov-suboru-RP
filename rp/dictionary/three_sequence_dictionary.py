@@ -11,13 +11,13 @@ class ThreeSequenceDictionary:
 
     def load(self, source_file: str, coordinates_file: str) -> None:
         """loads the dictionary from source files"""
-        with open(source_file, "r", encoding="ascii") as f1:
+        with open(source_file, "r") as f1:
             for line in f1:
                 for word in line.split():
                     word = re.sub(r"[^A-Za-z\-]", '', word)
                     self.dictionary.append(word.lower())
 
-        with open(coordinates_file, "r", encoding="ascii") as f2:
+        with open(coordinates_file, "r") as f2:
             for line in f2:
                 words = line.split()
                 self.coordinates[words[0]] = list(map(int, words[1:]))

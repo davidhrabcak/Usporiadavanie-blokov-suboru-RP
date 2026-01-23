@@ -38,7 +38,7 @@ class WordFollowerDictionary:
     def run(self, output_filename: str = "dictionary_custom.txt"):
         """Creates the dictionary"""
 
-        with open("input_books.txt", "r", encoding="ascii") as f:
+        with open("input_books.txt", "r") as f:
             data = f.read()
 
         words_raw = data.split()
@@ -47,7 +47,7 @@ class WordFollowerDictionary:
         result_dict = self.build_dictionary(words_clean)
 
 
-        with open(output_filename, "w", encoding="ascii") as out:
+        with open(output_filename, "w") as out:
             for word, followers in result_dict.items():
                 out.write(word + " " + " ".join(followers) + "\n")
 

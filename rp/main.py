@@ -7,7 +7,7 @@ from algorithm.backtrack import Backtrack
 
 def main():
     """Executes main logic"""
-    seg = Segmenter("in.txt", "chunk_file.txt", 32)
+    seg = Segmenter("in.txt", "chunk_file.txt", 6)
     #If needed, create chunks
     seg.segment()
     # Load chunks
@@ -21,7 +21,7 @@ def main():
 
     # standard
     dictionary = StandardDictionary()
-    dictionary.load("dict_en.txt")
+    dictionary.load("dictionary/aspell-es-words.txt")
     validator = StandardValidator(dictionary)
     print("Using standard dictionary validation")
 
