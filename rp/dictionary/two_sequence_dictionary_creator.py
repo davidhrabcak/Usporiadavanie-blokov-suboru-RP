@@ -11,7 +11,7 @@ class WordFollowerDictionary:
     def __init__(self, max_toplist: int = 10):
         self.max_toplist = max_toplist
 
-    def build_dictionary(self, words: List[str]):
+    def _build_dictionary(self, words: List[str]):
         """Internal method that builds the dictionary"""
         freq = defaultdict(lambda: defaultdict(int))
 
@@ -35,16 +35,16 @@ class WordFollowerDictionary:
 
         return dictionary
 
-    def run(self, output_filename: str = "dictionary_custom.txt"):
+    def run(self, input_filename: str, output_filename: str = "dictionary_custom.txt"):
         """Creates the dictionary"""
 
-        with open("input_books.txt", "r") as f:
+        with open(input_filename, "r") as f:
             data = f.read()
 
         words_raw = data.split()
         words_clean = [w.lower() for w in words_raw if w]
 
-        result_dict = self.build_dictionary(words_clean)
+        result_dict = self._build_dictionary(words_clean)
 
 
         with open(output_filename, "w") as out:

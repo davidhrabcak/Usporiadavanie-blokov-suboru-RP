@@ -10,14 +10,12 @@ class StandardValidator(BaseValidator):
         self.dictionary = dictionary
 
     def validate_chunk(self, chunk1: str, chunk2: str) -> bool:
-        # Fast boundary check
         if chunk1[-1] == ' ' or chunk2[0] == ' ':
             return True
 
         words1 = chunk1.split()
         words2 = chunk2.split()
 
-        # Not enough context to validate
         if len(words1) < 2 or len(words2) < 2:
             return True
 
