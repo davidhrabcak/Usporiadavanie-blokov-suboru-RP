@@ -16,7 +16,7 @@ def main():
 
     # Setup dictionary and validator
         # frequency dictionary
-    creator = WordFollowerDictionary(50)
+    creator = WordFollowerDictionary(500)
     creator.run("training.txt")
     dictionary = FrequencyDictionary()
     dictionary.load("dictionary_custom.txt")
@@ -41,9 +41,10 @@ def main():
     #        f.write(found + "\n")
 
     # find the first result
-    result = reconstructor.reconstruct_one("found.txt")
+    result = reconstructor.reconstruct_all("found.txt")
     if result:
         print(f"Found reconstruction: {result}")
+        print(len(result))
     else:
         print("No valid reconstruction found")
 
