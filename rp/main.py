@@ -7,7 +7,7 @@ from algorithm.backtrack import Backtrack
 
 def main():
     """Executes main logic"""
-    seg = Segmenter("in.txt", "chunk_file.txt", 6)
+    seg = Segmenter("in.txt", "chunk_file.txt", 10)
     #If needed, create chunks
     seg.segment()
     # Load chunks
@@ -21,7 +21,7 @@ def main():
 
     # standard
     dictionary = StandardDictionary()
-    dictionary.load("dictionary/aspell-es-words.txt")
+    dictionary.load("dict_c.txt")
     validator = StandardValidator(dictionary)
     print("Using standard dictionary validation")
 
@@ -38,7 +38,7 @@ def main():
     #        f.write(found + "\n")
 
     # find the first result
-    result = reconstructor.reconstruct_one("found.txt")
+    result = reconstructor.reconstruct_all("found.txt")
     if result:
         print(f"Found reconstruction: {result}")
     else:

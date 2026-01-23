@@ -1,7 +1,7 @@
 """used for typing of method arguments"""
 
 from typing import List
-
+import re
 from dictionary.base_dictionary import BaseDictionary
 
 class StandardDictionary(BaseDictionary):
@@ -18,7 +18,7 @@ class StandardDictionary(BaseDictionary):
                     self.data[word] = True
 
     def load_from_chunks(self, chunks: List[str]) -> None:
-        """Creates a dictionary from words inside of chunks"""
+        """Creates a dictionary from words inside chunks"""
 
         for chunk in chunks:
             words = chunk.split()
@@ -26,5 +26,5 @@ class StandardDictionary(BaseDictionary):
                 word = words[1:-1]
 
             for word in words:
-                if word.isalpha():
-                    self.data[word.lower()] = True
+                word = re.sub(r"[^A-Za-z\-]", '', word)
+                self.data[word.lower()] = True
