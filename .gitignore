@@ -5,4 +5,4 @@ rp/segment
 rp/segment_*
 dictionary_creator
 rp/main.py
-_pycache
+__pycache__
