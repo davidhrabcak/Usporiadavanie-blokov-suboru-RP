@@ -1,7 +1,9 @@
 from typing import List
 from dictionary.three_sequence_dictionary import ThreeSequenceDictionary
+from validation.base_validator import BaseValidator
 
-class FrequencyThreeWordsValidator:
+
+class FrequencyThreeWordsValidator(BaseValidator):
     def __init__(self, dictionary: ThreeSequenceDictionary, chunks: List[str]):
         self.dictionary = dictionary
         self.all_chunks = chunks
