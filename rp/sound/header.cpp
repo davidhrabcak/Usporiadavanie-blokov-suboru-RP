@@ -49,6 +49,10 @@ private:
 
         decodeVersion(versionID);
         decodeLayer(layerIndex);
+        decodeBitrate(bitrateIndex, versionID, layerIndex);
+        decodeSampleRate(sampleIndex, versionID);
+        decodeChannelMode(channelIndex);
+        frameLength = length(padding, protectionBit, layerIndex);
     }
 
     void decodeVersion(const uint8_t versionID) {
@@ -105,7 +109,7 @@ private:
         }
     }
 
-    void decodeSampleRate(uint8_t sampleRateIndex, const uint8_t versionID) {
+    void decodeSampleRate(const uint8_t sampleRateIndex, const uint8_t versionID) {
         static const int v1[4] = {44100, 48000, 32000, 0};
         static const int v2[4] = {22050, 24000, 16000 ,0};
         static const int v2_5[4] = {11025, 12000, 8000, 0};
@@ -120,12 +124,42 @@ private:
         }
     }
 
-
-
-    int length() const {
-        return 0;
+    void decodeChannelMode(const uint8_t channelIndex) {
+        switch (channelIndex) {
+            case 0x00: channelMode = "Stereo"; break;
+            case 0x01: channelMode = "Joint stereo"; break;
+            case 0x10: channelMode = "Dual channel"; break;
+            case 0x11: channelMode = "Mono"; break;
+            default: cout << "decodeChannelMode: Invalid channel index " << channelIndex << endl;
+        }
     }
 
+    int length(const bool padding, const bool protectionBit, const uint8_t layerIndex) const {
+        // samples per frame
+        const int v1[3] = {384, 1152, 1152};
+        const int v2[3] = {384, 1152, 576};
+        const int v2_5[3] = {384, 1152, 576};
+
+        const uint8_t crcLength = (protectionBit) ? 0 : 16;
+
+        switch (layerIndex) {
+            case 0x11: {
+                const uint8_t paddingLength = (padding) ? 32 : 0;
+                return 144 * ((double)bitrate / sampleRate) + paddingLength + crcLength;
+            }
+
+
+            case 0x01: {
+                const uint8_t paddingLength = (padding) ? 8 : 0;
+                return 144 * ((double)bitrate / sampleRate) + paddingLength + crcLength;
+            }
+
+            case 0x10: {
+                const uint8_t paddingLength = (padding) ? 8 : 0;
+                return 144 * ((double)bitrate / sampleRate) + paddingLength + crcLength;
+            }
+        }
+    }
 
 };
 
