@@ -52,23 +52,23 @@ private:
         decodeBitrate(bitrateIndex, versionID, layerIndex);
         decodeSampleRate(sampleIndex, versionID);
         decodeChannelMode(channelIndex);
-        frameLength = length(padding, protectionBit, layerIndex);
+        frameLength = length(padding, protectionBit, layerIndex, versionID);
     }
 
     void decodeVersion(const uint8_t versionID) {
         switch (versionID) {
-            case 0x00: mpegVersion = "MPEG 2.5"; break;
-            case 0x10: mpegVersion = "MPEG 2"; break;
-            case 0x11: mpegVersion = "MPEG 1"; break;
+            case 0b00: mpegVersion = "MPEG 2.5"; break;
+            case 0b10: mpegVersion = "MPEG 2"; break;
+            case 0b11: mpegVersion = "MPEG 1"; break;
             default: mpegVersion = "unknown versionID " + to_string(versionID); break;
         }
     }
 
     void decodeLayer(const uint8_t layerIndex) {
         switch (layerIndex) {
-            case 0x01: layer = "Layer III"; break;
-            case 0x10: layer = "Layer II"; break;
-            case 0x11: layer = "Layer I"; break;
+            case 0b01: layer = "Layer III"; break;
+            case 0b10: layer = "Layer II"; break;
+            case 0b11: layer = "Layer I"; break;
             default: layer = "unknown layerIndex " + to_string(layerIndex); break;
         }
     }
@@ -77,13 +77,13 @@ private:
         static const int v1L1[16] = {0, 32, 64, 96, 128, 160, 192, 224,
                                     256, 288, 320, 352, 384, 416, 448, -1};
         static const int v1L2[16] = {0, 32, 48, 56, 64, 80, 96, 112,
-                                    128, 160, 192, 224, 256, 320, -1};
+                                    128, 160, 192, 224, 256, 320, 384, -1};
         static const int v1L3[16] = {0, 32, 40, 48, 56, 64, 80, 96,
                                     112, 128, 160, 192, 224, 256, 320, -1};
         static const int v2L1[16] = {0, 32, 48, 56, 64, 80, 96, 112,
                                     128, 144, 160, 176, 192, 224, 256, -1};
         static const int v2All[16] = {0, 8, 16, 24, 32, 40, 48, 56,
-                                     64, 80, 96, 112, 144, 160, -1};
+                                     64, 80, 96, 112, 128, 144, 160, -1};
         // 0 = free format - bitrate is different to predetermined values
         // L3 could have VBR!!
 
@@ -92,17 +92,17 @@ private:
         }
 
         switch (layerIndex) {
-            case 0x01: {
-                if (versionID == 0x11) bitrate = v1L3[bitrateIndex];
+            case 0b01: {
+                if (versionID == 0b11) bitrate = v1L3[bitrateIndex];
                 else bitrate = v2All[bitrateIndex];
                 break;
             }
-            case 0x10: {
-                if (versionID == 0x11) bitrate = v1L2[bitrateIndex];
+            case 0b10: {
+                if (versionID == 0b11) bitrate = v1L2[bitrateIndex];
                 else bitrate = v2All[bitrateIndex];
             }
-            case 0x11: {
-                if (versionID == 0x11) bitrate = v1L1[bitrateIndex];
+            case 0b11: {
+                if (versionID == 0b11) bitrate = v1L1[bitrateIndex];
                 else bitrate = v2L1[bitrateIndex];
             }
             default: cout << "decodeBitrate: Unknown layer index " << layerIndex << endl;
@@ -117,24 +117,24 @@ private:
         if (sampleRateIndex > 4) cout << "Invalid bitrate index " << sampleRateIndex << endl;
 
         switch (versionID) {
-            case 0x00: sampleRate = v2_5[sampleRateIndex]; break;
-            case 0x10: sampleRate = v2[sampleRateIndex]; break;
-            case 0x11: sampleRate = v1[sampleRateIndex]; break;
+            case 0b00: sampleRate = v2_5[sampleRateIndex]; break;
+            case 0b10: sampleRate = v2[sampleRateIndex]; break;
+            case 0b11: sampleRate = v1[sampleRateIndex]; break;
             default: cout << "decodeSampleRate: Invalid MPEG version." << endl;
         }
     }
 
     void decodeChannelMode(const uint8_t channelIndex) {
         switch (channelIndex) {
-            case 0x00: channelMode = "Stereo"; break;
-            case 0x01: channelMode = "Joint stereo"; break;
-            case 0x10: channelMode = "Dual channel"; break;
-            case 0x11: channelMode = "Mono"; break;
+            case 0b00: channelMode = "Stereo"; break;
+            case 0b01: channelMode = "Joint stereo"; break;
+            case 0b10: channelMode = "Dual channel"; break;
+            case 0b11: channelMode = "Mono"; break;
             default: cout << "decodeChannelMode: Invalid channel index " << channelIndex << endl;
         }
     }
 
-    int length(const bool padding, const bool protectionBit, const uint8_t layerIndex) const {
+    int length(const bool padding, const bool protectionBit, const uint8_t layerIndex, const uint8_t versionID) const {
         // samples per frame
         const int v1[3] = {384, 1152, 1152};
         const int v2[3] = {384, 1152, 576};
@@ -142,21 +142,35 @@ private:
 
         const uint8_t crcLength = (protectionBit) ? 0 : 16;
 
+        uint8_t layerIdx = 0;
         switch (layerIndex) {
-            case 0x11: {
-                const uint8_t paddingLength = (padding) ? 32 : 0;
-                return 144 * ((double)bitrate / sampleRate) + paddingLength + crcLength;
+            case 0b11: layerIdx = 0; break;
+            case 0b01: layerIdx = 1; break;
+            case 0b10: layerIdx = 2; break;
+            default: {
+                cout << "Invalid layer index " << layerIndex << endl;
             }
+        }
+
+        switch (versionID) {
+        case 0b11: {
+            const uint8_t paddingLength = (padding) ? 32 : 0;
+            return (144 * bitrate / (sampleRate / 1000.0)) + paddingLength + crcLength;
+        }
 
 
-            case 0x01: {
-                const uint8_t paddingLength = (padding) ? 8 : 0;
-                return 144 * ((double)bitrate / sampleRate) + paddingLength + crcLength;
-            }
+        case 0b00: {
+            const uint8_t paddingLength = (padding) ? 8 : 0;
+            return ((v2_5[layerIdx] / 8 * bitrate) / (sampleRate / 1000.0)) + paddingLength + crcLength;
+        }
 
-            case 0x10: {
-                const uint8_t paddingLength = (padding) ? 8 : 0;
-                return 144 * ((double)bitrate / sampleRate) + paddingLength + crcLength;
+        case 0b10: {
+            const uint8_t paddingLength = (padding) ? 8 : 0;
+            return ((v2[layerIdx] / 8 * bitrate) / (sampleRate / 1000.0)) + paddingLength + crcLength;
+        }
+        default: {
+            cout << "length: Invalid MPEG version." << endl;
+            return -1;
             }
         }
     }
@@ -164,6 +178,10 @@ private:
 };
 
 int main() {
-    // constexpr unsigned int input = 0b1111111111110101010101010000111;
-    // Header const header(input);input
+    uint32_t input = 0b1111'1111'1111'1011'1001'0000'0110'0100;
+    Header const header(input);
+    cout << header.getBitrate() << " kbps" << endl;
+    cout << header.getMpegVersion() << endl;
+    cout << header.getLayer() << endl;
+    cout << header.getFrameLength() << " bytes long" << endl;
 }
