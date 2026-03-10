@@ -6,7 +6,7 @@
 
 class Header {
 public:
-    explicit Header(unsigned int input);
+    explicit Header(unsigned int input, int &output);
 
     uint32_t getRaw() const;
     std::string getMpegVersion() const;
@@ -31,15 +31,15 @@ private:
 
     bool synchValid() const;
 
-    void decode();
-    void decodeVersion(uint8_t versionID);
-    void decodeLayer(uint8_t layerIndex);
-    void decodeBitrate(uint8_t bitrateIndex,
+    int decode();
+    bool decodeVersion(uint8_t versionID);
+    bool decodeLayer(uint8_t layerIndex);
+    bool decodeBitrate(uint8_t bitrateIndex,
                        uint8_t versionID,
                        uint8_t layerIndex);
-    void decodeSampleRate(uint8_t sampleRateIndex,
+    bool decodeSampleRate(uint8_t sampleRateIndex,
                           uint8_t versionID);
-    void decodeChannelMode(uint8_t channelIndex);
+    bool decodeChannelMode(uint8_t channelIndex);
 
     int length(bool padding,
                bool protectionBit,

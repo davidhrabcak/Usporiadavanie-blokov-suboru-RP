@@ -104,8 +104,15 @@ private:
                 ++i;
                 continue;
             }
-
-            Header header(headerRaw);
+            int return_value;
+            Header header(headerRaw, return_value);
+            if (return_value != 0) {
+                switch (return_value) {
+                    case -1: {
+                        //TODO dopisat vypis kazdej chyby,  scanFrames by tiez mala vratit bool
+                    }
+                }
+            }
 
             const int frameLength = header.getFrameLength();
 
