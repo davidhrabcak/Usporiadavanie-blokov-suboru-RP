@@ -3,33 +3,9 @@
 #include <cstdint>
 #include <iostream>
 #include "Header.hpp"
+#include "frame_scanner.hpp"
 
 using namespace std;
-
-struct FrameData {
-    string mpeg_version;
-    string layer;
-    bool crc;
-    int bitrate;
-    int sample_rate;
-    string channel_mode;
-};
-
-struct FrameInfo {
-    size_t position;   // byte offset in file
-    int length;     // frame length in bytes
-    FrameData frame_data;
-};
-
-ostream& operator<<(ostream &os, const FrameData& data) {
-    os << "MPEG: " << data.mpeg_version << endl;
-    os << "Layer: " << data.layer << endl;
-    os << "CRC: " << ((data.crc) ? "Used" : "Not used") << endl;
-    os << "Bitrate: " << data.bitrate << endl;
-    os << "Sample rate: " << data.sample_rate << endl;
-    os << "Channel mode: " << data.channel_mode << endl;
-    return os;
-}
 
 class Mp3FrameScanner {
 public:
@@ -37,11 +13,11 @@ public:
         loadFile(filename);
     }
 
-    const vector<FrameInfo>& getFrames() const {
+    const vector<FrameInfo>& getFrames() {
         return frames;
     }
 
-    unsigned long getFrameCount() const {
+    unsigned long getFrameCount(){
         return frames.size();
     }
 
@@ -109,8 +85,29 @@ private:
             if (return_value != 0) {
                 switch (return_value) {
                     case -1: {
-                        //TODO dopisat vypis kazdej chyby,  scanFrames by tiez mala vratit bool
+                        cout << "Failed to decode version, frame " + i << endl;
+                        break;
                     }
+                    case -2: {
+                        cout << "Failed to decode layer, frame " << i << endl;
+                        break;
+                    }
+                    case -3: {
+                        cout << "Failed to decode bitrate, frame " << i << endl;
+                        break;
+                    }
+                    case -4: {
+                        cout << "Failed to decode sample_rate, frame " << i << endl;
+                    }
+                        case -5: {
+                        cout << "Failed to decode channel mode, frame " << i << endl;
+                        break;
+                    }
+                        default: {
+                        cout << "Unknown error frame " << i << endl;
+                        break;
+                    }
+
                 }
             }
 
@@ -121,7 +118,7 @@ private:
                 continue;
             }
 
-            // Ensure frame fits in file
+            // frame fits in file
             if (i + frameLength > data.size()) {
                 break;
             }
