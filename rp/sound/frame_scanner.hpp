@@ -13,7 +13,7 @@ struct FrameData {
     std::string channel_mode;
 };
 
-std::ostream& operator<<(std::ostream &os, const FrameData& data) {
+inline std::ostream& operator<<(std::ostream &os, const FrameData& data) {
     os << "MPEG: " << data.mpeg_version << std::endl;
     os << "Layer: " << data.layer << std::endl;
     os << "CRC: " << ((data.crc) ? "Used" : "Not used") << std::endl;
@@ -24,8 +24,8 @@ std::ostream& operator<<(std::ostream &os, const FrameData& data) {
 }
 
 struct FrameInfo {
-    size_t position;   // byte offset in file
-    int length;     // frame length in bytes
+    size_t position{};   // byte offset in file
+    int length{};     // frame length in bytes
     FrameData frame_data;
 };
 
@@ -38,6 +38,12 @@ class Mp3FrameScanner {
     FrameData getFrame(size_t index);
 
     private:
+
+    std::vector<uint8_t> data;
+    std::vector<FrameInfo> frames;
+    std::vector<FrameData> frame_data;
+
+
     void loadFile(const std::string& filename);
     size_t skipID3() const;
     static bool isValidHeader(uint32_t headerRaw);

@@ -9,7 +9,7 @@ Header::Header(const unsigned int input, int &output) {
     if (synchValid()) {
         output = decode();
     } else {
-        cout << "Invalid input" << endl;
+        cerr << "Invalid input" << endl;
     }
 }
 
@@ -42,7 +42,7 @@ int Header::decode() {
     if (decodeSampleRate(sampleIndex, versionID)) return -4;
     if (decodeChannelMode(channelIndex)) return -5;
 
-    frameLength = length(padding, protectionBit, layerIndex, versionID);
+    frameLength = length(padding, protectionBit, versionID);
     return 0;
 }
 
@@ -88,7 +88,7 @@ bool Header::decodeBitrate(const uint8_t bitrateIndex,
                                  64, 80, 96, 112, 128, 144, 160, -1};
 
     if (bitrateIndex > 15) {
-        cout << "Invalid bitrate index" << endl;
+        cerr << "Invalid bitrate index" << endl;
         return false;
     }
 
@@ -109,7 +109,7 @@ bool Header::decodeBitrate(const uint8_t bitrateIndex,
             return true;
 
         default: {
-            cout << "decodeBitrate: Unknown layer index " << int(layerIndex) << endl;
+            cerr << "decodeBitrate: Unknown layer index " << int(layerIndex) << endl;
             return false;
         }
     }
@@ -123,7 +123,7 @@ bool Header::decodeSampleRate(uint8_t sampleRateIndex,
     static const int v2_5[4] = {11025, 12000, 8000, 0};
 
     if (sampleRateIndex > 3) {
-        cout << "Invalid sample rate index " << int(sampleRateIndex) << endl;
+        cerr << "Invalid sample rate index " << int(sampleRateIndex) << endl;
         return false;
     }
 
@@ -132,7 +132,7 @@ bool Header::decodeSampleRate(uint8_t sampleRateIndex,
         case 0b10: sampleRate = v2[sampleRateIndex]; return true;
         case 0b11: sampleRate = v1[sampleRateIndex]; return true;
         default: {
-            cout << "decodeSampleRate: Invalid MPEG version." << endl;
+            cerr << "decodeSampleRate: Invalid MPEG version." << endl;
             return false;
         }
     }
@@ -145,7 +145,7 @@ bool Header::decodeChannelMode(uint8_t channelIndex) {
         case 0b10: channelMode = "Dual channel"; return true;
         case 0b11: channelMode = "Mono"; return true;
         default: {
-            cout << "decodeChannelMode: Invalid channel index "
+            cerr << "decodeChannelMode: Invalid channel index "
                  << int(channelIndex) << endl;
             return false;
         }
@@ -154,10 +154,9 @@ bool Header::decodeChannelMode(uint8_t channelIndex) {
 
 int Header::length(bool padding,
                    bool protectionBit,
-                   uint8_t layerIndex,
                    uint8_t versionID) const {
 
-    uint8_t crcLength = protectionBit ? 0 : 16;
+    const uint8_t crcLength = protectionBit ? 0 : 16;
 
     switch (versionID) {
         case 0b11: {
@@ -174,7 +173,7 @@ int Header::length(bool padding,
         }
 
         default:
-            cout << "length: Invalid MPEG version." << endl;
+            cerr << "length: Invalid MPEG version." << endl;
             return -1;
     }
 }

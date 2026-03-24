@@ -43,7 +43,6 @@ private:
 
     int length(bool padding,
                bool protectionBit,
-               uint8_t layerIndex,
                uint8_t versionID) const;
 };
 
