@@ -121,8 +121,44 @@ int main(int argc, char *argv[]) {
                 int err2 = 0;
                 Header nextH(nextRaw, err2);
 
-                if (err2 == 0 && check(nextH, h)) {
-                    // accept this chunk
+                bool valid = true;
+                size_t pos = frameEnd;
+
+                for (int k = 0; k < 3; ++k) {
+                    if (pos + 4 > temp.size()) {
+                        valid = false;
+                        break;
+                    }
+
+                    uint32_t r =
+                        (uint32_t(temp[pos]) << 24) |
+                        (uint32_t(temp[pos + 1]) << 16) |
+                        (uint32_t(temp[pos + 2]) << 8) |
+                        (uint32_t(temp[pos + 3]));
+
+                    if (((r >> 21) & 0x7FF) != 0x7FF) {
+                        valid = false;
+                        break;
+                    }
+
+                    int e = 0;
+                    Header hh(r, e);
+
+                    if (e != 0 || !check(hh, h)) {
+                        valid = false;
+                        break;
+                    }
+
+                    int len = hh.getFrameLength();
+                    if (len <= 0) {
+                        valid = false;
+                        break;
+                    }
+
+                    pos += len;
+                }
+
+                if (valid) {
                     joined = std::move(temp);
                     used[i] = true;
                     found = true;
