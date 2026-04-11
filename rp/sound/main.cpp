@@ -1,6 +1,3 @@
-//
-// Created by david on 3/17/26.
-//
 #include <random>
 #include <algorithm>
 #include <string>
@@ -15,12 +12,21 @@
 
 
 
-#define CHUNK_SIZE 512
+#define CHUNK_SIZE 1024
+#define MAX_OFFSET 1024
+#define VALID_SUBSEQUENT_FRAMES 5
+#define BUFFER_SIZE 3800
 
 using namespace std;
 
+struct State {
+    vector<int> order; // indexes of chunks in current order
+    vector<uint8_t> buffer;  // last few frames
+    vector<bool> used;
+};
+
 bool check(const Header& h, const Header& other) {
-    if (h.getBitrate() != other.getBitrate()) return false;
+    //if (h.getBitrate() != other.getBitrate()) return false; // doesn't work for VBR
     if (h.getSampleRate() != other.getSampleRate()) return false;
     if (h.getLayer() != other.getLayer()) return false;
     if (h.getMpegVersion() != other.getMpegVersion()) return false;
@@ -28,9 +34,121 @@ bool check(const Header& h, const Header& other) {
     return true;
 }
 
+bool isValidContinuation(const vector<uint8_t>& buffer,
+                         const vector<uint8_t>& nextChunk) {
+
+    vector<uint8_t> temp;
+
+    size_t take = min(buffer.size(), size_t(BUFFER_SIZE));
+    temp.insert(temp.end(), buffer.end() - take, buffer.end());
+    temp.insert(temp.end(), nextChunk.begin(), nextChunk.end());
+
+
+    for (int start = 0; start < MAX_OFFSET && start + 4 <= (int)temp.size(); ++start) {
+
+        const uint32_t h =
+            (static_cast<uint32_t>(temp[start]) << 24) |
+            (static_cast<uint32_t>(temp[start + 1]) << 16) |
+            (static_cast<uint32_t>(temp[start + 2]) << 8) |
+            static_cast<uint32_t>(temp[start + 3]);
+
+        if (!Mp3FrameScanner::isValidHeader(h)) continue;
+
+        int ret;
+        Header first(h, ret);
+        if (ret != 0) continue;
+
+        size_t i = start;
+        int validFrames = 0;
+
+        while (i + 4 <= temp.size()) {
+
+            uint32_t hh =
+                (uint32_t(temp[i]) << 24) |
+                (uint32_t(temp[i + 1]) << 16) |
+                (uint32_t(temp[i + 2]) << 8) |
+                (uint32_t(temp[i + 3]));
+
+            if (!Mp3FrameScanner::isValidHeader(hh)) break;
+
+            int ret2;
+            Header h2(hh, ret2);
+            if (ret2 != 0) break;
+
+            if (!check(first, h2)) break;
+
+            int len = h2.getFrameLength();
+            if (len <= 0) break;
+            if (i + len > temp.size()) break;
+
+            i += len;
+            validFrames++;
+        }
+
+        if (validFrames >= VALID_SUBSEQUENT_FRAMES) return true; // TODO dependant on buffer size - find the right balance
+    }
+
+    return false;
+}
+uint64_t counter = 0;
+
+void appendAndTrim(vector<uint8_t>& buffer,
+                   const vector<uint8_t>& chunk) {
+
+    buffer.insert(buffer.end(), chunk.begin(), chunk.end());
+
+    const size_t MAX_BUF = 4096; // enough?
+
+    if (buffer.size() > MAX_BUF) {
+        buffer.erase(buffer.begin(),
+                     buffer.begin() + (buffer.size() - MAX_BUF));
+    }
+}
+
+bool dfs(State& state, vector<vector<uint8_t>>& chunks, vector<int>& result) {
+    if (state.order.size() == chunks.size()) {
+        result = state.order;
+        return true;
+    }
+
+    vector<int> candidates; // all that pass check
+    for (int i = 0; i < (int)chunks.size(); ++i) {
+        if (state.used[i]) continue;
+        if (isValidContinuation(state.buffer, chunks[i])) {
+            candidates.push_back(i);
+        }
+    }
+
+    if (candidates.empty()) return false;
+
+    for (int i : candidates) {
+        state.used[i] = true;
+        state.order.push_back(i);
+
+        vector<uint8_t> oldBuffer = state.buffer;
+        appendAndTrim(state.buffer, chunks[i]);
+
+        if (state.order.size() % 10 == 0 || state.order.size() < 40) {
+            counter++;
+            if (counter % 2767 == 0) {
+                cout << "Depth: " << state.order.size() << "/" << chunks.size() << endl;
+                counter = 0;
+            }
+
+        }
+
+        if (dfs(state, chunks, result)) return true;
+
+        state.buffer = oldBuffer;
+        state.order.pop_back();
+        state.used[i] = false;
+    }
+    return false;
+}
+
 int main(int argc, char *argv[]) {
     cout << __FILE__ << endl;
-    const string filename = "/home/david/Desktop/python/rp/sound/CBR.mp3"; //(argc < 2) ? argv[1] : "test.mp3";
+    const string filename = "/home/david/Desktop/python/rp/sound/sample-3s.mp3"; //(argc < 2) ? argv[1] : "test.mp3";
     const auto s = new Mp3FrameScanner(filename);
 
     if (s->getFrameCount() == 0) {
@@ -46,130 +164,44 @@ int main(int argc, char *argv[]) {
     vector<vector<uint8_t>> chunks;
 
     vector<uint8_t> frame(CHUNK_SIZE);
-    size_t total = 0;
 
-    while (!file.eof()) {
-        file.read(reinterpret_cast<istream::char_type *>(frame.data()), CHUNK_SIZE);
-        size_t read = file.gcount();
-
-        vector<uint8_t> chunk(frame.begin(), frame.begin() + read);
-        chunks.push_back(chunk);
-        total += read;
+    while (file.read(reinterpret_cast<char*>(frame.data()), CHUNK_SIZE) || file.gcount() > 0) {
+        size_t readCount = file.gcount();
+        chunks.emplace_back(frame.begin(), frame.begin() + readCount);
     }
     unsigned seed = 42;
     shuffle(chunks.begin() + 1, chunks.end(), default_random_engine(seed));
 
-    vector<uint8_t> joined = chunks[0];
-    vector<bool> used(chunks.size(), false);
-    used[0] = true;
+    State state;
+    state.used.resize(chunks.size(), false);
+    state.order.push_back(0);
+    state.used[0] = true;
+    state.buffer = chunks[0];
 
-    size_t currentFrameStart = 0;
+    vector<int> result;
 
-    while (true) {
-        if (currentFrameStart + 4 > joined.size()) break;
+    cout << "Total chunks loaded: " << chunks.size() << " (Expected approx " << (52000/CHUNK_SIZE) << ")" << endl;
+    if (dfs(state, chunks, result)) {
+        cout << "Reconstruction found: " << result.size() << " indexes" << endl;
 
-        //read header
-        uint32_t raw = (joined[currentFrameStart] << 24) |
-        (joined[currentFrameStart + 1] << 16) |
-        (joined[currentFrameStart + 2] << 8) |
-        (joined[currentFrameStart + 3]);
+        ofstream outputFile("output.mp3", ios::binary | ios::trunc);
 
-        if (((raw >> 21) & 0x7FF) != 0x7FF) {
-            cerr << "Invalid frame" << endl;
-            currentFrameStart++;
-            continue;
+        if (!outputFile.is_open()) {
+            cerr << "Error opening output file" << endl;
+            return 1;
         }
 
-        int err = 0;
-        Header h(raw, err);
-        if (err != 0) break;
+        size_t totalBytesWritten = 0;
 
-        int frameLength = h.getFrameLength();
-        if (frameLength <= 0) break;
-
-        size_t frameEnd = currentFrameStart + frameLength;
-
-        // if complete, move to next frame
-        if (frameEnd <= joined.size()) {
-            currentFrameStart = frameEnd;
-            cout << "Found complete frame" << endl;
-            continue;
+        for (int index : result) {
+            outputFile.write(reinterpret_cast<const char*>(chunks[index].data()), chunks[index].size());
+            totalBytesWritten += chunks[index].size();
         }
 
-        size_t missing = frameEnd - joined.size();
-
-        bool found = false;
-
-        //look for corret chunk
-        for (size_t i = 0; i < chunks.size(); i++) {
-            if (used[i]) continue;
-
-            auto &chunk = chunks[i];
-
-            if (chunk.size() < missing) continue;
-
-            vector<uint8_t> temp = joined;
-            temp.insert(temp.end(), chunk.begin(), chunk.end());
-
-            if (frameEnd + 4 <= temp.size()) {
-                uint32_t nextRaw =
-                    (temp[frameEnd] << 24) |
-                    (temp[frameEnd + 1] << 16) |
-                    (temp[frameEnd + 2] << 8) |
-                    (temp[frameEnd + 3]);
-
-                int err2 = 0;
-                Header nextH(nextRaw, err2);
-
-                bool valid = true;
-                size_t pos = frameEnd;
-
-                for (int k = 0; k < 3; ++k) {
-                    if (pos + 4 > temp.size()) {
-                        valid = false;
-                        break;
-                    }
-
-                    uint32_t r =
-                        (uint32_t(temp[pos]) << 24) |
-                        (uint32_t(temp[pos + 1]) << 16) |
-                        (uint32_t(temp[pos + 2]) << 8) |
-                        (uint32_t(temp[pos + 3]));
-
-                    if (((r >> 21) & 0x7FF) != 0x7FF) {
-                        valid = false;
-                        break;
-                    }
-
-                    int e = 0;
-                    Header hh(r, e);
-
-                    if (e != 0 || !check(hh, h)) {
-                        valid = false;
-                        break;
-                    }
-
-                    int len = hh.getFrameLength();
-                    if (len <= 0) {
-                        valid = false;
-                        break;
-                    }
-
-                    pos += len;
-                }
-
-                if (valid) {
-                    joined = std::move(temp);
-                    used[i] = true;
-                    found = true;
-                    cout << "Found match" << endl;
-                    break;
-                }
-            }
-        }
-        if (!found) {
-            std::cout << "No valid continuation found" << endl;
-            break;
-        }
+        outputFile.close();
+        cout << "Written " << totalBytesWritten << " bytes to output.mp3" << endl;
+    } else {
+        cout << "Failed to reconstruct." << endl;
     }
+    return 0;
 }

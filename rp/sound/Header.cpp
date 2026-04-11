@@ -36,13 +36,13 @@ int Header::decode() {
     padding = ((raw >> 9) & 0x1);
     const uint8_t channelIndex = (raw >> 6) & 0x3;
 
-    if (decodeVersion(versionID)) return -1;
-    if (decodeLayer(layerIndex)) return -2;
-    if (decodeBitrate(bitrateIndex, versionID, layerIndex)) return -3;
-    if (decodeSampleRate(sampleIndex, versionID)) return -4;
-    if (decodeChannelMode(channelIndex)) return -5;
+    if (!decodeVersion(versionID)) return -1;
+    if (!decodeLayer(layerIndex)) return -2;
+    if (!decodeBitrate(bitrateIndex, versionID, layerIndex)) return -3;
+    if (!decodeSampleRate(sampleIndex, versionID)) return -4;
+    if (!decodeChannelMode(channelIndex)) return -5;
 
-    frameLength = length(padding, protectionBit, versionID);
+    frameLength = length(versionID);
     return 0;
 }
 
@@ -113,6 +113,7 @@ bool Header::decodeBitrate(const uint8_t bitrateIndex,
             return false;
         }
     }
+    if (bitrate <= 0) return false;
 }
 
 bool Header::decodeSampleRate(uint8_t sampleRateIndex,
@@ -122,20 +123,19 @@ bool Header::decodeSampleRate(uint8_t sampleRateIndex,
     static const int v2[4] = {22050, 24000, 16000 ,0};
     static const int v2_5[4] = {11025, 12000, 8000, 0};
 
-    if (sampleRateIndex > 3) {
-        cerr << "Invalid sample rate index " << int(sampleRateIndex) << endl;
-        return false;
-    }
+    int sr;
 
     switch (versionID) {
-        case 0b00: sampleRate = v2_5[sampleRateIndex]; return true;
-        case 0b10: sampleRate = v2[sampleRateIndex]; return true;
-        case 0b11: sampleRate = v1[sampleRateIndex]; return true;
-        default: {
-            cerr << "decodeSampleRate: Invalid MPEG version." << endl;
-            return false;
-        }
+        case 0b00: sr = v2_5[sampleRateIndex]; break;
+        case 0b10: sr = v2[sampleRateIndex]; break;
+        case 0b11: sr = v1[sampleRateIndex]; break;
+        default: return false;
     }
+
+    if (sr == 0) return false;
+
+    sampleRate = sr;
+    return true;
 }
 
 bool Header::decodeChannelMode(uint8_t channelIndex) {
@@ -152,28 +152,14 @@ bool Header::decodeChannelMode(uint8_t channelIndex) {
     }
 }
 
-int Header::length(bool padding,
-                   bool protectionBit,
-                   uint8_t versionID) const {
+int Header::length(uint8_t versionID) const {
+    if (sampleRate <= 0 || bitrate <= 0) return -1;
 
-    const uint8_t crcLength = protectionBit ? 0 : 16;
+    int coeff = (versionID == 0b11) ? 144 : 72;
 
-    switch (versionID) {
-        case 0b11: {
-            uint8_t paddingLength = padding ? 32 : 0;
-            return (144 * bitrate / (sampleRate / 1000.0))
-                   + paddingLength + crcLength;
-        }
+    int frameLen = (coeff * bitrate * 1000) / sampleRate;
 
-        case 0b10:
-        case 0b00: {
-            uint8_t paddingLength = padding ? 8 : 0;
-            return (144 * bitrate / (sampleRate / 1000.0))
-                   + paddingLength + crcLength;
-        }
+    if (padding) frameLen += 1;
 
-        default:
-            cerr << "length: Invalid MPEG version." << endl;
-            return -1;
-    }
+    return frameLen;
 }

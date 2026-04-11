@@ -41,9 +41,7 @@ private:
                           uint8_t versionID);
     bool decodeChannelMode(uint8_t channelIndex);
 
-    int length(bool padding,
-               bool protectionBit,
-               uint8_t versionID) const;
+    int length(uint8_t versionID) const;
 };
 
 #endif

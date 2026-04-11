@@ -36,6 +36,7 @@ class Mp3FrameScanner {
     const std::vector<FrameInfo>& getFrames();
     unsigned long getFrameCount();
     FrameData getFrame(size_t index);
+    static bool isValidHeader(uint32_t headerRaw);
 
     private:
 
@@ -46,7 +47,6 @@ class Mp3FrameScanner {
 
     void loadFile(const std::string& filename);
     size_t skipID3() const;
-    static bool isValidHeader(uint32_t headerRaw);
     void scanFrames();
 };
 

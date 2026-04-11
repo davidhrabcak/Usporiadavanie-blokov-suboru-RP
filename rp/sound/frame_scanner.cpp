@@ -55,20 +55,49 @@ using namespace std;
         return 0;
     }
 
-    bool Mp3FrameScanner::isValidHeader(uint32_t headerRaw) {
-        // sync bits check
-        return ((headerRaw >> 21) & 0x7FF) == 0x7FF;
+bool Mp3FrameScanner::isValidHeader(uint32_t h) {
+        if (((h >> 21) & 0x7FF) != 0x7FF) return false;
+
+        uint8_t version = (h >> 19) & 0x3;
+        uint8_t layer   = (h >> 17) & 0x3;
+
+        if (version == 0b01) return false;
+        if (layer == 0b00) return false;
+
+        return true;
     }
 
     void Mp3FrameScanner::scanFrames() {
         size_t i = skipID3();
+        /*debug print
+        cout << "ID3 header: " << i << endl;
+        cout << "First bytes after ID3:\n";
+        for (int j = 0; j < 100 && i + j < data.size(); ++j) {
+            printf("%02X ", data[i + j]);
+        }
+        cout << endl;
 
+        for (int k = 0; k < 20 && i + k + 4 <= data.size(); ++k) {
+            size_t pos = i + k;
+
+            uint32_t raw =
+                (uint32_t(data[pos]) << 24) |
+                (uint32_t(data[pos+1]) << 16) |
+                (uint32_t(data[pos+2]) << 8) |
+                (uint32_t(data[pos+3]));
+
+            cout << "pos=" << pos
+                 << " raw=0x" << hex << raw << dec
+                 << " sync=" << (((raw >> 21) & 0x7FF) == 0x7FF)
+                 << endl;
+        } */
         while (i + 4 <= data.size()) {
-            const unsigned int headerRaw =
-                (data[i] << 24) |
-                (data[i+1] << 16) |
-                (data[i+2] << 8) |
-                (data[i+3]);
+            const uint32_t headerRaw =
+                (uint32_t(data[i]) << 24) |
+                (uint32_t(data[i+1]) << 16) |
+                (uint32_t(data[i+2]) << 8) |
+                (uint32_t(data[i+3]));
+
 
             if (!isValidHeader(headerRaw)) {
                 ++i;
@@ -77,32 +106,33 @@ using namespace std;
             int return_value;
             Header header(headerRaw, return_value);
             if (return_value != 0) {
-                // switch (return_value) {
-                //     case -1: {
-                //         cerr << "Failed to decode version, frame " << i << endl;
-                //         break;
-                //     }
-                //     case -2: {
-                //         cerr << "Failed to decode layer, frame " << i << endl;
-                //         break;
-                //     }
-                //     case -3: {
-                //         cerr << "Failed to decode bitrate, frame " << i << endl;
-                //         break;
-                //     }
-                //     case -4: {
-                //         cerr << "Failed to decode sample_rate, frame " << i << endl;
-                //     }
-                //         case -5: {
-                //         cerr << "Failed to decode channel mode, frame " << i << endl;
-                //         break;
-                //     }
-                //         default: {
-                //         cerr << "Unknown error frame " << i << endl;
-                //         break;
-                //     }
-                //
-                // }
+                /*switch (return_value) {
+                    case -1: {
+                        cerr << "Failed to decode version, frame " << i << endl;
+                        break;
+                    }
+                    case -2: {
+                        cerr << "Failed to decode layer, frame " << i << endl;
+                        break;
+                    }
+                    case -3: {
+                        cerr << "Failed to decode bitrate, frame " << i << endl;
+                        break;
+                    }
+                    case -4: {
+                        cerr << "Failed to decode sample_rate, frame " << i << endl;
+                    }
+                        case -5: {
+                        cerr << "Failed to decode channel mode, frame " << i << endl;
+                        break;
+                    }
+                        default: {
+                        cerr << "Unknown error frame " << i << endl;
+                        break;
+                    }
+
+                }
+                */
             }
 
             const int frameLength = header.getFrameLength();
@@ -112,7 +142,6 @@ using namespace std;
                 continue;
             }
 
-            // frame fits in file
             if (i + frameLength > data.size()) {
                 break;
             }
@@ -125,11 +154,3 @@ using namespace std;
             i += frameLength; // jump to next frame
         }
     }
-
-// int main(int argc, char** argv) {
-//     auto s = Mp3FrameScanner("../../sound/file_example_MP3_700KB.mp3");
-//     cout << s.getFrames().data()->length << endl;
-//     cout << s.getFrame(1000);
-//     cout << s.getFrameCount() << endl;
-//
-// }
