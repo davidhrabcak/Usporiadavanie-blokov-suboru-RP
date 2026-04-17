@@ -1,5 +1,6 @@
 rp/.vscode/
 *.txt
+!CMakeLists.txt
 rp/segmentIn
 rp/segment
 rp/segment_*

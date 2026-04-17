@@ -36,6 +36,11 @@ int Header::decode() {
     padding = ((raw >> 9) & 0x1);
     const uint8_t channelIndex = (raw >> 6) & 0x3;
 
+    versionID_raw     = versionID;
+    layerID_raw       = layerIndex;
+    sampleRateIdx_raw = sampleIndex;
+    channelIdx_raw    = channelIndex;
+
     if (!decodeVersion(versionID)) return -1;
     if (!decodeLayer(layerIndex)) return -2;
     if (!decodeBitrate(bitrateIndex, versionID, layerIndex)) return -3;
@@ -163,3 +168,10 @@ int Header::length(uint8_t versionID) const {
 
     return frameLen;
 }
+
+uint8_t Header::getVersionID() const    { return versionID_raw; }
+uint8_t Header::getLayerID() const      { return layerID_raw; }
+uint8_t Header::getSampleRateIdx() const{ return sampleRateIdx_raw; }
+uint8_t Header::getChannelIdx() const   { return channelIdx_raw; }
+bool    Header::isMono() const          { return channelIdx_raw == 0b11; }
+bool    Header::isLayerIII() const      { return layerID_raw == 0b01; }

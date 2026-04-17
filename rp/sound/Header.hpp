@@ -18,6 +18,13 @@ public:
     std::string getChannelMode() const;
     int getFrameLength() const;
 
+    uint8_t getVersionID() const;
+    uint8_t getLayerID() const;
+    uint8_t getSampleRateIdx() const;
+    uint8_t getChannelIdx() const;
+    bool isMono() const;
+    bool isLayerIII() const;
+
 private:
     uint32_t raw;
     std::string mpegVersion;
@@ -28,6 +35,11 @@ private:
     bool padding{};
     std::string channelMode;
     int frameLength{};
+
+    uint8_t versionID_raw{};
+    uint8_t layerID_raw{};
+    uint8_t sampleRateIdx_raw{};
+    uint8_t channelIdx_raw{};
 
     bool synchValid() const;
 
