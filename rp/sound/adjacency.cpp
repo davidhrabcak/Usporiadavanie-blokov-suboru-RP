@@ -1,4 +1,7 @@
 #include "adjacency.hpp"
+
+#include <iostream>
+
 #include "frame_scanner.hpp"
 
 using namespace std;
@@ -15,6 +18,11 @@ bool canFollow(const ChunkMeta& a, const ChunkMeta& b) {
     // tailOverflow is 1-3: header of partial tail frame is split across chunks.
     // Reconstruct the 4-byte header from a.tailHeadBytes + first bytes of b.
     int tov = a.tailOverflow; // 1, 2, or 3
+
+    if (tov < 1 || tov > 3) {
+        cerr << "BREAK at " << tov << " is out of bounds" << endl;
+        return false;
+    }
     uint8_t hbytes[4];
     for (int j = 0; j < tov; ++j)    hbytes[j]   = a.tailHeadBytes[j];
     for (int j = tov; j < 4; ++j)    hbytes[j]   = b.chunkHead[j - tov];

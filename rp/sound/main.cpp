@@ -6,7 +6,6 @@
 #include <vector>
 #include <fstream>
 #include "frame_scanner.hpp"
-#include "Header.hpp"
 #include "chunk_meta.hpp"
 #include "adjacency.hpp"
 
@@ -192,15 +191,15 @@ bool dfs(DfsState& state,
 int main(int argc, char* argv[]) {
     const string filename = (argc >= 2)
         ? argv[1]
-        : "/home/david/Desktop/python/rp/sound/sample-3s.mp3";
+        : "/home/david/Desktop/python/rp/sound/CBR.mp3";
 
-    const auto scanner = new Mp3FrameScanner(filename);
-    if (scanner->getFrameCount() == 0) {
+    Mp3FrameScanner scanner(filename);
+    if (scanner.getFrameCount() == 0) {
         cerr << "No frames found\n";
         return 1;
     }
 
-    long offset = scanner->getFrames()[0].position;
+    long offset = scanner.getFrames()[0].position;
     ifstream file(filename, ios::binary);
     file.seekg(offset, ios::beg);
 
