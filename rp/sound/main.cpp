@@ -1,5 +1,7 @@
 #include <random>
 #include <algorithm>
+#include <csetjmp>
+#include <chrono>
 #include <string>
 #include <cstdint>
 #include <iostream>
@@ -16,6 +18,8 @@ using namespace std;
 // --------------------------------------------------------------------------
 // Bit-reservoir validator (Layer III only)
 // --------------------------------------------------------------------------
+
+vector<vector<uint8_t>> chunks; // moved for debugging
 
 static int sideInfoBytes(const StreamProfile& p) {
     if (p.versionID == 0b11) return p.isMono() ? 17 : 32;
@@ -172,9 +176,10 @@ bool dfs(DfsState& state,
         state.used[si] = true;
         state.order.push_back(si);
 
-        if (++counter % 5000 == 0)
-            cout << "Depth: " << state.order.size()
-                 << "/" << supernodes.size() << "\n";
+         if (++counter % 9999999 == 0) {
+             cout << "Depth: " << state.order.size()
+                  << "/" << supernodes.size() << "\n";
+         }
 
         if (dfs(state, supernodes, superAdj, metas, result)) return true;
 
@@ -191,7 +196,7 @@ bool dfs(DfsState& state,
 int main(int argc, char* argv[]) {
     const string filename = (argc >= 2)
         ? argv[1]
-        : "/home/david/Desktop/python/rp/sound/CBR.mp3";
+        : "/home/david/Desktop/python/rp/sound/sample-3s.mp3";
 
     Mp3FrameScanner scanner(filename);
     if (scanner.getFrameCount() == 0) {
@@ -203,7 +208,7 @@ int main(int argc, char* argv[]) {
     ifstream file(filename, ios::binary);
     file.seekg(offset, ios::beg);
 
-    vector<vector<uint8_t>> chunks;
+
     vector<uint8_t> buf(CHUNK_SIZE);
     while (file.read(reinterpret_cast<char*>(buf.data()), CHUNK_SIZE) || file.gcount() > 0) {
         size_t n = file.gcount();
@@ -239,7 +244,7 @@ int main(int argc, char* argv[]) {
     }
     // --- End sanity check ---
 
-    unsigned seed = 42;
+    unsigned seed = chrono::system_clock::now().time_since_epoch().count();
     shuffle(chunks.begin() + 1, chunks.end(), default_random_engine(seed));
 
     cout << "Total chunks: " << chunks.size() << "\n";
@@ -320,7 +325,6 @@ int main(int argc, char* argv[]) {
 
     if (dfs(state, supernodes, superAdj, metas, result)) {
         cout << "Reconstruction found\n";
-
         ofstream out("output.mp3", ios::binary | ios::trunc);
         if (!out) { cerr << "Cannot open output.mp3\n"; return 1; }
 

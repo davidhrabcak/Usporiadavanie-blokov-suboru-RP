@@ -19,9 +19,10 @@ bool canFollow(const ChunkMeta& a, const ChunkMeta& b) {
     // Reconstruct the 4-byte header from a.tailHeadBytes + first bytes of b.
     int tov = a.tailOverflow; // 1, 2, or 3
 
-    if (tov < 1 || tov > 3) {
-        cerr << "BREAK at " << tov << " is out of bounds" << endl;
-        return false;
+    if (tov > 3) {
+        return b.headOffset == tov;
+    } if (tov < 1) {
+        cerr << "Error: unhandled case, the reconstruction may not be found." << endl;
     }
     uint8_t hbytes[4];
     for (int j = 0; j < tov; ++j)    hbytes[j]   = a.tailHeadBytes[j];
