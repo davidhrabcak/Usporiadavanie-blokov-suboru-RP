@@ -37,6 +37,11 @@ struct ChunkMeta {
     bool                  valid;
     StreamProfile         profile;
 
+    // All byte offsets within this chunk where a valid, profile-matching frame header starts.
+    // Sorted ascending. Used as a fallback when headOffset was computed at a different
+    // alignment than what the predecessor chunk's tailRemaining requires.
+    std::vector<int> frameStarts;
+
     // First 4 bytes of the chunk (for cross-chunk header reconstruction when tailOverflow < 4)
     uint8_t chunkHead[4]{};
     // First min(tailOverflow, 3) bytes of the partial tail frame's header

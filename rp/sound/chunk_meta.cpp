@@ -114,6 +114,8 @@ ChunkMeta computeChunkMeta(int chunkIndex,
         if (err != 0) continue;
         if (!expected.matches(h)) continue;
 
+        meta.frameStarts.push_back(off);
+
         vector<FrameSlice> frames;
         int tail = 0, tailLen = 0;
         int count = tryParse(chunk, off, expected, frames, tail, tailLen);
