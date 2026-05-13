@@ -3,8 +3,12 @@
 
 #include <cstdint>
 #include <vector>
+#include "chunk_meta.hpp"
 #include "Header.hpp"
 
+/**
+ * Holds basic frame information that should remain similar across frames.
+ */
 struct StreamProfile {
     uint8_t versionID;
     uint8_t layerID;
@@ -49,9 +53,11 @@ struct ChunkMeta {
     uint8_t tailHeadBytes[3]{};
 };
 
-// Returns how many bytes of the tail partial frame must appear at the start
-// of the next chunk (i.e. the expected headOffset of the successor chunk).
-// Returns -1 if unknown (tailOverflow 1-3 and we need cross-chunk header).
+/**
+ * Returns how many bytes of the tail partial frame must appear at the start
+ * of the next chunk (i.e. the expected headOffset of the successor chunk).
+ * Returns -1 if unknown (tailOverflow 1-3, and we need cross-chunk header).
+ */
 inline int tailRemaining(const ChunkMeta& m) {
     if (m.tailPartialLen > 0) return m.tailPartialLen - m.tailOverflow;
     if (m.tailOverflow == 0)  return 0;

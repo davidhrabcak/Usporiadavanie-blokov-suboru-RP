@@ -77,19 +77,19 @@ bool Header::decodeBitrate(const uint8_t bitrateIndex,
                            const uint8_t versionID,
                            const uint8_t layerIndex) {
 
-    static const int v1L1[16] = {0, 32, 64, 96, 128, 160, 192, 224,
+    static constexpr int v1L1[16] = {0, 32, 64, 96, 128, 160, 192, 224,
                                 256, 288, 320, 352, 384, 416, 448, -1};
 
-    static const int v1L2[16] = {0, 32, 48, 56, 64, 80, 96, 112,
+    static constexpr int v1L2[16] = {0, 32, 48, 56, 64, 80, 96, 112,
                                 128, 160, 192, 224, 256, 320, 384, -1};
 
-    static const int v1L3[16] = {0, 32, 40, 48, 56, 64, 80, 96,
+    static constexpr int v1L3[16] = {0, 32, 40, 48, 56, 64, 80, 96,
                                 112, 128, 160, 192, 224, 256, 320, -1};
 
-    static const int v2L1[16] = {0, 32, 48, 56, 64, 80, 96, 112,
+    static constexpr int v2L1[16] = {0, 32, 48, 56, 64, 80, 96, 112,
                                 128, 144, 160, 176, 192, 224, 256, -1};
 
-    static const int v2All[16] = {0, 8, 16, 24, 32, 40, 48, 56,
+    static constexpr int v2All[16] = {0, 8, 16, 24, 32, 40, 48, 56,
                                  64, 80, 96, 112, 128, 144, 160, -1};
 
     if (bitrateIndex > 15) {
@@ -114,19 +114,18 @@ bool Header::decodeBitrate(const uint8_t bitrateIndex,
             return true;
 
         default: {
-            cerr << "decodeBitrate: Unknown layer index " << int(layerIndex) << endl;
+            cerr << "decodeBitrate: Unknown layer index " << static_cast<int>(layerIndex) << endl;
             return false;
         }
     }
-    if (bitrate <= 0) return false;
 }
 
-bool Header::decodeSampleRate(uint8_t sampleRateIndex,
-                              uint8_t versionID) {
+bool Header::decodeSampleRate(const uint8_t sampleRateIndex,
+                              const uint8_t versionID) {
 
-    static const int v1[4] = {44100, 48000, 32000, 0};
-    static const int v2[4] = {22050, 24000, 16000 ,0};
-    static const int v2_5[4] = {11025, 12000, 8000, 0};
+    static constexpr int v1[4] = {44100, 48000, 32000, 0};
+    static constexpr int v2[4] = {22050, 24000, 16000 ,0};
+    static constexpr int v2_5[4] = {11025, 12000, 8000, 0};
 
     int sr;
 
@@ -143,7 +142,7 @@ bool Header::decodeSampleRate(uint8_t sampleRateIndex,
     return true;
 }
 
-bool Header::decodeChannelMode(uint8_t channelIndex) {
+bool Header::decodeChannelMode(const uint8_t channelIndex) {
     switch (channelIndex) {
         case 0b00: channelMode = "Stereo"; return true;
         case 0b01: channelMode = "Joint stereo"; return true;
@@ -151,16 +150,16 @@ bool Header::decodeChannelMode(uint8_t channelIndex) {
         case 0b11: channelMode = "Mono"; return true;
         default: {
             cerr << "decodeChannelMode: Invalid channel index "
-                 << int(channelIndex) << endl;
+                 << static_cast<int>(channelIndex) << endl;
             return false;
         }
     }
 }
 
-int Header::length(uint8_t versionID) const {
+int Header::length(const uint8_t versionID) const {
     if (sampleRate <= 0 || bitrate <= 0) return -1;
 
-    int coeff = (versionID == 0b11) ? 144 : 72;
+    const int coeff = (versionID == 0b11) ? 144 : 72;
 
     int frameLen = (coeff * bitrate * 1000) / sampleRate;
 

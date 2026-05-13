@@ -1,23 +1,30 @@
 #include "adjacency.hpp"
-
-#include <iostream>
 #include <unordered_map>
 
 #include "frame_scanner.hpp"
 
 using namespace std;
 
-// Returns true if position rem is a known valid frame start in chunk b.
-static bool hasFrameAt(const ChunkMeta& b, int rem) {
+/**
+ * Checks if chunk 'b' has a known valid frame start in position 'rem'
+ * @param  b Chunk where the frame may be found.
+ * @param rem Index of possible frame start.
+ * @return True if position rem is a known valid frame start in chunk b.
+ */
+static bool hasFrameAt(const ChunkMeta& b, const int rem) {
     // frameStarts is sorted ascending (built in computeChunkMeta scan order).
-    auto it = lower_bound(b.frameStarts.begin(), b.frameStarts.end(), rem);
+    const auto it = lower_bound(b.frameStarts.begin(), b.frameStarts.end(), rem);
     return it != b.frameStarts.end() && *it == rem;
 }
 
+/**
+ * Checks if chunk 'a' can be followed by chunk 'b'.
+ * @return True if b is a valid continuation of chunk a.
+ */
 bool canFollow(const ChunkMeta& a, const ChunkMeta& b) {
     if (!a.valid || !b.valid) return false;
 
-    int rem = tailRemaining(a);
+    const int rem = tailRemaining(a);
 
     if (rem >= 0) {
         // Accept if rem is any known valid frame start in b, not just the
@@ -27,32 +34,37 @@ bool canFollow(const ChunkMeta& a, const ChunkMeta& b) {
 
     // tailOverflow is 1-3: header of partial tail frame is split across chunks.
     // Reconstruct the 4-byte header from a.tailHeadBytes + first bytes of b.
-    int tov = a.tailOverflow;
-    if (tov < 1 || tov > 3) return false;
+    const int tail_ov = a.tailOverflow;
+    if (tail_ov < 1 || tail_ov > 3) return false;
 
-    uint8_t hbytes[4];
-    for (int j = 0; j < tov; ++j)    hbytes[j] = a.tailHeadBytes[j];
-    for (int j = tov; j < 4; ++j)    hbytes[j] = b.chunkHead[j - tov];
+    uint8_t head_ov[4];
+    for (int j = 0; j < tail_ov; ++j)    head_ov[j] = a.tailHeadBytes[j];
+    for (int j = tail_ov; j < 4; ++j)    head_ov[j] = b.chunkHead[j - tail_ov];
 
-    uint32_t raw = (uint32_t(hbytes[0]) << 24) | (uint32_t(hbytes[1]) << 16)
-                 | (uint32_t(hbytes[2]) << 8)  |  uint32_t(hbytes[3]);
+    const uint32_t raw = (static_cast<uint32_t>(head_ov[0]) << 24) | (static_cast<uint32_t>(head_ov[1]) << 16)
+                 | (static_cast<uint32_t>(head_ov[2]) << 8)  |  static_cast<uint32_t>(head_ov[3]);
 
     if (!Mp3FrameScanner::isValidHeader(raw)) return false;
 
     int err;
-    Header h(raw, err);
+    const Header h(raw, err);
     if (err != 0) return false;
     if (!a.profile.matches(h)) return false;
 
-    int frameLen = h.getFrameLength();
+    const int frameLen = h.getFrameLength();
     if (frameLen <= 0) return false;
 
-    int expectedHead = frameLen - tov;
+    const int expectedHead = frameLen - tail_ov;
     return hasFrameAt(b, expectedHead);
 }
 
+/**
+ * Constructs the full graph using a byFrameStart index for O(n) Case-1 lookups.
+ * @return Constructed adjacency list of output graph.
+ *         adj[i] = list of chunk indices that can follow chunk i.
+ */
 vector<vector<int>> buildAdjacency(const vector<ChunkMeta>& metas) {
-    int n = (int)metas.size();
+    const int n = static_cast<int>(metas.size());
     vector<vector<int>> adj(n);
 
     // Index: frameStart position -> list of chunk indices that have a valid frame there.
@@ -73,23 +85,27 @@ vector<vector<int>> buildAdjacency(const vector<ChunkMeta>& metas) {
             }
         } else {
             // Case 2: tailOverflow 1-3, expected headOffset depends on b.chunkHead.
-            int tov = metas[i].tailOverflow;
-            if (tov < 1 || tov > 3) continue;
+            const int tail_ov = metas[i].tailOverflow;
+            if (tail_ov < 1 || tail_ov > 3) continue;
+
             for (int j = 0; j < n; ++j) {
                 if (j == i || !metas[j].valid) continue;
                 uint8_t hbytes[4];
-                for (int k = 0; k < tov; ++k) hbytes[k] = metas[i].tailHeadBytes[k];
-                for (int k = tov; k < 4; ++k) hbytes[k] = metas[j].chunkHead[k - tov];
-                uint32_t raw = (uint32_t(hbytes[0]) << 24) | (uint32_t(hbytes[1]) << 16)
-                             | (uint32_t(hbytes[2]) << 8)  |  uint32_t(hbytes[3]);
+
+                for (int k = 0; k < tail_ov; ++k) hbytes[k] = metas[i].tailHeadBytes[k];
+                for (int k = tail_ov; k < 4; ++k) hbytes[k] = metas[j].chunkHead[k - tail_ov];
+
+                const uint32_t raw = (static_cast<uint32_t>(hbytes[0]) << 24) | (static_cast<uint32_t>(hbytes[1]) << 16)
+                             | (static_cast<uint32_t>(hbytes[2]) << 8)  |  static_cast<uint32_t>(hbytes[3]);
                 if (!Mp3FrameScanner::isValidHeader(raw)) continue;
                 int err; Header h(raw, err);
                 if (err != 0) continue;
+
                 if (!metas[i].profile.matches(h)) continue;
-                int frameLen = h.getFrameLength();
+
+                const int frameLen = h.getFrameLength();
                 if (frameLen <= 0) continue;
-                if (hasFrameAt(metas[j], frameLen - tov))
-                    adj[i].push_back(j);
+                if (hasFrameAt(metas[j], frameLen - tail_ov)) adj[i].push_back(j);
             }
         }
     }
@@ -97,17 +113,29 @@ vector<vector<int>> buildAdjacency(const vector<ChunkMeta>& metas) {
     return adj;
 }
 
-vector<int> computeInDegree(const vector<vector<int>>& adj, int n) {
+/**
+ * Find the degree of incoming edges for every node.
+ * @param adj Adjacency list of graph.
+ * @param n Number of vertices in graph.
+ * @return Degrees of incoming edges for each node.
+ */
+vector<int> computeInDegree(const vector<vector<int>>& adj, const int n) {
     vector<int> indeg(n, 0);
     for (int i = 0; i < n; ++i)
-        for (int j : adj[i])
+        for (const int j : adj[i])
             indeg[j]++;
     return indeg;
 }
 
-vector<int> computeOutDegree(const vector<vector<int>>& adj, int n) {
+/**
+ * Find the degree of outgoing edges for every node.
+ * @param adj Adjacency list of graph.
+ * @param n Number of vertices in graph.
+ * @return Degrees of outgoing edges for each node.
+ */
+vector<int> computeOutDegree(const vector<vector<int>>& adj, const int n) {
     vector<int> outdeg(n, 0);
     for (int i = 0; i < n; ++i)
-        outdeg[i] = (int)adj[i].size();
+        outdeg[i] = static_cast<int>(adj[i].size());
     return outdeg;
 }

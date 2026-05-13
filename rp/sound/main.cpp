@@ -12,6 +12,7 @@
 #include "adjacency.hpp"
 
 #define CHUNK_SIZE 1024
+#define COUNTER_FREQUENCY 9999999 // modulus for counter with printouts during dfs
 
 using namespace std;
 
@@ -21,13 +22,22 @@ using namespace std;
 
 vector<vector<uint8_t>> chunks; // moved for debugging
 
+/**
+ * Determines the length of side information in a chunk.
+ * @return Side information length in bytes.
+ */
 static int sideInfoBytes(const StreamProfile& p) {
     if (p.versionID == 0b11) return p.isMono() ? 17 : 32;
     return p.isMono() ? 9 : 17;
 }
 
-// Returns true if the proposed chunk ordering produces a valid Layer III
-// bit-reservoir chain.  For non-Layer-III files always returns true.
+/**
+ * Validates the bit reservoir integrity for a specific sequence of MP3 frames.
+ * @param order The order of MP3 frames to be validated.
+ * @param metas Metadata for each chunk.
+ * @return Returns true if the proposed chunk ordering produces a valid Layer III bit-reservoir chain.
+ *         For non-Layer-III files always returns true.
+ */
 bool validateReservoir(const vector<int>& order,
                        const vector<ChunkMeta>& metas) {
     const StreamProfile& p = metas[order[0]].profile;
@@ -53,20 +63,29 @@ bool validateReservoir(const vector<int>& order,
 // Greedy forced-chain collapse (Phase 3)
 // --------------------------------------------------------------------------
 
-// A supernode is a maximal forced chain: every interior node has out-degree 1
-// and its successor has in-degree 1.
+/** A supernode is a maximal forced chain: every interior node has out-degree 1
+ * and its successor has in-degree 1.
+ */
 struct Supernode {
     vector<int> chunks;   // chunk indices in order
 };
 
-// Build supernodes and the adjacency list over them.
-// `start` is the index of the first chunk (pinned, never shuffled).
+/**
+ * Build supernodes and the adjacency list over them.
+ * @param adj Adjacency list of the input graph.
+ * @param indeg List of degrees of only incoming edges for each vertex.
+ * @param outdeg List of degrees of only outgoing edges for each vertex.
+ * @param n Number of vertices in the graph.
+ * @param start The index of the first chunk (pinned, never shuffled).
+ * @param superAdj Output adjacency list.
+ * @return List of created supernodes.
+ */
 vector<Supernode> buildSupernodes(
         const vector<vector<int>>& adj,
         const vector<int>& indeg,
         const vector<int>& outdeg,
-        int n,
-        int start,
+        const int n,
+        const int start,
         vector<vector<int>>& superAdj) {
 
     vector<int> chunkToSuper(n, -1);
@@ -100,10 +119,10 @@ vector<Supernode> buildSupernodes(
         int cur = i;
         while (true) {
             if (chunkToSuper[cur] != -1) break; // already part of another supernode
-            chunkToSuper[cur] = (int)supernodes.size();
+            chunkToSuper[cur] = static_cast<int>(supernodes.size());
             sn.chunks.push_back(cur);
             if (outdeg[cur] == 1) {
-                int next = adj[cur][0];
+                const int next = adj[cur][0];
                 if (indeg[next] == 1) {
                     cur = next;
                     continue;
@@ -117,17 +136,17 @@ vector<Supernode> buildSupernodes(
     // Any chunk not yet assigned (cycle-only nodes, shouldn't happen in practice)
     for (int i = 0; i < n; ++i) {
         if (chunkToSuper[i] == -1) {
-            chunkToSuper[i] = (int)supernodes.size();
+            chunkToSuper[i] = static_cast<int>(supernodes.size());
             supernodes.push_back({{i}});
         }
     }
 
-    int sn = (int)supernodes.size();
+    const int sn = static_cast<int>(supernodes.size());
     superAdj.assign(sn, {});
 
     for (int si = 0; si < sn; ++si) {
-        int tail = supernodes[si].chunks.back();
-        for (int nb : adj[tail]) {
+        const int tail = supernodes[si].chunks.back();
+        for (const int nb : adj[tail]) {
             int sj = chunkToSuper[nb];
             if (sj != si)
                 superAdj[si].push_back(sj);
@@ -144,11 +163,23 @@ vector<Supernode> buildSupernodes(
 struct DfsState {
     vector<int> order;    // supernode indices placed so far
     vector<bool> used;
-    int reservoirLevel;   // unused: reservoir check runs on full order
+    int reservoirLevel = 0;   // unused: reservoir check runs on full order
 };
 
 static uint64_t counter = 0;
 
+/**
+ * Exhaustive DFS over the supernode graph, starting from the supernode containing chunk 0.
+ * At a complete ordering, validateReservoir() runs a Layer III bit-reservoir check
+ * (monotonically accumulates bytes produced per frame;
+ * rejects if any frame's mainDataBegin exceeds the accumulated total).
+ * @param state The current state of the search.
+ * @param supernodes A list of supernode structures containing grouped MP3 chunks.
+ * @param superAdj The adjacency list representing valid transitions between supernodes.
+ * @param metas Metadata for all chunks.
+ * @param result If found, the valid supernode sequence is filled into result.
+ * @return True if a valid, decodable sequence of all supernodes exists.
+ */
 bool dfs(DfsState& state,
          const vector<Supernode>& supernodes,
          const vector<vector<int>>& superAdj,
@@ -158,7 +189,7 @@ bool dfs(DfsState& state,
     if (state.order.size() == supernodes.size()) {
         // Flatten to chunk order and do final reservoir check
         vector<int> chunkOrder;
-        for (int si : state.order)
+        for (const int si : state.order)
             for (int ci : supernodes[si].chunks)
                 chunkOrder.push_back(ci);
 
@@ -167,7 +198,7 @@ bool dfs(DfsState& state,
         return true;
     }
 
-    int cur = state.order.back();
+    const int cur = state.order.back();
     const auto& candidates = superAdj[cur];
 
     for (int si : candidates) {
@@ -176,7 +207,7 @@ bool dfs(DfsState& state,
         state.used[si] = true;
         state.order.push_back(si);
 
-         if (++counter % 9999999 == 0) {
+         if (++counter % COUNTER_FREQUENCY == 0) {
              cout << "Depth: " << state.order.size()
                   << "/" << supernodes.size() << "\n";
          }
@@ -189,14 +220,8 @@ bool dfs(DfsState& state,
     return false;
 }
 
-// --------------------------------------------------------------------------
-// main
-// --------------------------------------------------------------------------
-
 int main(int argc, char* argv[]) {
-    const string filename = (argc >= 2)
-        ? argv[1]
-        : "/home/david/Desktop/python/rp/sound/sample-3s.mp3";
+    const string filename = "/home/david/Desktop/python/rp/sound/sample-3s.mp3";
 
     Mp3FrameScanner scanner(filename);
     if (scanner.getFrameCount() == 0) {
@@ -204,7 +229,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    long offset = scanner.getFrames()[0].position;
+    long offset = static_cast<long>(scanner.getFrames()[0].position);
     ifstream file(filename, ios::binary);
     file.seekg(offset, ios::beg);
 
@@ -212,21 +237,21 @@ int main(int argc, char* argv[]) {
     vector<uint8_t> buf(CHUNK_SIZE);
     while (file.read(reinterpret_cast<char*>(buf.data()), CHUNK_SIZE) || file.gcount() > 0) {
         size_t n = file.gcount();
-        chunks.emplace_back(buf.begin(), buf.begin() + n);
+        chunks.emplace_back(buf.begin(), buf.begin() + static_cast<long>(n));
     }
 
     // --- Pre-shuffle sanity check ---
     {
-        StreamProfile prof0;
+        StreamProfile prof0{};
         if (deriveProfile(chunks[0], prof0)) {
             vector<ChunkMeta> origMetas;
             origMetas.reserve(chunks.size());
-            for (int i = 0; i < (int)chunks.size(); ++i)
+            for (int i = 0; i < static_cast<int>(chunks.size()); ++i)
                 origMetas.push_back(computeChunkMeta(i, chunks[i], prof0));
 
             auto origAdj = buildAdjacency(origMetas);
             int broken = 0;
-            for (int i = 0; i + 1 < (int)origMetas.size(); ++i) {
+            for (int i = 0; i + 1 < static_cast<int>(origMetas.size()); ++i) {
                 if (!canFollow(origMetas[i], origMetas[i+1])) {
                     cout << "  BREAK at " << i << "->" << i+1
                          << ": tailOvfl=" << origMetas[i].tailOverflow
@@ -250,13 +275,13 @@ int main(int argc, char* argv[]) {
     cout << "Total chunks: " << chunks.size() << "\n";
 
     // Derive stream profile from chunk 0 (pinned, never shuffled)
-    StreamProfile profile;
+    StreamProfile profile{};
     if (!deriveProfile(chunks[0], profile)) {
         cerr << "Could not derive stream profile from first chunk\n";
         return 1;
     }
-    cout << "Stream profile: versionID=" << (int)profile.versionID
-         << " layerID=" << (int)profile.layerID
+    cout << "Stream profile: versionID=" << static_cast<int>(profile.versionID)
+         << " layerID=" << static_cast<int>(profile.layerID)
          << " sampleRate=" << profile.sampleRate
          << " mono=" << profile.isMono() << "\n";
 
@@ -264,7 +289,7 @@ int main(int argc, char* argv[]) {
     vector<ChunkMeta> metas;
     metas.reserve(chunks.size());
     int invalidCount = 0;
-    for (int i = 0; i < (int)chunks.size(); ++i) {
+    for (int i = 0; i < static_cast<int>(chunks.size()); ++i) {
         metas.push_back(computeChunkMeta(i, chunks[i], profile));
         if (!metas.back().valid) {
             cerr << "  Chunk " << i << ": INVALID (no consistent frame run found)\n";
@@ -277,7 +302,7 @@ int main(int argc, char* argv[]) {
     // Print full metadata table
     cout << "\nChunk metadata:\n";
     cout << "  idx  headOff  tailOvfl  frames\n";
-    for (int i = 0; i < (int)metas.size(); ++i) {
+    for (int i = 0; i < static_cast<int>(metas.size()); ++i) {
         cout << "  " << i
              << "  " << metas[i].headOffset
              << "  " << metas[i].tailOverflow
@@ -287,12 +312,12 @@ int main(int argc, char* argv[]) {
 
     // Build adjacency graph
     auto adj    = buildAdjacency(metas);
-    auto indeg  = computeInDegree(adj, (int)chunks.size());
-    auto outdeg = computeOutDegree(adj, (int)chunks.size());
+    auto indeg  = computeInDegree(adj, static_cast<int>(chunks.size()));
+    auto outdeg = computeOutDegree(adj, static_cast<int>(chunks.size()));
 
     // Report graph stats
     int forced = 0;
-    for (int i = 0; i < (int)chunks.size(); ++i)
+    for (int i = 0; i < static_cast<int>(chunks.size()); ++i)
         if (outdeg[i] == 1) ++forced;
     cout << "\nAdjacency graph: "
          << forced << "/" << chunks.size()
@@ -301,12 +326,12 @@ int main(int argc, char* argv[]) {
     // Find which supernode contains chunk 0
     vector<vector<int>> superAdj;
     vector<Supernode> supernodes = buildSupernodes(
-        adj, indeg, outdeg, (int)chunks.size(), 0, superAdj);
+        adj, indeg, outdeg, static_cast<int>(chunks.size()), 0, superAdj);
 
     cout << "Supernodes after chain collapse: " << supernodes.size() << "\n";
 
     int startSuper = -1;
-    for (int si = 0; si < (int)supernodes.size(); ++si)
+    for (int si = 0; si < static_cast<int>(supernodes.size()); ++si)
         if (supernodes[si].chunks[0] == 0) { startSuper = si; break; }
 
     if (startSuper == -1) {
@@ -332,7 +357,7 @@ int main(int argc, char* argv[]) {
         for (int si : result)
             for (int ci : supernodes[si].chunks) {
                 out.write(reinterpret_cast<const char*>(chunks[ci].data()),
-                          chunks[ci].size());
+                          static_cast<long>(chunks[ci].size()));
                 total += chunks[ci].size();
             }
 
