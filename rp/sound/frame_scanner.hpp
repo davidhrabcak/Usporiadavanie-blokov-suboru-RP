@@ -3,6 +3,7 @@
 
 #include <vector>
 #include <ostream>
+#include <cstdint>
 
 struct FrameData {
     std::string mpeg_version;
@@ -11,6 +12,7 @@ struct FrameData {
     int bitrate;
     int sample_rate;
     std::string channel_mode;
+    std::vector<uint8_t> rawBits;
 };
 
 inline std::ostream& operator<<(std::ostream &os, const FrameData& data) {
@@ -37,12 +39,13 @@ class Mp3FrameScanner {
     unsigned long getFrameCount();
     FrameData getFrame(size_t index);
     static bool isValidHeader(uint32_t headerRaw);
+    std::vector<FrameData> frame_data;
 
     private:
 
     std::vector<uint8_t> data;
     std::vector<FrameInfo> frames;
-    std::vector<FrameData> frame_data;
+
 
 
     void loadFile(const std::string& filename);

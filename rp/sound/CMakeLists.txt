@@ -13,4 +13,5 @@ add_executable(rp
         adjacency.cpp
         adjacency.hpp
         main.cpp
-        main.hpp)
+        main.hpp
+        test/bindings.cpp)

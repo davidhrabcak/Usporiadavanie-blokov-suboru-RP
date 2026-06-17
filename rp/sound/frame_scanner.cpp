@@ -145,11 +145,12 @@ bool Mp3FrameScanner::isValidHeader(uint32_t h) {
             if (i + frameLength > data.size()) {
                 break;
             }
-
+            
             frames.push_back({i, frameLength});
             frame_data.push_back({header.getMpegVersion(), header.getLayer(),
                                         header.hasCRC(), header.getBitrate(),
-                                        header.getSampleRate(), header.getChannelMode()});
+                header.getSampleRate(), header.getChannelMode(),
+                std::vector<uint8_t>(data.begin() + i, data.begin() + i + frameLength)});
 
             i += frameLength; // jump to next frame
         }

@@ -12,7 +12,8 @@
 #include "adjacency.hpp"
 
 #define CHUNK_SIZE 1024
-#define COUNTER_FREQUENCY 9999999 // modulus for counter with printouts during dfs
+#define COUNTER_FREQUENCY 9999999
+#define FILENAME "test.txt"
 
 using namespace std;
 
@@ -221,7 +222,7 @@ bool dfs(DfsState& state,
 }
 
 int main(int argc, char* argv[]) {
-    const string filename = "/home/david/Desktop/python/rp/sound/sample-3s.mp3";
+    const string filename = FILENAME;
 
     Mp3FrameScanner scanner(filename);
     if (scanner.getFrameCount() == 0) {
