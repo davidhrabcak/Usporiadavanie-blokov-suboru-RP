@@ -33,12 +33,33 @@ static uint16_t readMainDataBegin(const vector<uint8_t>& chunk, const int off) {
 }
 
 /**
+ * Detects if the current MP3 frame contains a VBR header
+ * @return Returns true if the frame at `off` inside `chunk` is a Xing/Info VBR header frame.
+ */
+static bool isXingFrame(const vector<uint8_t>& chunk, const int off, const Header& h) {
+    if (!h.isLayerIII()) return false;
+    // Side info size: MPEG1 stereo=32, MPEG1 mono=17, MPEG2/2.5 stereo=17, MPEG2/2.5 mono=9
+    const int side = sideInfoSize(h.getVersionID(), h.isMono());
+    const int xpos = off + 4 + side;
+    if (xpos + 4 > static_cast<int>(chunk.size())) return false;
+
+    const uint8_t* ptr = &chunk[xpos];
+    return std::memcmp(ptr, "Xing", 4) == 0 ||
+       std::memcmp(ptr, "Info", 4) == 0 ||
+       std::memcmp(ptr, "VBRI", 4) == 0;
+}
+
+/**
  * Try parsing a run of frames starting at `startOff` within `chunk`.
  * Returns number of consecutive consistent frames found (all matching `expected`).
  * @param out Populates `out` with slices for fully-contained frames only.
  * @param tailOverflow Bytes of the partial tail frame that are inside this chunk (0 if ends on boundary).
  * @param tailPartialLen Total length of that partial frame (-1 if we can't read its header).
- * @return Returns number of complete frames found. Also sets tailOverflow and tailPartialLen.
+ * @return Returns number of complete frames found, EXCLUDING any Xing/Info/VBRI header frame
+ *         (those are real, valid frames and must still count towards advancing `i` and towards
+ *         `out`/reservoir accounting, but they carry no audio and would otherwise bias headOffset
+ *         selection towards whichever offset happens to land on one - see computeChunkMeta).
+ *         Also sets tailOverflow and tailPartialLen.
 */
 static int tryParse(const vector<uint8_t>& chunk,
                     const int startOff,
@@ -82,7 +103,12 @@ static int tryParse(const vector<uint8_t>& chunk,
         if (expected.isLayerIII())
             mdb = readMainDataBegin(chunk, i);
         out.push_back({i, len, h.getBitrate(), mdb});
-        count++;
+        // Xing/Info/VBRI frames are real, valid frames (their bytes are kept in `out` so
+        // reservoir accounting and output reconstruction stay correct) but carry no audio,
+        // so they must not count towards the "most consecutive frames" contest below -
+        // otherwise a chunk that happens to start right on a Xing frame looks artificially
+        // strong and biases computeChunkMeta's headOffset choice.
+        if (!isXingFrame(chunk, i, h)) count++;
         i += len;
     }
 
@@ -93,6 +119,23 @@ static int tryParse(const vector<uint8_t>& chunk,
     }
 
     return count;
+}
+
+/**
+ * Ranks how trustworthy a candidate offset's tail is, from best (no ambiguity
+ * at all) to worst (unrecoverable). Used as the primary key when picking
+ * `headOffset`, ahead of raw frame count - see computeChunkMeta for why.
+ *  3 = tailOverflow == 0: chunk ends exactly on a frame boundary, no tail to resolve at all.
+ *  2 = tailPartialLen > 0: tail frame's header was read cleanly, its full length is known (Case 1).
+ *  1 = tailPartialLen == -1 with a 1-3 byte tail: header is split across chunks but recoverable (Case 2).
+ *  0 = anything else: tailPartialLen == -1 with tailOverflow > 3 - header bytes were present but
+ *      failed to decode (garbage / non-audio content / end of profile-matching stream). Unrecoverable.
+ */
+static int tailQuality(const int tailOverflow, const int tailPartialLen) {
+    if (tailOverflow == 0) return 3;
+    if (tailPartialLen > 0) return 2;
+    if (tailPartialLen == -1 && tailOverflow >= 1 && tailOverflow <= 3) return 1;
+    return 0;
 }
 
 /**
@@ -110,6 +153,7 @@ ChunkMeta computeChunkMeta(const int chunkIndex,
     meta.valid          = false;
 
     int bestCount    = 0;
+    int bestQuality  = -1;   // -1 so the first candidate found always wins
     int bestOff      = -1;
     vector<FrameSlice> bestFrames;
     int bestTail     = 0;
@@ -136,9 +180,17 @@ ChunkMeta computeChunkMeta(const int chunkIndex,
         vector<FrameSlice> frames;
         int tail = 0, tailLen = 0;
         const int count = tryParse(chunk, off, expected, frames, tail, tailLen);
+        const int quality = tailQuality(tail, tailLen);
 
-        if (count > bestCount) {
+        // Composite (tailQuality, frameCount) comparison, tailQuality first: in CBR streams
+        // the wrong alignment can win on raw frame count alone (aliased headers repeating
+        // every frameLength bytes - see CLAUDE.md "computeChunkMeta picks the wrong
+        // headOffset"), but the true boundary almost always has a cleanly-readable tail.
+        // Preferring quality over count fixes that class of bug even when it means
+        // accepting fewer frames.
+        if (quality > bestQuality || (quality == bestQuality && count > bestCount)) {
             bestCount   = count;
+            bestQuality = quality;
             bestOff     = off;
             bestFrames  = frames;
             bestTail    = tail;
@@ -168,23 +220,6 @@ ChunkMeta computeChunkMeta(const int chunkIndex,
     }
 
     return meta;
-}
-
-/**
- * Detects if the current MP3 frame contains a VBR header
- * @return Returns true if the frame at `off` inside `chunk` is a Xing/Info VBR header frame.
- */
-static bool isXingFrame(const vector<uint8_t>& chunk, const int off, const Header& h) {
-    if (!h.isLayerIII()) return false;
-    // Side info size: MPEG1 stereo=32, MPEG1 mono=17, MPEG2/2.5 stereo=17, MPEG2/2.5 mono=9
-    const int side = sideInfoSize(h.getVersionID(), h.isMono());
-    const int xpos = off + 4 + side;
-    if (xpos + 4 > static_cast<int>(chunk.size())) return false;
-
-    const uint8_t* ptr = &chunk[xpos];
-    return std::memcmp(ptr, "Xing", 4) == 0 ||
-       std::memcmp(ptr, "Info", 4) == 0 ||
-       std::memcmp(ptr, "VBRI", 4) == 0;
 }
 
 /**

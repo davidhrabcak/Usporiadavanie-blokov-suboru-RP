@@ -86,41 +86,29 @@ Inline helper: returns `tailPartialLen - tailOverflow` (≥0) if the tail frame'
 
 ### 1. CBR files — DFS is infeasible
 
-**Symptom**: for `CBR.mp3` (658 chunks), `buildAdjacency` produces ~21,400 edges (~32 successors per chunk). The DFS never terminates.
+**Update**: largely resolved for *tractability* (see TODO "Fix computeChunkMeta scoring" below) - `CBR.mp3` (658 chunks) now reconstructs in ~0.17s instead of never terminating. The composite `(tailQuality, frameCount)` scoring in `computeChunkMeta` was the actual fix: it turned out most of the ~32-way branching wasn't inherent aliasing, it was `computeChunkMeta` itself picking a `headOffset` with a worse (or absent) tail purely because it had a higher raw frame count, which fed bad `tailOverflow`/`tailPartialLen` into every downstream adjacency check. Once headOffset selection prefers a clean tail first, the branching factor collapses enough for the existing DFS + supernode collapse to finish quickly.
 
-**Root cause**: in a constant-bitrate stream all frames have the same length (e.g., 418 bytes). With `gcd(1024, 418) = 2`, only 209 distinct `headOffset` values cycle across 658 chunks. Any chunk that starts at one of those 209 positions looks structurally identical to ~3 other chunks that start at the same position. The `byFrameStart` index correctly finds ALL of them as valid successors — they are not false sync words, they are genuine frame headers — but the wrong ones.
+**What's still open**: tractability is not the same as *correctness*. Diffing `output.mp3` against the original (after skipping the leading ID3 tag both start with) shows chunk 0 matches exactly (it's pinned) but chunk 1 onward diverges from the true original order - the DFS is finding *a* structurally- and reservoir-valid Hamiltonian path, not necessarily *the* original one. CBR streams genuinely can contain multiple chunks that are indistinguishable from header/structure metadata alone (see the "byte-level verification" idea below), so recovering the exact original order still needs a stronger signal than what's implemented. Original symptom/root-cause analysis kept below for context.
 
-**What is needed**: byte-level verification at the chunk junction. The last `tailOverflow` bytes of chunk a and the first `tailRemaining` bytes of chunk b together form the body of the split frame. Verifying that those bytes are consistent (e.g., by storing them in `ChunkMeta` and comparing at adjacency-check time) would collapse the branching factor from ~32 to ~1.
+**Original symptom**: `buildAdjacency` produced ~21,400 edges (~32 successors per chunk) and the DFS never terminated.
 
-**Current workaround**: none. CBR reconstruction does not complete.
+**Original root cause analysis**: in a constant-bitrate stream all frames have the same length (e.g., 418 bytes). With `gcd(1024, 418) = 2`, only 209 distinct `headOffset` values cycle across 658 chunks, so any chunk starting at one of those positions looks structurally identical to ~3 others. This is still true today for the frame *headers* (CBR headers really do repeat byte-for-byte); what changed is that `computeChunkMeta` no longer hands adjacency a wrong `headOffset` on top of that, which was multiplying the ambiguity far beyond what the header aliasing alone would cause.
+
+**On "byte-level junction verification" (the fix originally proposed here)**: attempting this literally - store the last `tailOverflow` bytes of chunk a and the first `tailRemaining` bytes of chunk b and compare them - does not actually work: those are two *different, adjacent* ranges of the same split frame's body, not two copies of the same bytes, so there is nothing to assert equality against without already knowing the true order. The one byte-level check that *is* meaningful (the reservoir's `mainDataBegin`) is covered under item 3 below. Genuinely disambiguating aliased CBR headers likely needs one of the "Alternative approaches" further down (padding-bit tracking, spectral continuity, or exhaustive Hungarian matching), none of which are implemented.
 
 ### 2. `computeChunkMeta` picks the wrong headOffset for some CBR chunks
 
-**Symptom**: 7 pre-shuffle breaks remain for `CBR.mp3` even after all adjacency fixes.
-
-**Root cause**: `computeChunkMeta` selects the headOffset that maximises the number of consecutive complete frames. In CBR files, multiple starting positions can produce the same (maximum) frame count. The greedy winner is always the lowest offset — which is not always the true frame boundary. The wrong headOffset causes the tail metadata to be wrong, which creates a double break: the wrongly-aligned chunk fails as a successor of its predecessor, and also fails as a predecessor of its own successor.
-
-**Example**: true alignment gives 1 complete frame with tailOvfl=357, tailPartialLen=418. Greedy picks 2 frames with tailOvfl=2, tailPartialLen=−1 (2 bytes of next header split). headOffset difference: 186 (chosen) vs 249 (correct).
-
-**What is needed**: a composite scoring metric in `computeChunkMeta` that prefers alignments with a clean, readable tail (tailPartialLen > 0) over those with an orphaned or split tail, even if the frame count is lower. Or, equivalently, the adjacency check should accept any `rem` that corresponds to a valid frame position in chunk b — which `frameStarts` now enables — rather than requiring `headOffset == rem`.
-
-**Current status**: partially mitigated. The `frameStarts` fallback in `canFollow` fixes 7 of the original 14 breaks. The remaining 7 have `tailPartialLen = −1` with large `tailOverflow` (orphaned bytes), which are cases where the wrong alignment produces a frame run that terminates mid-chunk with no readable next header. These cannot be recovered by `frameStarts` alone.
+**Status: fixed.** See TODO "Fix computeChunkMeta scoring for clean-tail alignment" below - `computeChunkMeta` now ranks candidate offsets by `(tailQuality, frameCount)` instead of `frameCount` alone, so a 1-frame offset with a cleanly-readable tail beats a 2-frame offset with a split/orphaned tail. This was the main contributor to item 1's branching-factor blowup, not just the 7 residual pre-shuffle breaks originally described here.
 
 ### 3. `validateReservoir` does not model bit-reservoir consumption
 
-**Symptom**: the reservoir check provides no pruning during the DFS for files with 2+ frames per chunk.
+**Status: partially addressed, with an important caveat.** The check now runs incrementally per supernode placement during the DFS (`advanceReservoirChunk`/`advanceReservoirFrame` in `main.cpp`) instead of once at the end, so a bad reservoir chain is pruned as soon as it occurs rather than after a full ordering is assembled.
 
-**Root cause**: `validateReservoir` only accumulates bytes produced per frame and caps at `maxReservoir` (511 for MPEG1). It never subtracts consumed bytes. After just 1–2 chunks with 2 frames each (2 × 382 = 764 bytes produced > 511), `accumulated` saturates at 511 and every subsequent `mainDataBegin ≤ 511` check trivially passes. The check is therefore only effective for the very first chunk in the ordering.
-
-**What is needed**: proper consumption modelling — after each frame's audio data is "read" from the reservoir, subtract its length from `accumulated`. This would keep `accumulated` at a realistic level and allow meaningful pruning during the DFS. Alternatively, move reservoir validation into the DFS as an incremental check per supernode placed, rather than a final check at the end.
+True consumption modelling (subtracting each frame's *actual* compressed-data length from the reservoir) was attempted and reverted: it requires `part2_3_length` (summed per granule/channel), which nothing in this codebase parses. A first attempt substituted `mainDataBegin` itself as "bytes consumed this frame" - that's wrong (mainDataBegin is a backward *pointer*, not a consumption amount) and it was caught empirically: instrumenting `sample-3s.mp3`'s known-correct order showed `mainDataBegin` sitting near the 511-byte cap on nearly every frame while each frame only produces ~382 bytes, so the subtract-based level went net-negative every frame, saturated at 0 within a handful of chunks, and then rejected the true ordering outright. The check has been kept at the older, weaker, accumulate-only formula (never subtracts) - it still won't catch much beyond the first chunk or two (same limitation as before), it just now runs earlier. Modelling real consumption remains future work and needs `part2_3_length` parsing added to `Header`/`chunk_meta`.
 
 ### 4. Case 2 still O(n) per chunk
 
-**Symptom**: chunks with `tailOverflow` ∈ {1,2,3} (split 4-byte header) scan all n chunks to find valid successors.
-
-**Root cause**: the expected successor's `headOffset` depends on bytes from the candidate chunk b (`b.chunkHead`), so the required position cannot be determined without reading b. Building a secondary index keyed on `chunkHead` prefixes would allow O(1) lookup at the cost of additional bookkeeping.
-
-**Impact**: low for typical files (few Case-2 chunks per run). Not the current bottleneck.
+**Status: fixed.** `buildAdjacency` now groups valid chunks by their `chunkHead` prefix (`byChunkHeadPrefix`, one map per `tov` value 1-3) and reconstructs/validates the candidate header once per distinct prefix bucket instead of once per chunk in the file - see TODO "Resolve Case-2 O(n) scan" below.
 
 ### 5. Non-audio embedded content causes unresolvable breaks
 
@@ -135,22 +123,22 @@ Inline helper: returns `tailPartialLen - tailOverflow` (≥0) if the tail frame'
 ### High priority — fixes to the current algorithm
 
 - [ ] **Store junction bytes in `ChunkMeta` and verify them in `canFollow`.**
-  The single most impactful change. For Case 1, store the last `min(tailOverflow, N)` bytes of the partial tail frame (e.g., N=16) as `tailBodySuffix` in `ChunkMeta`, and store the first `min(tailRemaining, N)` bytes of each chunk as an extended `chunkPrefix`. In `canFollow`, verify that `a.tailBodySuffix` matches the corresponding prefix of `b.chunkPrefix`. This collapses the ~32-way branching in CBR files to ~1 and makes the DFS tractable.
+  **Investigated, not implemented as originally described - see "On byte-level junction verification" under Known Limitations item 1.** The literal version (compare chunk a's tail bytes against chunk b's head bytes for equality) doesn't hold up: those are different, non-overlapping ranges of one split frame's body, not duplicate copies of the same bytes, so there's nothing valid to assert there. What actually fixed the CBR branching explosion was the `computeChunkMeta` scoring fix below, plus the reservoir check now running per-edge instead of only at the end. Real junction disambiguation for aliased CBR headers is still open; see the "Alternative approaches" section.
 
-- [ ] **Fix `computeChunkMeta` scoring for clean-tail alignment.**
-  Extend the "best offset" metric from a single frame-count integer to a composite: `(frameCount, tailQuality)` where `tailQuality` ranks `tailPartialLen > 0` above `tailPartialLen == -1` (split header) above orphaned bytes (tailPartialLen = -1, tailOverflow > 3). This eliminates the second class of pre-shuffle breaks where the greedy 2-frame alignment is chosen over a 1-frame alignment with a readable tail.
+- [x] **Fix `computeChunkMeta` scoring for clean-tail alignment.**
+  Implemented in `chunk_meta.cpp` (`tailQuality()` + the composite comparison in `computeChunkMeta`). The "best offset" metric is now `(tailQuality, frameCount)` compared with `tailQuality` first, where `tailQuality` ranks: `tailOverflow == 0` (chunk ends exactly on a frame boundary, no ambiguity at all) above `tailPartialLen > 0` (clean readable tail) above `tailPartialLen == -1` with a 1-3 byte split header (Case 2 recoverable) above everything else (orphaned/unrecoverable). This is checked *before* frame count, per the worked example in Known Limitations item 2, and empirically turned `CBR.mp3` from non-terminating into a ~0.17s reconstruction.
 
-- [ ] **Incremental `validateReservoir` inside the DFS.**
-  Move the bit-reservoir check from the terminal condition into the per-supernode placement step. Thread `reservoirLevel` through `DfsState` and update it as each supernode is placed. Also model consumption: subtract frame audio data length from the reservoir after each frame, not just accumulate. This converts the reservoir check from a post-hoc filter into an actual pruning mechanism.
+- [x] **Incremental `validateReservoir` inside the DFS.**
+  Implemented in `main.cpp` (`advanceReservoirFrame`/`advanceReservoirChunk`, threaded through `DfsState`/`dfs()`). A candidate supernode's reservoir validity is now checked (and `state.reservoirLevel` saved/restored) as it's tried, not deferred to a full ordering. The "model consumption by subtracting frame length" half of this item was attempted and reverted - see Known Limitations item 3 for why (it requires `part2_3_length`, which isn't parsed, and substituting `mainDataBegin` for it breaks real files). The check itself is still the older accumulate-only approximation; only *when* it runs changed.
 
-- [ ] **Resolve Case-2 O(n) scan.**
-  Build a secondary index keyed on the first 3 bytes of `chunkHead` (one index per `tov` value 1, 2, 3). For a chunk with `tailOverflow = tov`, only candidates whose `chunkHead[0..3-tov]` could form a valid reconstructed header need to be checked. Eliminates the linear scan for split-header chunks.
+- [x] **Resolve Case-2 O(n) scan.**
+  Implemented in `adjacency.cpp` (`byChunkHeadPrefix` index + `packPrefix()`). Valid chunks are grouped by the exact `chunkHead` prefix bytes Case 2 needs (one map per `tov` value 1-3); each distinct prefix bucket reconstructs and validates its candidate header once instead of once per chunk in the file.
 
 - [ ] **Handle embedded non-audio content (ID3v2 mid-stream, PRIV frames).**
-  Before computing `ChunkMeta`, scan each chunk for embedded ID3v2 tags (`ID3` magic at any offset). If found, skip the tag body and resume frame parsing from after it. Record the tag size so `tailRemaining` can account for the non-audio bytes when computing expected successor `headOffset`.
+  Not attempted this pass. Before computing `ChunkMeta`, scan each chunk for embedded ID3v2 tags (`ID3` magic at any offset). If found, skip the tag body and resume frame parsing from after it. Record the tag size so `tailRemaining` can account for the non-audio bytes when computing expected successor `headOffset`.
 
-- [ ] **Correctly detect and skip Xing/Info/VBRI headers in `computeChunkMeta`.**
-  Currently `deriveProfile` skips Xing frames, but `computeChunkMeta` counts them as ordinary frames. A Xing frame at the very beginning of a chunk will inflate `bestCount` and bias `headOffset`. Add the `isXingFrame` check inside `tryParse` so these frames are excluded from the count.
+- [x] **Correctly detect and skip Xing/Info/VBRI headers in `computeChunkMeta`.**
+  Implemented in `chunk_meta.cpp` (`isXingFrame` moved above `tryParse` and called from inside its loop). A Xing/Info/VBRI frame still counts towards `i`'s advance and is still kept in `out`/`frames` (its bytes are real and need to end up in the reconstructed output, and dropping it from the reservoir accounting would be its own inaccuracy), but it no longer inflates `count`, so it can no longer bias which offset `computeChunkMeta` picks as `headOffset`.
 
 ---
 

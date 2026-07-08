@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 4.1)
+cmake_minimum_required(VERSION 3.16)
 project(rp)
 
 set(CMAKE_CXX_STANDARD 14)
@@ -14,3 +14,11 @@ add_executable(rp
         adjacency.hpp
         main.cpp
         main.hpp)
+
+add_executable(evaluate_order
+        test/evaluate_order.cpp
+        frame_scanner.cpp
+        frame_scanner.hpp
+        Header.cpp
+        Header.hpp)
+target_compile_features(evaluate_order PRIVATE cxx_std_17)

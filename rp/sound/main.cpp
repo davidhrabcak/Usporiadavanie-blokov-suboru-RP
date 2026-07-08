@@ -33,29 +33,60 @@ static int sideInfoBytes(const StreamProfile& p) {
 }
 
 /**
- * Validates the bit reservoir integrity for a specific sequence of MP3 frames.
- * @param order The order of MP3 frames to be validated.
- * @param metas Metadata for each chunk.
- * @return Returns true if the proposed chunk ordering produces a valid Layer III bit-reservoir chain.
- *         For non-Layer-III files always returns true.
+ * Advances the Layer III bit-reservoir level through a single frame and checks that
+ * the frame's mainDataBegin is actually satisfiable by what has accumulated so far.
+ *
+ * level_after = clamp(level_before + produced) - i.e. this only ACCUMULATES, it never
+ * subtracts what a frame actually consumed. That is a deliberate choice, not an oversight:
+ * a real decoder's reservoir also depletes by each frame's actual compressed-data length,
+ * which lives in `part2_3_length` (summed per granule/channel) - a field this codebase
+ * does not parse anywhere (Header.cpp stops at the frame header; chunk_meta.cpp only reads
+ * mainDataBegin out of the side info). Without it there is no trustworthy "bytes consumed
+ * this frame" figure to subtract.
+ *
+ * A first attempt at this function subtracted mainDataBegin itself as a stand-in for
+ * consumption. That regressed real reconstructions: instrumenting a known-good file
+ * (sample-3s.mp3) showed mainDataBegin sitting near the 511-byte cap on nearly every
+ * frame while `produced` was ~382 bytes/frame, so the subtract-based level went net
+ * negative every frame and saturated at 0 within a handful of chunks - after which every
+ * subsequent frame with mainDataBegin > 0 was (wrongly) rejected, and the true ordering
+ * could no longer pass. mainDataBegin is a backward *pointer*, not a consumption amount -
+ * treating it as both double-counts the same bytes. So this keeps the old, weaker,
+ * accumulate-only check (matching the previous validateReservoir's semantics) and only
+ * changes *when* it runs - see advanceReservoirChunk / dfs. Modelling true consumption
+ * would require parsing part2_3_length, which is future work (see CLAUDE.md).
+ *
+ * @param level  Current reservoir fill level in bytes; updated in place.
+ * @param f      The frame to advance through.
+ * @param sideInfo Side-information size in bytes for this stream (see sideInfoBytes).
+ * @param maxReservoir Reservoir capacity in bytes (511 for MPEG1, 255 for MPEG2/2.5).
+ * @return False if `f.mainDataBegin` reaches further back than `level` allows (invalid chain).
  */
-bool validateReservoir(const vector<int>& order,
-                       const vector<ChunkMeta>& metas) {
-    const StreamProfile& p = metas[order[0]].profile;
-    if (!p.isLayerIII()) return true;
+static bool advanceReservoirFrame(int& level, const FrameSlice& f, const int sideInfo, const int maxReservoir) {
+    if (f.mainDataBegin > level) return false;
 
-    const int sideInfo = sideInfoBytes(p);
-    const int maxReservoir = (p.versionID == 0b11) ? 511 : 255;
+    int produced = f.length - 4 - sideInfo;
+    if (produced < 0) produced = 0;
 
-    int accumulated = 0;
-    for (int ci : order) {
-        for (const FrameSlice& f : metas[ci].frames) {
-            int produced = f.length - 4 - sideInfo;
-            if (produced < 0) produced = 0;
-            accumulated += produced;
-            if (accumulated > maxReservoir) accumulated = maxReservoir;
-            if (f.mainDataBegin > accumulated) return false;
-        }
+    level += produced;
+    if (level > maxReservoir) level = maxReservoir;
+    return true;
+}
+
+/**
+ * Advances the reservoir through every frame of a single chunk, in order. Used to
+ * incrementally validate/extend the reservoir as each supernode is placed during the DFS,
+ * rather than only checking the fully-assembled order at the end (see dfs()).
+ * @param level Current reservoir fill level in bytes; updated in place, even on failure
+ *              (the caller must restore it from a saved copy rather than trust it after false).
+ * @param meta  Metadata for the chunk being appended to the candidate order.
+ * @param sideInfo Side-information size in bytes for this stream.
+ * @param maxReservoir Reservoir capacity in bytes.
+ * @return False as soon as any frame in this chunk is invalid; true if the whole chunk passes.
+ */
+static bool advanceReservoirChunk(int& level, const ChunkMeta& meta, const int sideInfo, const int maxReservoir) {
+    for (const FrameSlice& f : meta.frames) {
+        if (!advanceReservoirFrame(level, f, sideInfo, maxReservoir)) return false;
     }
     return true;
 }
@@ -164,20 +195,25 @@ vector<Supernode> buildSupernodes(
 struct DfsState {
     vector<int> order;    // supernode indices placed so far
     vector<bool> used;
-    int reservoirLevel = 0;   // unused: reservoir check runs on full order
+    int reservoirLevel = 0;   // bit-reservoir fill level after everything placed so far
 };
 
 static uint64_t counter = 0;
 
 /**
  * Exhaustive DFS over the supernode graph, starting from the supernode containing chunk 0.
- * At a complete ordering, validateReservoir() runs a Layer III bit-reservoir check
- * (monotonically accumulates bytes produced per frame;
- * rejects if any frame's mainDataBegin exceeds the accumulated total).
- * @param state The current state of the search.
+ * The Layer III bit-reservoir check now runs incrementally as each candidate supernode is
+ * tried (see advanceReservoirChunk), instead of only once the whole order is complete - a
+ * candidate that would break the reservoir chain is pruned immediately rather than explored
+ * to the end, per CLAUDE.md TODO "Incremental validateReservoir inside the DFS".
+ * @param state The current state of the search. state.reservoirLevel must already reflect
+ *              every chunk in state.order.
  * @param supernodes A list of supernode structures containing grouped MP3 chunks.
  * @param superAdj The adjacency list representing valid transitions between supernodes.
  * @param metas Metadata for all chunks.
+ * @param sideInfo Side-information size in bytes for this stream (0 / unused for non-Layer-III).
+ * @param maxReservoir Reservoir capacity in bytes (0 / unused for non-Layer-III).
+ * @param isLayerIII Whether the reservoir check applies at all to this stream.
  * @param result If found, the valid supernode sequence is filled into result.
  * @return True if a valid, decodable sequence of all supernodes exists.
  */
@@ -185,16 +221,14 @@ bool dfs(DfsState& state,
          const vector<Supernode>& supernodes,
          const vector<vector<int>>& superAdj,
          const vector<ChunkMeta>& metas,
+         const int sideInfo,
+         const int maxReservoir,
+         const bool isLayerIII,
          vector<int>& result) {
 
     if (state.order.size() == supernodes.size()) {
-        // Flatten to chunk order and do final reservoir check
-        vector<int> chunkOrder;
-        for (const int si : state.order)
-            for (int ci : supernodes[si].chunks)
-                chunkOrder.push_back(ci);
-
-        if (!validateReservoir(chunkOrder, metas)) return false;
+        // Reservoir validity has already been established incrementally for every
+        // chunk placed so far - nothing left to verify.
         result = state.order;
         return true;
     }
@@ -205,6 +239,21 @@ bool dfs(DfsState& state,
     for (int si : candidates) {
         if (state.used[si]) continue;
 
+        const int savedLevel = state.reservoirLevel;
+        bool reservoirOk = true;
+        if (isLayerIII) {
+            for (int ci : supernodes[si].chunks) {
+                if (!advanceReservoirChunk(state.reservoirLevel, metas[ci], sideInfo, maxReservoir)) {
+                    reservoirOk = false;
+                    break;
+                }
+            }
+        }
+        if (!reservoirOk) {
+            state.reservoirLevel = savedLevel;
+            continue;
+        }
+
         state.used[si] = true;
         state.order.push_back(si);
 
@@ -213,10 +262,11 @@ bool dfs(DfsState& state,
                   << "/" << supernodes.size() << "\n";
          }
 
-        if (dfs(state, supernodes, superAdj, metas, result)) return true;
+        if (dfs(state, supernodes, superAdj, metas, sideInfo, maxReservoir, isLayerIII, result)) return true;
 
         state.order.pop_back();
         state.used[si] = false;
+        state.reservoirLevel = savedLevel;
     }
     return false;
 }
@@ -340,16 +390,34 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // Reservoir parameters for this stream, computed once up front and threaded through
+    // every DFS call rather than recomputed per edge.
+    const bool isLayerIII   = profile.isLayerIII();
+    const int  sideInfo     = sideInfoBytes(profile);
+    const int  maxReservoir = (profile.versionID == 0b11) ? 511 : 255;
+
     DfsState state;
     state.used.resize(supernodes.size(), false);
     state.order.push_back(startSuper);
     state.used[startSuper] = true;
     state.reservoirLevel = 0;
 
+    // Prime the reservoir with chunk 0's own frames before the DFS explores any
+    // successor - chunk 0 is pinned, so it is always the first thing placed.
+    if (isLayerIII) {
+        for (int ci : supernodes[startSuper].chunks) {
+            if (!advanceReservoirChunk(state.reservoirLevel, metas[ci], sideInfo, maxReservoir)) {
+                cerr << "Reservoir check failed on the pinned starting chunk - "
+                        "mainDataBegin metadata is likely wrong for chunk 0\n";
+                return 1;
+            }
+        }
+    }
+
     vector<int> result;
     cout << "Starting DFS over " << supernodes.size() << " supernodes...\n";
 
-    if (dfs(state, supernodes, superAdj, metas, result)) {
+    if (dfs(state, supernodes, superAdj, metas, sideInfo, maxReservoir, isLayerIII, result)) {
         cout << "Reconstruction found\n";
         ofstream out("output.mp3", ios::binary | ios::trunc);
         if (!out) { cerr << "Cannot open output.mp3\n"; return 1; }

@@ -59,6 +59,18 @@ bool canFollow(const ChunkMeta& a, const ChunkMeta& b) {
 }
 
 /**
+ * Packs the first `len` bytes of `chunkHead` (len in 1..3) into an integer key, most
+ * significant byte first. Used to group chunks by the exact bytes Case 2 needs from
+ * their chunkHead, so lookup doesn't require scanning every chunk - see the
+ * byChunkHeadPrefix index in buildAdjacency.
+ */
+static uint32_t packPrefix(const uint8_t chunkHead[4], const int len) {
+    uint32_t key = 0;
+    for (int k = 0; k < len; ++k) key = (key << 8) | chunkHead[k];
+    return key;
+}
+
+/**
  * Constructs the full graph using a byFrameStart index for O(n) Case-1 lookups.
  * @return Constructed adjacency list of output graph.
  *         adj[i] = list of chunk indices that can follow chunk i.
@@ -75,6 +87,19 @@ vector<vector<int>> buildAdjacency(const vector<ChunkMeta>& metas) {
         for (int pos : metas[i].frameStarts)
             byFrameStart[pos].push_back(i);
 
+    // Index for Case 2: for each possible tov (1..3), group valid chunks by the
+    // (4-tov)-byte chunkHead prefix that a reconstructed header would need from them.
+    // Chunks sharing a prefix reconstruct to the *same* header, so isValidHeader/Header
+    // decoding/profile matching is done once per distinct prefix instead of once per
+    // candidate chunk - see CLAUDE.md TODO "Resolve Case-2 O(n) scan".
+    unordered_map<uint32_t, vector<int>> byChunkHeadPrefix[3]; // index 0 -> tov=1 (3-byte prefix), etc.
+    for (int j = 0; j < n; ++j) {
+        if (!metas[j].valid) continue;
+        for (int tov = 1; tov <= 3; ++tov) {
+            byChunkHeadPrefix[tov - 1][packPrefix(metas[j].chunkHead, 4 - tov)].push_back(j);
+        }
+    }
+
     for (int i = 0; i < n; ++i) {
         int rem = tailRemaining(metas[i]);
         if (rem >= 0) {
@@ -88,12 +113,12 @@ vector<vector<int>> buildAdjacency(const vector<ChunkMeta>& metas) {
             const int tail_ov = metas[i].tailOverflow;
             if (tail_ov < 1 || tail_ov > 3) continue;
 
-            for (int j = 0; j < n; ++j) {
-                if (j == i || !metas[j].valid) continue;
+            for (const auto& entry : byChunkHeadPrefix[tail_ov - 1]) {
+                const uint32_t prefixKey = entry.first;
+                const vector<int>& members = entry.second;
                 uint8_t hbytes[4];
-
                 for (int k = 0; k < tail_ov; ++k) hbytes[k] = metas[i].tailHeadBytes[k];
-                for (int k = tail_ov; k < 4; ++k) hbytes[k] = metas[j].chunkHead[k - tail_ov];
+                for (int k = tail_ov; k < 4; ++k) hbytes[k] = static_cast<uint8_t>(prefixKey >> (8 * (3 - k)));
 
                 const uint32_t raw = (static_cast<uint32_t>(hbytes[0]) << 24) | (static_cast<uint32_t>(hbytes[1]) << 16)
                              | (static_cast<uint32_t>(hbytes[2]) << 8)  |  static_cast<uint32_t>(hbytes[3]);
@@ -105,7 +130,12 @@ vector<vector<int>> buildAdjacency(const vector<ChunkMeta>& metas) {
 
                 const int frameLen = h.getFrameLength();
                 if (frameLen <= 0) continue;
-                if (hasFrameAt(metas[j], frameLen - tail_ov)) adj[i].push_back(j);
+                const int expectedHead = frameLen - tail_ov;
+
+                for (int j : members) {
+                    if (j == i) continue;
+                    if (hasFrameAt(metas[j], expectedHead)) adj[i].push_back(j);
+                }
             }
         }
     }

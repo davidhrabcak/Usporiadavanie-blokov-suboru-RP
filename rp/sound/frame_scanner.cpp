@@ -23,6 +23,13 @@ using namespace std;
         return frame_data.at(index);
     }
 
+    vector<vector<uint8_t>> Mp3FrameScanner::getRawChunks() const {
+        vector<vector<uint8_t>> chunks;
+        chunks.reserve(frame_data.size());
+        for (const FrameData& fd : frame_data) chunks.push_back(fd.rawBits);
+        return chunks;
+    }
+
 
     void Mp3FrameScanner::loadFile(const string& filename) {
         ifstream file(filename, ios::binary);
