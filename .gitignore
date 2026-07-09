@@ -1,9 +1,9 @@
-rp/.vscode/
+/.vscode/
 *.txt
 !CMakeLists.txt
-rp/segmentIn
-rp/segment
-rp/segment_*
+/segmentIn
+/segment
+/segment_*
 dictionary_creator
-rp/main.py
+/main.py
 __pycache__
