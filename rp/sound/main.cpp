@@ -13,7 +13,7 @@
 
 #define CHUNK_SIZE 1024
 #define COUNTER_FREQUENCY 9999999
-#define FILENAME "test.txt"
+#define FILENAME "test/test7_shorter.mp3"
 
 using namespace std;
 

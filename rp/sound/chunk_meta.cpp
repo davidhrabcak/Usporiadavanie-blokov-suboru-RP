@@ -203,7 +203,7 @@ ChunkMeta computeChunkMeta(const int chunkIndex,
         }
     }
 
-    if (bestOff >= 0 && bestCount >= 1) {
+    if (bestOff >= 0) {
         meta.valid          = true;
         meta.headOffset     = bestOff;
         meta.tailOverflow   = bestTail;

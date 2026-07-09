@@ -39,7 +39,7 @@ using namespace std;
         }
 
         data = vector<uint8_t>(
-            istreambuf_iterator(file),
+            istreambuf_iterator<char>(file),
             istreambuf_iterator<char>()
         );
 
