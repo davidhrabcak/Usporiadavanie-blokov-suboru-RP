@@ -36,7 +36,7 @@ class Mp3FrameScanner {
     public:
     Mp3FrameScanner(const std::string& filename);
     const std::vector<FrameInfo>& getFrames();
-    unsigned long getFrameCount();
+    unsigned long getFrameCount() const;
     FrameData getFrame(size_t index);
     static bool isValidHeader(uint32_t headerRaw);
     /** Returns each frame's raw bytes, in file order - one chunk per frame. */

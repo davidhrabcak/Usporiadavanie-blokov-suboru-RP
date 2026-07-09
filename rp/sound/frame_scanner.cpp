@@ -15,7 +15,7 @@ using namespace std;
         return frames;
     }
 
-    unsigned long Mp3FrameScanner::getFrameCount(){
+    unsigned long Mp3FrameScanner::getFrameCount() const {
         return frames.size();
     }
 
@@ -100,10 +100,10 @@ bool Mp3FrameScanner::isValidHeader(uint32_t h) {
         } */
         while (i + 4 <= data.size()) {
             const uint32_t headerRaw =
-                (uint32_t(data[i]) << 24) |
-                (uint32_t(data[i+1]) << 16) |
-                (uint32_t(data[i+2]) << 8) |
-                (uint32_t(data[i+3]));
+                (static_cast<uint32_t>(data[i]) << 24) |
+                (static_cast<uint32_t>(data[i + 1]) << 16) |
+                (static_cast<uint32_t>(data[i + 2]) << 8) |
+                static_cast<uint32_t>(data[i + 3]);
 
 
             if (!isValidHeader(headerRaw)) {
@@ -113,33 +113,7 @@ bool Mp3FrameScanner::isValidHeader(uint32_t h) {
             int return_value;
             Header header(headerRaw, return_value);
             if (return_value != 0) {
-                /*switch (return_value) {
-                    case -1: {
-                        cerr << "Failed to decode version, frame " << i << endl;
-                        break;
-                    }
-                    case -2: {
-                        cerr << "Failed to decode layer, frame " << i << endl;
-                        break;
-                    }
-                    case -3: {
-                        cerr << "Failed to decode bitrate, frame " << i << endl;
-                        break;
-                    }
-                    case -4: {
-                        cerr << "Failed to decode sample_rate, frame " << i << endl;
-                    }
-                        case -5: {
-                        cerr << "Failed to decode channel mode, frame " << i << endl;
-                        break;
-                    }
-                        default: {
-                        cerr << "Unknown error frame " << i << endl;
-                        break;
-                    }
-
-                }
-                */
+                // TODO
             }
 
             const int frameLength = header.getFrameLength();

@@ -49,9 +49,23 @@ static bool isXingFrame(const vector<uint8_t>& chunk, const int off, const Heade
        std::memcmp(ptr, "VBRI", 4) == 0;
 }
 
+/* Helper function that eliminates repeating code.
+ * Check if chunk is long enough for a header are still needed before using this function. */
+static uint32_t computeChunkHeader(const vector<uint8_t>& chunk, const int index) {
+    return (static_cast<uint32_t>(chunk[index])   << 24) |
+           (static_cast<uint32_t>(chunk[index + 1]) << 16) |
+           (static_cast<uint32_t>(chunk[index + 2]) << 8)  |
+            static_cast<uint32_t>(chunk[index + 3]);
+}
+
+
 /**
  * Try parsing a run of frames starting at `startOff` within `chunk`.
  * Returns number of consecutive consistent frames found (all matching `expected`).
+ *
+ * @param chunk Chunk for parsing.
+ * @param startOff Starting offset within chunk where parsing is tried.
+ * @param expected Expected frame profile that is matched with all found consecutive frames.
  * @param out Populates `out` with slices for fully-contained frames only.
  * @param tailOverflow Bytes of the partial tail frame that are inside this chunk (0 if ends on boundary).
  * @param tailPartialLen Total length of that partial frame (-1 if we can't read its header).
@@ -75,12 +89,7 @@ static int tryParse(const vector<uint8_t>& chunk,
     tailPartialLen  = 0;
 
     while (i + 4 <= static_cast<int>(chunk.size())) {
-        const uint32_t raw =
-            (static_cast<uint32_t>(chunk[i])   << 24) |
-            (static_cast<uint32_t>(chunk[i + 1]) << 16) |
-            (static_cast<uint32_t>(chunk[i + 2]) << 8)  |
-             static_cast<uint32_t>(chunk[i + 3]);
-
+        const uint32_t raw = computeChunkHeader(chunk, i);
         if (!Mp3FrameScanner::isValidHeader(raw)) break;
 
         int err;
@@ -162,11 +171,7 @@ ChunkMeta computeChunkMeta(const int chunkIndex,
     const int limit = min(static_cast<int>(chunk.size()) - 4, MAX_FRAME_LENGTH - 1);
 
     for (int off = 0; off <= limit; ++off) {
-        const uint32_t raw =
-            (static_cast<uint32_t>(chunk[off])   << 24) |
-            (static_cast<uint32_t>(chunk[off + 1]) << 16) |
-            (static_cast<uint32_t>(chunk[off + 2]) << 8)  |
-             static_cast<uint32_t>(chunk[off + 3]);
+        const uint32_t raw = computeChunkHeader(chunk, off);
 
         if (!Mp3FrameScanner::isValidHeader(raw)) continue;
 
@@ -223,6 +228,7 @@ ChunkMeta computeChunkMeta(const int chunkIndex,
 }
 
 /**
+ * Creates StreamProfile structure from input chunk
  *
  * @param chunk Input chunk from which  profile is derived.
  * @param out Output struct StreamProfile
@@ -230,11 +236,7 @@ ChunkMeta computeChunkMeta(const int chunkIndex,
  */
 bool deriveProfile(const vector<uint8_t>& chunk, StreamProfile& out) {
     for (int i = 0; i + 4 <= static_cast<int>(chunk.size()); ++i) {
-        const uint32_t raw =
-            (static_cast<uint32_t>(chunk[i])   << 24) |
-            (static_cast<uint32_t>(chunk[i + 1]) << 16) |
-            (static_cast<uint32_t>(chunk[i + 2]) << 8)  |
-             static_cast<uint32_t>(chunk[i + 3]);
+        const uint32_t raw = computeChunkHeader(chunk, i);
 
         if (!Mp3FrameScanner::isValidHeader(raw)) continue;
 
