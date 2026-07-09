@@ -39,7 +39,7 @@ using namespace std;
         }
 
         data = vector<uint8_t>(
-            istreambuf_iterator<char>(file),
+            istreambuf_iterator(file),
             istreambuf_iterator<char>()
         );
 
@@ -62,42 +62,19 @@ using namespace std;
         return 0;
     }
 
-bool Mp3FrameScanner::isValidHeader(uint32_t h) {
-        if (((h >> 21) & 0x7FF) != 0x7FF) return false;
+bool Mp3FrameScanner::isValidHeader(uint32_t headerRaw) {
+        if (((headerRaw >> 21) & 0x7FF) != 0x7FF) return false;
 
-        uint8_t version = (h >> 19) & 0x3;
-        uint8_t layer   = (h >> 17) & 0x3;
+        const uint8_t version = (headerRaw >> 19) & 0x3;
+        uint8_t layer = (headerRaw >> 17) & 0x3;
 
-        if (version == 0b01) return false;
-        if (layer == 0b00) return false;
+        if (version == 0b01 || layer == 0) return false;
 
         return true;
     }
 
     void Mp3FrameScanner::scanFrames() {
         size_t i = skipID3();
-        /*debug print
-        cout << "ID3 header: " << i << endl;
-        cout << "First bytes after ID3:\n";
-        for (int j = 0; j < 100 && i + j < data.size(); ++j) {
-            printf("%02X ", data[i + j]);
-        }
-        cout << endl;
-
-        for (int k = 0; k < 20 && i + k + 4 <= data.size(); ++k) {
-            size_t pos = i + k;
-
-            uint32_t raw =
-                (uint32_t(data[pos]) << 24) |
-                (uint32_t(data[pos+1]) << 16) |
-                (uint32_t(data[pos+2]) << 8) |
-                (uint32_t(data[pos+3]));
-
-            cout << "pos=" << pos
-                 << " raw=0x" << hex << raw << dec
-                 << " sync=" << (((raw >> 21) & 0x7FF) == 0x7FF)
-                 << endl;
-        } */
         while (i + 4 <= data.size()) {
             const uint32_t headerRaw =
                 (static_cast<uint32_t>(data[i]) << 24) |
@@ -113,7 +90,8 @@ bool Mp3FrameScanner::isValidHeader(uint32_t h) {
             int return_value;
             Header header(headerRaw, return_value);
             if (return_value != 0) {
-                // TODO
+                ++i;
+                continue;
             }
 
             const int frameLength = header.getFrameLength();
