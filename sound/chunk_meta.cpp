@@ -58,6 +58,69 @@ static uint32_t computeChunkHeader(const vector<uint8_t>& chunk, const int index
             static_cast<uint32_t>(chunk[index + 3]);
 }
 
+/**
+ * Sums 'part2_3_length' (the actual main-data bits a Layer III frame consumes from
+ * the bit reservoir) across every granule/channel in the frame's side-info block.
+ *
+ * Returned in BITS, not bytes: part2_3_length is a bit-granular quantity (it is the exact
+ * number of bits spent on scalefactors + Huffman data), and the reservoir bookkeeping in
+ * main.cpp accumulates it every frame. Rounding up to bytes here would add up to ~7 bits
+ * of phantom "consumption" on *every single frame*, and that systematic bias compounds
+ * across a whole file into a large false deficit - confirmed empirically: it caused the
+ * reservoir check to reject `test7_shorter.mp3`'s true, correct chunk order by chunk 7
+ * (see CLAUDE.md). Only `mainDataBegin` (a byte-granular field in the bitstream) should
+ * ever be compared/rounded at the byte level; the running reservoir level itself must stay
+ * bit-precise.
+ *
+ * Side-info layout (ISO/IEC 11172-3 / 13818-3), all fields MSB-first immediately
+ * after the 4-byte frame header (CRC is not accounted for here, matching the same
+ * simplifying assumption readMainDataBegin already makes elsewhere in this file):
+ *   MPEG1:      main_data_begin(9) + private_bits(mono:5/stereo:3) + scfsi(4 bits/channel)
+ *               then 2 granules x numChannels blocks of 59 bits, part2_3_length is the
+ *               leading 12 bits of each block.
+ *   MPEG2/2.5:  main_data_begin(8) + private_bits(mono:1/stereo:2), no scfsi,
+ *               then 1 granule x numChannels blocks of 63 bits, part2_3_length is the
+ *               leading 12 bits of each block.
+ * (Block sizes/private_bits widths cross-checked against the documented side-info
+ * byte totals in sideInfoSize() - both must agree exactly, and they do.)
+ *
+ * @return Total part2_3_length across all granules/channels, in bits.
+ *         0 if not Layer III, or if the side-info block doesn't fully fit in `chunk`.
+ */
+static int computePart23Bits(const vector<uint8_t>& chunk, const int off, const Header& h) {
+    if (!h.isLayerIII()) return 0;
+
+    const bool mpeg1 = (h.getVersionID() == 0b11);
+    const bool mono  = h.isMono();
+    const int  numChannels = mono ? 1 : 2;
+    const int  numGranules = mpeg1 ? 2 : 1;
+    const int  blockBits   = mpeg1 ? 59 : 63;
+
+    const int sideStart = off + 4;
+    const int sideBytes = sideInfoSize(h.getVersionID(), mono);
+    if (sideStart + sideBytes > static_cast<int>(chunk.size())) return 0;
+
+    int bitPos = mpeg1
+        ? (9 + (mono ? 5 : 3) + numChannels * 4)  // main_data_begin + private_bits + scfsi
+        : (8 + (mono ? 1 : 2));                    // main_data_begin + private_bits
+
+    int totalBits = 0;
+    for (int g = 0; g < numGranules; ++g) {
+        for (int c = 0; c < numChannels; ++c) {
+            uint32_t val = 0;
+            for (int i = 0; i < 12; ++i) {
+                const int byteIdx = sideStart + bitPos / 8;
+                const int bitIdx  = 7 - (bitPos % 8);
+                val = (val << 1) | ((chunk[byteIdx] >> bitIdx) & 0x1);
+                ++bitPos;
+            }
+            totalBits += static_cast<int>(val);
+            bitPos += (blockBits - 12); // skip rest of this granule/channel block
+        }
+    }
+    return totalBits;
+}
+
 
 /**
  * Try parsing a run of frames starting at `startOff` within `chunk`.
@@ -109,9 +172,12 @@ static int tryParse(const vector<uint8_t>& chunk,
 
         // Complete frame fully contained in chunk
         uint16_t mdb = 0;
-        if (expected.isLayerIII())
+        uint16_t part23 = 0;
+        if (expected.isLayerIII()) {
             mdb = readMainDataBegin(chunk, i);
-        out.push_back({i, len, h.getBitrate(), mdb});
+            part23 = static_cast<uint16_t>(computePart23Bits(chunk, i, h));
+        }
+        out.push_back({i, len, h.getBitrate(), mdb, part23});
         // Xing/Info/VBRI frames are real, valid frames (their bytes are kept in `out` so
         // reservoir accounting and output reconstruction stay correct) but carry no audio,
         // so they must not count towards the "most consecutive frames" contest below -

@@ -36,40 +36,64 @@ static int sideInfoBytes(const StreamProfile& p) {
  * Advances the Layer III bit-reservoir level through a single frame and checks that
  * the frame's mainDataBegin is actually satisfiable by what has accumulated so far.
  *
- * level_after = clamp(level_before + produced) - i.e. this only ACCUMULATES, it never
- * subtracts what a frame actually consumed. That is a deliberate choice, not an oversight:
- * a real decoder's reservoir also depletes by each frame's actual compressed-data length,
- * which lives in `part2_3_length` (summed per granule/channel) - a field this codebase
- * does not parse anywhere (Header.cpp stops at the frame header; chunk_meta.cpp only reads
- * mainDataBegin out of the side info). Without it there is no trustworthy "bytes consumed
- * this frame" figure to subtract.
+ * `level` is tracked in BITS, not bytes, even though callers (advanceReservoirChunk,
+ * DfsState::reservoirLevel) treat it as an opaque running total - see below for why.
+ *
+ * level_after = clamp(f.mainDataBegin*8 + producedBits - f.part23Bits, 0, maxReservoir*8).
+ * The critical detail (cross-checked against minimp3's L3_restore_reservoir/
+ * L3_save_reservoir, a widely-used reference decoder): the "history" contribution to
+ * level_after is `f.mainDataBegin`, NOT `level_before`. A frame only ever reaches back
+ * exactly as far as its own mainDataBegin says; any reservoir surplus beyond that
+ * (level_before - mainDataBegin, when the frame didn't need to reach all the way back) is
+ * *not* carried forward - the decoder's reservoir buffer only ever keeps the trailing
+ * leftover of the (mainDataBegin + produced) window actually used by this frame, so older,
+ * unclaimed bytes are gone once a later frame's mainDataBegin doesn't reach them. Using
+ * `level_before` instead of `f.mainDataBegin` here was an earlier, incorrect version of
+ * this fix - it let unused surplus accumulate indefinitely, and produced a systematic
+ * downward drift that rejected `test7_shorter.mp3`'s true, correct chunk order by chunk 7
+ * (confirmed empirically: `level_before` and `f.mainDataBegin` diverge starting exactly
+ * where a stretch of near-silent frames - each leaving most of a saturated reservoir
+ * unclaimed - is followed by louder frames whose real consumption then gets checked
+ * against a `level` that never should have kept that surplus).
+ *
+ * The check itself (`f.mainDataBegin > level_before`) stays: mainDataBegin(N) can never
+ * exceed what was genuinely available after frame N-1.
+ *
+ * Bit-precision also matters: part2_3_length is a bit-granular quantity, so it and
+ * `produced` are both kept in bits internally, only flooring to bytes when compared
+ * against mainDataBegin (a byte-granular bitstream field) - rounding part2_3_length up to
+ * bytes per frame (an earlier version of this fix did exactly that) adds up to ~7 bits of
+ * phantom consumption on every frame, which also compounds into false rejections.
  *
  * A first attempt at this function subtracted mainDataBegin itself as a stand-in for
- * consumption. That regressed real reconstructions: instrumenting a known-good file
+ * consumption (not as the reservoir's history anchor, which is what this version does -
+ * a different thing). That regressed real reconstructions: instrumenting a known-good file
  * (sample-3s.mp3) showed mainDataBegin sitting near the 511-byte cap on nearly every
  * frame while `produced` was ~382 bytes/frame, so the subtract-based level went net
  * negative every frame and saturated at 0 within a handful of chunks - after which every
  * subsequent frame with mainDataBegin > 0 was (wrongly) rejected, and the true ordering
- * could no longer pass. mainDataBegin is a backward *pointer*, not a consumption amount -
- * treating it as both double-counts the same bytes. So this keeps the old, weaker,
- * accumulate-only check (matching the previous validateReservoir's semantics) and only
- * changes *when* it runs - see advanceReservoirChunk / dfs. Modelling true consumption
- * would require parsing part2_3_length, which is future work (see CLAUDE.md).
+ * could no longer pass. part2_3_length is the correct quantity to subtract - validated by
+ * replaying the true, unshuffled chunk order through this function (see the pre-shuffle
+ * sanity check below) before trusting it inside the DFS.
  *
- * @param level  Current reservoir fill level in bytes; updated in place.
+ * @param level  Current reservoir fill level in BITS; updated in place.
  * @param f      The frame to advance through.
  * @param sideInfo Side-information size in bytes for this stream (see sideInfoBytes).
  * @param maxReservoir Reservoir capacity in bytes (511 for MPEG1, 255 for MPEG2/2.5).
- * @return False if `f.mainDataBegin` reaches further back than `level` allows (invalid chain).
+ * @return False if `f.mainDataBegin` reaches further back than `level` allows, or if this
+ *         frame's actual consumption (`part23Bits`) exceeds what became available.
  */
 static bool advanceReservoirFrame(int& level, const FrameSlice& f, const int sideInfo, const int maxReservoir) {
-    if (f.mainDataBegin > level) return false;
+    if (f.mainDataBegin > level / 8) return false; // mainDataBegin is byte-granular
 
-    int produced = f.length - 4 - sideInfo;
-    if (produced < 0) produced = 0;
+    int producedBits = (f.length - 4 - sideInfo) * 8;
+    if (producedBits < 0) producedBits = 0;
 
-    level += produced;
-    if (level > maxReservoir) level = maxReservoir;
+    int newLevel = f.mainDataBegin * 8 + producedBits - f.part23Bits;
+    if (newLevel < 0) return false;
+    const int maxBits = maxReservoir * 8;
+    if (newLevel > maxBits) newLevel = maxBits;
+    level = newLevel;
     return true;
 }
 
@@ -77,17 +101,51 @@ static bool advanceReservoirFrame(int& level, const FrameSlice& f, const int sid
  * Advances the reservoir through every frame of a single chunk, in order. Used to
  * incrementally validate/extend the reservoir as each supernode is placed during the DFS,
  * rather than only checking the fully-assembled order at the end (see dfs()).
- * @param level Current reservoir fill level in bytes; updated in place, even on failure
+ *
+ * `meta.frames` only holds *complete* frames (fully contained in this chunk) - a frame that
+ * straddles a chunk boundary (routine, since chunk_size=1024 rarely divides evenly into
+ * frame lengths of ~100-800 bytes) contributes no FrameSlice to *either* chunk on its own.
+ * Its payload bytes are nonetheless real, physical reservoir bytes, so this credits them on
+ * both sides of the split: `meta.headOffset` bytes at the *start* of this chunk complete the
+ * previous chunk's split tail (pure payload, no header/side-info overhead - the predecessor
+ * already accounted for those), and `meta.tailOverflow` bytes at the *end* of this chunk are
+ * the start of the next split frame's payload (once its 4-byte header + side info are
+ * subtracted). Omitting either credit was confirmed (by cross-checking against minimp3, a
+ * reference decoder, byte-for-byte on `test7_shorter.mp3`) to systematically undercount the
+ * reservoir - the level drifts below the bitstream's own true mainDataBegin values within a
+ * handful of chunks, which made this check reject the correct, unshuffled chunk order.
+ *
+ * The split frame's own mainDataBegin/part2_3_length are deliberately *not* validated or
+ * consumed here (that would need to happen exactly once, using the combined view of both
+ * chunks, which the current per-chunk loop structure doesn't have). Only crediting its
+ * payload bytes without also modeling its consumption makes this conservative - it can
+ * under-prune (miss a constraint a full model would catch) but cannot wrongly reject a
+ * valid chain, which is what correctness requires here.
+ *
+ * @param level Current reservoir fill level in BITS; updated in place, even on failure
  *              (the caller must restore it from a saved copy rather than trust it after false).
  * @param meta  Metadata for the chunk being appended to the candidate order.
  * @param sideInfo Side-information size in bytes for this stream.
  * @param maxReservoir Reservoir capacity in bytes.
- * @return False as soon as any frame in this chunk is invalid; true if the whole chunk passes.
+ * @return False as soon as any complete frame in this chunk is invalid; true otherwise.
  */
 static bool advanceReservoirChunk(int& level, const ChunkMeta& meta, const int sideInfo, const int maxReservoir) {
+    const int maxBits = maxReservoir * 8;
+
+    if (meta.headOffset > 0) {
+        level += meta.headOffset * 8;
+        if (level > maxBits) level = maxBits;
+    }
+
     for (const FrameSlice& f : meta.frames) {
         if (!advanceReservoirFrame(level, f, sideInfo, maxReservoir)) return false;
     }
+
+    if (meta.tailPartialLen > 0 && meta.tailOverflow > 4 + sideInfo) {
+        level += (meta.tailOverflow - 4 - sideInfo) * 8;
+        if (level > maxBits) level = maxBits;
+    }
+
     return true;
 }
 
@@ -316,6 +374,30 @@ int main(int argc, char* argv[]) {
                      << " consecutive pairs compatible\n";
             else
                 cout << "Pre-shuffle check FAILED: " << broken << " breaks\n";
+
+            // Validate the part2_3_length-based reservoir model against the true,
+            // unshuffled order before trusting it inside the DFS - the same technique
+            // that caught the earlier failed mainDataBegin-as-consumption attempt
+            // (see advanceReservoirFrame). A correct model must never reject a real
+            // chunk sequence.
+            if (prof0.isLayerIII()) {
+                const int sideInfo0     = sideInfoBytes(prof0);
+                const int maxReservoir0 = (prof0.versionID == 0b11) ? 511 : 255;
+                int level = 0;
+                int reservoirBreaks = 0;
+                for (int i = 0; i < static_cast<int>(origMetas.size()); ++i) {
+                    if (!advanceReservoirChunk(level, origMetas[i], sideInfo0, maxReservoir0)) {
+                        cout << "  RESERVOIR BREAK at chunk " << i << "\n";
+                        ++reservoirBreaks;
+                    }
+                }
+                if (reservoirBreaks == 0)
+                    cout << "Reservoir check PASSED on true order: all "
+                         << chunks.size() << " chunks consistent\n";
+                else
+                    cout << "Reservoir check FAILED on true order: "
+                         << reservoirBreaks << " breaks\n";
+            }
         }
     }
     // --- End sanity check ---

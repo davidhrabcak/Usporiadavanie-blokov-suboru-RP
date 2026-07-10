@@ -30,6 +30,11 @@ struct FrameSlice {
     int      length;          // frame length in bytes
     int      bitrate;         // kbps
     uint16_t mainDataBegin;   // 9-bit side-info value (Layer III only, else 0)
+    uint16_t part23Bits;      // sum of part2_3_length across all granules/channels, in BITS
+                               // (Layer III only, else 0) - actual main-data bits this frame
+                               // consumes from the reservoir. Kept bit-precise (not rounded
+                               // to bytes) so per-frame rounding doesn't compound into a
+                               // systematic drift over many frames - see computePart23Bits.
 };
 
 struct ChunkMeta {
