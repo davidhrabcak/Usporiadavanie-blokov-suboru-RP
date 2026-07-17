@@ -74,9 +74,18 @@ fully reconstructed from `a`'s tail bytes + `b`'s head bytes.
 Scoped to MPEG1 Layer III only (matches existing fixtures); MPEG2/2.5 LSF
 scalefactor tables are out of scope — document as a known limitation.
 
-- [ ] 1. `huffman_tables.hpp`(+`.cpp`): static big_values (32 tables) +
-      count1 (quad) Huffman tables, sourced from minimp3 (already the
-      project's cross-check reference) not hand-transcribed.
+- [x] 1. `huffman_tables.hpp`/`.cpp`: static big_values (32 `table_select`
+      values) + count1 (quad, tables A/B) Huffman tables, extracted
+      programmatically from minimp3's `minimp3.h` (CC0) and diffed
+      numerically against the source to confirm zero transcription drift
+      (2164 + 32 + 32 + 28 + 16 values, all identical). Data only - the
+      leaf-decoding scheme is documented in the header but the actual
+      bitstream-integrated decode (against this project's own bit reader,
+      not minimp3's) is M2.4's job. Wired into `CMakeLists.txt`'s `rp`
+      target. `CLAUDE.md`, root `README.md`, and this file updated to
+      reflect the new file and Milestone-1-era usage changes (`argv[1]`
+      input override, `RP_SEED` env var) that predated this step but hadn't
+      been documented in the top-level `README.md` yet.
 - [ ] 2. `main_data_decoder.hpp`/`.cpp`: `GranuleSideInfo` parser (extends
       Milestone 1's bit-source helper to capture `bigValues`, `globalGain`,
       `scalefacCompress`, block-type/window flags, `tableSelect[3]`,

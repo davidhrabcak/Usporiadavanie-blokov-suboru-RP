@@ -16,6 +16,7 @@ Chunk 0 is always pinned (never shuffled); it serves as the anchor for stream pr
 | `frame_scanner.cpp / .hpp` | Scans a full MP3 file byte-by-byte, collecting frame positions and metadata. Also exposes `isValidHeader()` used everywhere. |
 | `chunk_meta.cpp / .hpp` | Core per-chunk analysis. `computeChunkMeta()` scans a 1024-byte chunk to find the best frame alignment and populate `ChunkMeta`. `deriveProfile()` extracts the stream's invariant parameters from the first valid frame. |
 | `adjacency.cpp / .hpp` | Builds the directed adjacency graph over chunks. `canFollow(a, b)` decides whether chunk b can legally follow chunk a. `buildAdjacency()` constructs the full graph using a `byFrameStart` index for O(n) Case-1 lookups. |
+| `huffman_tables.cpp / .hpp` | Static Layer III Huffman code tables (big_values tables 0-31 + count1 quad tables A/B), sourced verbatim from [minimp3](https://github.com/lieff/minimp3) (CC0) rather than hand-transcribed - see the header for the (non-obvious, compact self-describing VLC) leaf encoding these tables use. Data only so far - not yet wired into a decoder; see `PLAN_sideinfo_mainbits.md` Milestone 2. |
 | `main.cpp` | Orchestrates the pipeline: load → profile → shuffle → per-chunk metadata → adjacency graph → supernode collapse → DFS reconstruction → write output. |
 
 ---
@@ -246,4 +247,8 @@ cmake -B cmake-build-debug && cmake --build cmake-build-debug
 ./cmake-build-debug/rp [input.mp3]
 ```
 
+`input.mp3` defaults to the `FILENAME` macro in `main.cpp` if omitted (2026-07-18: this CLI override was previously undocumented-but-broken - `main()` ignored `argv` entirely despite this doc already showing the `[input.mp3]` usage; fixed alongside Milestone 1 so the two now actually agree).
+
 Output is written to `output.mp3` in the current directory. Chunk 0 of the input file is always treated as pinned (first in the output).
+
+An `RP_SEED` environment variable overrides the shuffle's RNG seed (normally drawn from the system clock) - added for the pinned-seed A/B methodology used throughout this doc (e.g. item 3's 2026-07-18 update); not needed for normal use.

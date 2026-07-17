@@ -12,6 +12,8 @@ add_executable(rp
         chunk_meta.hpp
         adjacency.cpp
         adjacency.hpp
+        huffman_tables.cpp
+        huffman_tables.hpp
         main.cpp
         main.hpp)
 
