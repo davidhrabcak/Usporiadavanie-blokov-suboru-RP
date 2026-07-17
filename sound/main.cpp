@@ -7,6 +7,7 @@
 #include <iostream>
 #include <vector>
 #include <fstream>
+#include <cstdlib>
 #include "frame_scanner.hpp"
 #include "chunk_meta.hpp"
 #include "adjacency.hpp"
@@ -105,45 +106,55 @@ static bool advanceReservoirFrame(int& level, const FrameSlice& f, const int sid
  * `meta.frames` only holds *complete* frames (fully contained in this chunk) - a frame that
  * straddles a chunk boundary (routine, since chunk_size=1024 rarely divides evenly into
  * frame lengths of ~100-800 bytes) contributes no FrameSlice to *either* chunk on its own.
- * Its payload bytes are nonetheless real, physical reservoir bytes, so this credits them on
- * both sides of the split: `meta.headOffset` bytes at the *start* of this chunk complete the
- * previous chunk's split tail (pure payload, no header/side-info overhead - the predecessor
- * already accounted for those), and `meta.tailOverflow` bytes at the *end* of this chunk are
- * the start of the next split frame's payload (once its 4-byte header + side info are
- * subtracted). Omitting either credit was confirmed (by cross-checking against minimp3, a
- * reference decoder, byte-for-byte on `test7_shorter.mp3`) to systematically undercount the
- * reservoir - the level drifts below the bitstream's own true mainDataBegin values within a
- * handful of chunks, which made this check reject the correct, unshuffled chunk order.
  *
- * The split frame's own mainDataBegin/part2_3_length are deliberately *not* validated or
- * consumed here (that would need to happen exactly once, using the combined view of both
- * chunks, which the current per-chunk loop structure doesn't have). Only crediting its
- * payload bytes without also modeling its consumption makes this conservative - it can
- * under-prune (miss a constraint a full model would catch) but cannot wrongly reject a
- * valid chain, which is what correctness requires here.
+ * When `prevMeta` is a Case-1 split (`prevMeta->tailPartialLen > 0`), the split frame's own
+ * side info is now decoded exactly from `prevMeta`'s tail bytes + `metaBytes`'s head
+ * (`decodeSplitFrameSideInfo`, chunk_meta.cpp) and validated/consumed via `advanceReservoirFrame`
+ * like any other frame - this is possible at exactly this point because the DFS already knows
+ * both chunks of the candidate edge being tried (see call sites in dfs()/main()). This replaces
+ * the previous conservative approximation (credit `meta.headOffset` raw payload bytes without
+ * checking the split frame's own `mainDataBegin`/`part2_3_length` at all), closing the gap noted
+ * in CLAUDE.md item 3's caveat / item 7's 2026-07-11 update. If the exact decode isn't possible
+ * (e.g. not enough bytes to complete the side-info block), this falls back to the old
+ * conservative byte credit rather than rejecting the edge outright.
  *
- * @param level Current reservoir fill level in BITS; updated in place, even on failure
- *              (the caller must restore it from a saved copy rather than trust it after false).
- * @param meta  Metadata for the chunk being appended to the candidate order.
- * @param sideInfo Side-information size in bytes for this stream.
+ * @param level     Current reservoir fill level in BITS; updated in place, even on failure
+ *                  (the caller must restore it from a saved copy rather than trust it after false).
+ * @param prevMeta  Metadata for the chunk immediately preceding `meta` in the candidate order,
+ *                  or nullptr if `meta` is the first chunk placed (chunk 0).
+ * @param meta      Metadata for the chunk being appended to the candidate order.
+ * @param metaBytes Raw bytes of `meta`'s own chunk (needed to decode `prevMeta`'s split-frame
+ *                  side info, which may extend past `prevMeta`'s own bytes).
+ * @param sideInfo  Side-information size in bytes for this stream.
  * @param maxReservoir Reservoir capacity in bytes.
- * @return False as soon as any complete frame in this chunk is invalid; true otherwise.
+ * @return False as soon as any complete frame (or the exactly-decoded split frame) is invalid;
+ *         true otherwise.
  */
-static bool advanceReservoirChunk(int& level, const ChunkMeta& meta, const int sideInfo, const int maxReservoir) {
+static bool advanceReservoirChunk(int& level,
+                                   const ChunkMeta* prevMeta,
+                                   const ChunkMeta& meta,
+                                   const vector<uint8_t>& metaBytes,
+                                   const int sideInfo,
+                                   const int maxReservoir) {
     const int maxBits = maxReservoir * 8;
+    bool creditedExactly = false;
 
-    if (meta.headOffset > 0) {
+    if (prevMeta != nullptr && prevMeta->tailPartialLen > 0) {
+        const SideInfoResult side = decodeSplitFrameSideInfo(*prevMeta, metaBytes);
+        if (side.valid) {
+            const FrameSlice splitFrame{-1, prevMeta->tailPartialLen, 0, side.mainDataBegin, side.part23Bits};
+            if (!advanceReservoirFrame(level, splitFrame, sideInfo, maxReservoir)) return false;
+            creditedExactly = true;
+        }
+    }
+
+    if (!creditedExactly && meta.headOffset > 0) {
         level += meta.headOffset * 8;
         if (level > maxBits) level = maxBits;
     }
 
     for (const FrameSlice& f : meta.frames) {
         if (!advanceReservoirFrame(level, f, sideInfo, maxReservoir)) return false;
-    }
-
-    if (meta.tailPartialLen > 0 && meta.tailOverflow > 4 + sideInfo) {
-        level += (meta.tailOverflow - 4 - sideInfo) * 8;
-        if (level > maxBits) level = maxBits;
     }
 
     return true;
@@ -293,6 +304,7 @@ bool dfs(DfsState& state,
 
     const int cur = state.order.back();
     const auto& candidates = superAdj[cur];
+    const int curTailChunk = supernodes[cur].chunks.back();
 
     for (int si : candidates) {
         if (state.used[si]) continue;
@@ -300,11 +312,13 @@ bool dfs(DfsState& state,
         const int savedLevel = state.reservoirLevel;
         bool reservoirOk = true;
         if (isLayerIII) {
+            int prevCi = curTailChunk; // last chunk of `cur`'s supernode directly precedes si's first chunk
             for (int ci : supernodes[si].chunks) {
-                if (!advanceReservoirChunk(state.reservoirLevel, metas[ci], sideInfo, maxReservoir)) {
+                if (!advanceReservoirChunk(state.reservoirLevel, &metas[prevCi], metas[ci], chunks[ci], sideInfo, maxReservoir)) {
                     reservoirOk = false;
                     break;
                 }
+                prevCi = ci;
             }
         }
         if (!reservoirOk) {
@@ -330,7 +344,7 @@ bool dfs(DfsState& state,
 }
 
 int main(int argc, char* argv[]) {
-    const string filename = FILENAME;
+    const string filename = (argc > 1) ? argv[1] : FILENAME;
 
     Mp3FrameScanner scanner(filename);
     if (scanner.getFrameCount() == 0) {
@@ -386,7 +400,8 @@ int main(int argc, char* argv[]) {
                 int level = 0;
                 int reservoirBreaks = 0;
                 for (int i = 0; i < static_cast<int>(origMetas.size()); ++i) {
-                    if (!advanceReservoirChunk(level, origMetas[i], sideInfo0, maxReservoir0)) {
+                    const ChunkMeta* prev = (i > 0) ? &origMetas[i - 1] : nullptr;
+                    if (!advanceReservoirChunk(level, prev, origMetas[i], chunks[i], sideInfo0, maxReservoir0)) {
                         cout << "  RESERVOIR BREAK at chunk " << i << "\n";
                         ++reservoirBreaks;
                     }
@@ -402,7 +417,11 @@ int main(int argc, char* argv[]) {
     }
     // --- End sanity check ---
 
+    // RP_SEED env var override lets a controlled A/B (same shuffle, old vs new code) pin the
+    // seed instead of drawing a fresh one every run - used for the Milestone 1/2 measurements
+    // in CLAUDE.md; not needed for normal use.
     unsigned seed = chrono::system_clock::now().time_since_epoch().count();
+    if (const char* seedOverride = std::getenv("RP_SEED")) seed = static_cast<unsigned>(std::strtoul(seedOverride, nullptr, 10));
     shuffle(chunks.begin() + 1, chunks.end(), default_random_engine(seed));
 
     cout << "Total chunks: " << chunks.size() << "\n";
@@ -487,12 +506,14 @@ int main(int argc, char* argv[]) {
     // Prime the reservoir with chunk 0's own frames before the DFS explores any
     // successor - chunk 0 is pinned, so it is always the first thing placed.
     if (isLayerIII) {
+        const ChunkMeta* prev = nullptr; // chunk 0 is always first placed - no predecessor
         for (int ci : supernodes[startSuper].chunks) {
-            if (!advanceReservoirChunk(state.reservoirLevel, metas[ci], sideInfo, maxReservoir)) {
+            if (!advanceReservoirChunk(state.reservoirLevel, prev, metas[ci], chunks[ci], sideInfo, maxReservoir)) {
                 cerr << "Reservoir check failed on the pinned starting chunk - "
                         "mainDataBegin metadata is likely wrong for chunk 0\n";
                 return 1;
             }
+            prev = &metas[ci];
         }
     }
 

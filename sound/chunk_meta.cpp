@@ -18,18 +18,35 @@ static int sideInfoSize(const int versionID, const bool isMono) {
 }
 
 /**
- * Reads the 'main_data_begin' pointer from an MP3 frame's side information block
- * @param chunk The buffer containing the raw MPEG audio stream data.
- * @param off   The starting index of the 4-byte MP3 frame header.
- * @return      The 9-bit 'main_data_begin'.
- *              Returns 0 if the offset is out of bounds of the provided chunk.
+ * A side-info bit source backed by up to two logically-concatenated byte ranges: `first`
+ * immediately followed by `second`. Lets the same MSB-first bit-reading logic
+ * (readBitsMsb/computeSideInfoFields below) serve both the ordinary case (a frame's side info
+ * fully inside one chunk - `second` unused) and the cross-chunk case (a Case-1 split frame's
+ * side info spanning the tail of chunk a and the head of chunk b - see decodeSplitFrameSideInfo),
+ * instead of maintaining two separate copies of the bit-layout logic that could drift apart.
  */
-static uint16_t readMainDataBegin(const vector<uint8_t>& chunk, const int off) {
-    // First 9 bits of side-info block (immediately after the 4-byte header)
-    if (off + 5 >= static_cast<int>(chunk.size())) return 0;
-    return static_cast<uint16_t>(
-        ((chunk[off + 4] << 1) | (chunk[off + 5] >> 7)) & 0x1FF
-    );
+struct SideInfoBitSource {
+    const uint8_t* first;
+    int firstLen;
+    const uint8_t* second = nullptr;
+    int secondLen = 0;
+
+    int size() const { return firstLen + secondLen; }
+    uint8_t byteAt(const int idx) const {
+        return idx < firstLen ? first[idx] : second[idx - firstLen];
+    }
+};
+
+/** Reads `nbits` (<=32) MSB-first from `src` starting at bit offset `bitPos`, advancing `bitPos`. */
+static uint32_t readBitsMsb(const SideInfoBitSource& src, int& bitPos, const int nbits) {
+    uint32_t val = 0;
+    for (int i = 0; i < nbits; ++i) {
+        const int byteIdx = bitPos / 8;
+        const int bitIdx  = 7 - (bitPos % 8);
+        val = (val << 1) | ((src.byteAt(byteIdx) >> bitIdx) & 0x1);
+        ++bitPos;
+    }
+    return val;
 }
 
 /**
@@ -59,66 +76,106 @@ static uint32_t computeChunkHeader(const vector<uint8_t>& chunk, const int index
 }
 
 /**
- * Sums 'part2_3_length' (the actual main-data bits a Layer III frame consumes from
- * the bit reservoir) across every granule/channel in the frame's side-info block.
+ * Extracts `main_data_begin` and the sum of 'part2_3_length' (the actual main-data bits a
+ * Layer III frame consumes from the bit reservoir) across every granule/channel, reading from
+ * a side-info block that starts at bit 0 of `sideBuf` (i.e. `sideBuf` must already be
+ * positioned at the first byte immediately after the frame's 4-byte header).
  *
- * Returned in BITS, not bytes: part2_3_length is a bit-granular quantity (it is the exact
+ * part2_3_length is returned in BITS, not bytes: it is a bit-granular quantity (the exact
  * number of bits spent on scalefactors + Huffman data), and the reservoir bookkeeping in
- * main.cpp accumulates it every frame. Rounding up to bytes here would add up to ~7 bits
- * of phantom "consumption" on *every single frame*, and that systematic bias compounds
- * across a whole file into a large false deficit - confirmed empirically: it caused the
- * reservoir check to reject `test7_shorter.mp3`'s true, correct chunk order by chunk 7
- * (see CLAUDE.md). Only `mainDataBegin` (a byte-granular field in the bitstream) should
- * ever be compared/rounded at the byte level; the running reservoir level itself must stay
- * bit-precise.
+ * main.cpp accumulates it every frame. Rounding up to bytes here would add up to ~7 bits of
+ * phantom "consumption" on *every single frame*, and that systematic bias compounds across a
+ * whole file into a large false deficit - confirmed empirically: it caused the reservoir check
+ * to reject `test7_shorter.mp3`'s true, correct chunk order by chunk 7 (see CLAUDE.md). Only
+ * `mainDataBegin` (a byte-granular field in the bitstream) should ever be compared/rounded at
+ * the byte level; the running reservoir level itself must stay bit-precise.
  *
- * Side-info layout (ISO/IEC 11172-3 / 13818-3), all fields MSB-first immediately
- * after the 4-byte frame header (CRC is not accounted for here, matching the same
- * simplifying assumption readMainDataBegin already makes elsewhere in this file):
+ * Side-info layout (ISO/IEC 11172-3 / 13818-3), all fields MSB-first (CRC is not accounted for,
+ * i.e. protection_bit is assumed set / no CRC present):
  *   MPEG1:      main_data_begin(9) + private_bits(mono:5/stereo:3) + scfsi(4 bits/channel)
  *               then 2 granules x numChannels blocks of 59 bits, part2_3_length is the
  *               leading 12 bits of each block.
  *   MPEG2/2.5:  main_data_begin(8) + private_bits(mono:1/stereo:2), no scfsi,
  *               then 1 granule x numChannels blocks of 63 bits, part2_3_length is the
  *               leading 12 bits of each block.
- * (Block sizes/private_bits widths cross-checked against the documented side-info
- * byte totals in sideInfoSize() - both must agree exactly, and they do.)
+ * (Block sizes/private_bits widths cross-checked against the documented side-info byte totals
+ * in sideInfoSize() - both must agree exactly, and they do. Note: main_data_begin's width
+ * genuinely differs between MPEG1 (9 bits) and MPEG2/2.5 (8 bits) - unifying this function
+ * fixed a latent bug where the old, separate readMainDataBegin() always read 9 bits regardless
+ * of version, which would have under/misread mainDataBegin for any MPEG2/2.5 stream; dormant
+ * until now because every existing test fixture is MPEG1.)
  *
- * @return Total part2_3_length across all granules/channels, in bits.
- *         0 if not Layer III, or if the side-info block doesn't fully fit in `chunk`.
+ * @param sideBuf Bit source positioned at the start of the side-info block.
+ * @return .valid is false if the side-info block doesn't fully fit in `sideBuf`.
  */
-static int computePart23Bits(const vector<uint8_t>& chunk, const int off, const Header& h) {
-    if (!h.isLayerIII()) return 0;
+static SideInfoResult computeSideInfoFields(const SideInfoBitSource& sideBuf, const bool mpeg1, const bool mono) {
+    SideInfoResult result;
 
-    const bool mpeg1 = (h.getVersionID() == 0b11);
-    const bool mono  = h.isMono();
-    const int  numChannels = mono ? 1 : 2;
-    const int  numGranules = mpeg1 ? 2 : 1;
-    const int  blockBits   = mpeg1 ? 59 : 63;
+    const int numChannels = mono ? 1 : 2;
+    const int numGranules = mpeg1 ? 2 : 1;
+    const int blockBits   = mpeg1 ? 59 : 63;
+    const int mdbBits     = mpeg1 ? 9 : 8;
+    const int privBits    = mpeg1 ? (mono ? 5 : 3) : (mono ? 1 : 2);
+    const int scfsiBits   = mpeg1 ? numChannels * 4 : 0;
 
-    const int sideStart = off + 4;
-    const int sideBytes = sideInfoSize(h.getVersionID(), mono);
-    if (sideStart + sideBytes > static_cast<int>(chunk.size())) return 0;
+    const int totalSideBits = mdbBits + privBits + scfsiBits + numGranules * numChannels * blockBits;
+    if (sideBuf.size() * 8 < totalSideBits) return result; // side-info block doesn't fully fit
 
-    int bitPos = mpeg1
-        ? (9 + (mono ? 5 : 3) + numChannels * 4)  // main_data_begin + private_bits + scfsi
-        : (8 + (mono ? 1 : 2));                    // main_data_begin + private_bits
+    int bitPos = 0;
+    result.mainDataBegin = static_cast<uint16_t>(readBitsMsb(sideBuf, bitPos, mdbBits));
+    bitPos += privBits + scfsiBits;
 
     int totalBits = 0;
     for (int g = 0; g < numGranules; ++g) {
         for (int c = 0; c < numChannels; ++c) {
-            uint32_t val = 0;
-            for (int i = 0; i < 12; ++i) {
-                const int byteIdx = sideStart + bitPos / 8;
-                const int bitIdx  = 7 - (bitPos % 8);
-                val = (val << 1) | ((chunk[byteIdx] >> bitIdx) & 0x1);
-                ++bitPos;
-            }
-            totalBits += static_cast<int>(val);
+            totalBits += static_cast<int>(readBitsMsb(sideBuf, bitPos, 12));
             bitPos += (blockBits - 12); // skip rest of this granule/channel block
         }
     }
-    return totalBits;
+    result.part23Bits = static_cast<uint16_t>(totalBits);
+    result.valid = true;
+    return result;
+}
+
+/**
+ * Reads `main_data_begin` and part2_3_length for a frame whose side info is fully contained in
+ * one chunk (the ordinary case - `off` points at the frame's 4-byte header within `chunk`).
+ * @return .valid is false if not Layer III or the side-info block doesn't fully fit in `chunk`.
+ */
+static SideInfoResult readFrameSideInfo(const vector<uint8_t>& chunk, const int off, const Header& h) {
+    if (!h.isLayerIII()) return {};
+    const int sideStart = off + 4;
+    const SideInfoBitSource src{&chunk[sideStart], static_cast<int>(chunk.size()) - sideStart};
+    return computeSideInfoFields(src, h.getVersionID() == 0b11, h.isMono());
+}
+
+/**
+ * Reads `main_data_begin` and part2_3_length for a Case-1 split frame whose side info may span
+ * the chunk boundary: the header (and >=0 bytes of side info) sits in the tail of chunk `a`, and
+ * the rest of the side info (if any) is the first bytes of the immediate successor chunk `b`.
+ *
+ * By construction in tryParse/computeChunkMeta, whenever `a.tailPartialLen > 0` (Case 1) the
+ * frame's full 4-byte header was read successfully from within `a`, so `a.tailOverflow >= 4` and
+ * `a.tailBytes[0..4)` is that header. This function only needs `a`'s ChunkMeta (for tailBytes/
+ * tailOverflow/profile) and `b`'s raw bytes - no header re-decoding, since the header was already
+ * validated when `a`'s metadata was computed.
+ *
+ * @param a      Metadata for the chunk containing the split frame's header and start of payload.
+ * @param bBytes Raw bytes of the candidate successor chunk `b` (bytes [0, rem) of `bBytes` are
+ *               this frame's payload continuation; `b`'s own next frame starts at `rem`).
+ * @return .valid is false if `a` isn't a Case-1 split frame, isn't Layer III, or `b` doesn't
+ *         hold enough bytes to complete the side-info block.
+ */
+SideInfoResult decodeSplitFrameSideInfo(const ChunkMeta& a, const vector<uint8_t>& bBytes) {
+    if (!a.profile.isLayerIII()) return {};
+    if (a.tailPartialLen <= 0 || a.tailOverflow < 4) return {}; // not a readable Case-1 split frame
+
+    const int headerLen = 4;
+    const uint8_t* afterHeader = a.tailBytes.data() + headerLen;
+    const int afterHeaderLen   = a.tailOverflow - headerLen;
+
+    const SideInfoBitSource src{afterHeader, afterHeaderLen, bBytes.data(), static_cast<int>(bBytes.size())};
+    return computeSideInfoFields(src, a.profile.versionID == 0b11, a.profile.isMono());
 }
 
 
@@ -174,8 +231,9 @@ static int tryParse(const vector<uint8_t>& chunk,
         uint16_t mdb = 0;
         uint16_t part23 = 0;
         if (expected.isLayerIII()) {
-            mdb = readMainDataBegin(chunk, i);
-            part23 = static_cast<uint16_t>(computePart23Bits(chunk, i, h));
+            const SideInfoResult side = readFrameSideInfo(chunk, i, h);
+            mdb    = side.mainDataBegin;
+            part23 = side.part23Bits;
         }
         out.push_back({i, len, h.getBitrate(), mdb, part23});
         // Xing/Info/VBRI frames are real, valid frames (their bytes are kept in `out` so
@@ -288,6 +346,14 @@ ChunkMeta computeChunkMeta(const int chunkIndex,
         const int partialStart = static_cast<int>(chunk.size()) - meta.tailOverflow;
         for (int j = 0; j < meta.tailOverflow; ++j)
             meta.tailHeadBytes[j] = chunk[partialStart + j];
+    }
+
+    // Store the full partial-tail-frame region (superset of tailHeadBytes above, and long
+    // enough to cover a Case-1 split frame's side-info block, not just its 4-byte header) -
+    // see decodeSplitFrameSideInfo.
+    if (meta.tailOverflow > 0) {
+        const int partialStart = static_cast<int>(chunk.size()) - meta.tailOverflow;
+        meta.tailBytes.assign(chunk.begin() + partialStart, chunk.end());
     }
 
     return meta;

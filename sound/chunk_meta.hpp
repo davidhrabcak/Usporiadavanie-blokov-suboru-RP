@@ -25,6 +25,14 @@ struct StreamProfile {
     }
 };
 
+// Result of extracting main_data_begin/part2_3_length from a Layer III side-info block -
+// see computeSideInfoFields / decodeSplitFrameSideInfo in chunk_meta.cpp.
+struct SideInfoResult {
+    uint16_t mainDataBegin = 0;
+    uint16_t part23Bits    = 0;
+    bool     valid         = false; // false if not Layer III or the side-info block didn't fit
+};
+
 struct FrameSlice {
     int      offset;          // byte offset of frame header within chunk
     int      length;          // frame length in bytes
@@ -34,7 +42,7 @@ struct FrameSlice {
                                // (Layer III only, else 0) - actual main-data bits this frame
                                // consumes from the reservoir. Kept bit-precise (not rounded
                                // to bytes) so per-frame rounding doesn't compound into a
-                               // systematic drift over many frames - see computePart23Bits.
+                               // systematic drift over many frames - see computeSideInfoFields.
 };
 
 struct ChunkMeta {
@@ -56,6 +64,12 @@ struct ChunkMeta {
     // First min(tailOverflow, 3) bytes of the partial tail frame's header
     // (only relevant when 1 <= tailOverflow <= 3)
     uint8_t tailHeadBytes[3]{};
+
+    // Full partial-tail-frame region of this chunk (size == tailOverflow), i.e. chunk[chunk.size()
+    // - tailOverflow .. chunk.size()). Superset of tailHeadBytes/chunkHead's tail-side info - used
+    // to reconstruct a Case-1 split frame's side info (which can extend well past the 4-byte header)
+    // once a successor chunk is known. See decodeSplitFrameSideInfo in chunk_meta.cpp.
+    std::vector<uint8_t> tailBytes;
 };
 
 /**
@@ -79,5 +93,13 @@ ChunkMeta computeChunkMeta(int chunkIndex,
 // Derive a StreamProfile from the very first valid frame in a chunk.
 // Returns false if no valid header found.
 bool deriveProfile(const std::vector<uint8_t>& chunk, StreamProfile& out);
+
+// Decodes the real main_data_begin/part2_3_length of a Case-1 split frame (one whose 4-byte
+// header and start of payload are in `a`'s tail, continuing into successor chunk `b`), by
+// reconstructing its side-info block from both chunks' raw bytes. See chunk_meta.cpp for the
+// Case-1 invariant this relies on (a.tailOverflow >= 4 whenever a.tailPartialLen > 0).
+// Returns a result with .valid == false if `a` isn't a Case-1 split Layer III frame, or `b`
+// doesn't hold enough bytes to complete the side-info block.
+SideInfoResult decodeSplitFrameSideInfo(const ChunkMeta& a, const std::vector<uint8_t>& bBytes);
 
 #endif
