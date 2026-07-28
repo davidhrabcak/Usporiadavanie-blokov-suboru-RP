@@ -25,61 +25,28 @@ using namespace std;
 vector<vector<uint8_t>> chunks; // moved for debugging
 
 /**
- * Determines the length of side information in a chunk.
- * @return Side information length in bytes.
- */
-static int sideInfoBytes(const StreamProfile& p) {
-    if (p.versionID == 0b11) return p.isMono() ? 17 : 32;
-    return p.isMono() ? 9 : 17;
-}
-
-/**
  * Advances the Layer III bit-reservoir level through a single frame and checks that
  * the frame's mainDataBegin is actually satisfiable by what has accumulated so far.
  *
- * `level` is tracked in BITS, not bytes, even though callers (advanceReservoirChunk,
- * DfsState::reservoirLevel) treat it as an opaque running total - see below for why.
+ * `level` is tracked in BITS, not bytes (see below for why), even though callers treat it
+ * as an opaque running total.
  *
  * level_after = clamp(f.mainDataBegin*8 + producedBits - f.part23Bits, 0, maxReservoir*8).
- * The critical detail (cross-checked against minimp3's L3_restore_reservoir/
- * L3_save_reservoir, a widely-used reference decoder): the "history" contribution to
- * level_after is `f.mainDataBegin`, NOT `level_before`. A frame only ever reaches back
- * exactly as far as its own mainDataBegin says; any reservoir surplus beyond that
- * (level_before - mainDataBegin, when the frame didn't need to reach all the way back) is
- * *not* carried forward - the decoder's reservoir buffer only ever keeps the trailing
- * leftover of the (mainDataBegin + produced) window actually used by this frame, so older,
- * unclaimed bytes are gone once a later frame's mainDataBegin doesn't reach them. Using
- * `level_before` instead of `f.mainDataBegin` here was an earlier, incorrect version of
- * this fix - it let unused surplus accumulate indefinitely, and produced a systematic
- * downward drift that rejected `test7_shorter.mp3`'s true, correct chunk order by chunk 7
- * (confirmed empirically: `level_before` and `f.mainDataBegin` diverge starting exactly
- * where a stretch of near-silent frames - each leaving most of a saturated reservoir
- * unclaimed - is followed by louder frames whose real consumption then gets checked
- * against a `level` that never should have kept that surplus).
+ * Cross-checked against minimp3's L3_restore_reservoir/L3_save_reservoir: the "history"
+ * contribution to level_after is `f.mainDataBegin`, NOT `level_before` - a frame only ever
+ * reaches back exactly as far as its own mainDataBegin declares, so any reservoir surplus
+ * beyond that is discarded, not carried forward. The separate check `f.mainDataBegin >
+ * level_before` still applies: mainDataBegin(N) can never exceed what was genuinely
+ * available after frame N-1.
  *
- * The check itself (`f.mainDataBegin > level_before`) stays: mainDataBegin(N) can never
- * exceed what was genuinely available after frame N-1.
- *
- * Bit-precision also matters: part2_3_length is a bit-granular quantity, so it and
- * `produced` are both kept in bits internally, only flooring to bytes when compared
- * against mainDataBegin (a byte-granular bitstream field) - rounding part2_3_length up to
- * bytes per frame (an earlier version of this fix did exactly that) adds up to ~7 bits of
- * phantom consumption on every frame, which also compounds into false rejections.
- *
- * A first attempt at this function subtracted mainDataBegin itself as a stand-in for
- * consumption (not as the reservoir's history anchor, which is what this version does -
- * a different thing). That regressed real reconstructions: instrumenting a known-good file
- * (sample-3s.mp3) showed mainDataBegin sitting near the 511-byte cap on nearly every
- * frame while `produced` was ~382 bytes/frame, so the subtract-based level went net
- * negative every frame and saturated at 0 within a handful of chunks - after which every
- * subsequent frame with mainDataBegin > 0 was (wrongly) rejected, and the true ordering
- * could no longer pass. part2_3_length is the correct quantity to subtract - validated by
- * replaying the true, unshuffled chunk order through this function (see the pre-shuffle
- * sanity check below) before trusting it inside the DFS.
+ * part2_3_length/producedBits are kept in BITS throughout, only compared against
+ * mainDataBegin (byte-granular) at the byte level - rounding part2_3_length up to bytes
+ * per frame would add ~7 bits of phantom consumption per frame, compounding into false
+ * rejections over a whole file.
  *
  * @param level  Current reservoir fill level in BITS; updated in place.
  * @param f      The frame to advance through.
- * @param sideInfo Side-information size in bytes for this stream (see sideInfoBytes).
+ * @param sideInfo Side-information size in bytes for this stream (see sideInfoSize).
  * @param maxReservoir Reservoir capacity in bytes (511 for MPEG1, 255 for MPEG2/2.5).
  * @return False if `f.mainDataBegin` reaches further back than `level` allows, or if this
  *         frame's actual consumption (`part23Bits`) exceeds what became available.
@@ -108,15 +75,12 @@ static bool advanceReservoirFrame(int& level, const FrameSlice& f, const int sid
  * frame lengths of ~100-800 bytes) contributes no FrameSlice to *either* chunk on its own.
  *
  * When `prevMeta` is a Case-1 split (`prevMeta->tailPartialLen > 0`), the split frame's own
- * side info is now decoded exactly from `prevMeta`'s tail bytes + `metaBytes`'s head
+ * side info is decoded exactly from `prevMeta`'s tail bytes + `metaBytes`'s head
  * (`decodeSplitFrameSideInfo`, chunk_meta.cpp) and validated/consumed via `advanceReservoirFrame`
- * like any other frame - this is possible at exactly this point because the DFS already knows
- * both chunks of the candidate edge being tried (see call sites in dfs()/main()). This replaces
- * the previous conservative approximation (credit `meta.headOffset` raw payload bytes without
- * checking the split frame's own `mainDataBegin`/`part2_3_length` at all), closing the gap noted
- * in CLAUDE.md item 3's caveat / item 7's 2026-07-11 update. If the exact decode isn't possible
- * (e.g. not enough bytes to complete the side-info block), this falls back to the old
- * conservative byte credit rather than rejecting the edge outright.
+ * like any other frame - possible here because the DFS already knows both chunks of the
+ * candidate edge being tried. If the exact decode isn't possible (not enough bytes to complete
+ * the side-info block), this falls back to crediting `meta.headOffset` raw payload bytes without
+ * validating the split frame's own mainDataBegin/part2_3_length.
  *
  * @param level     Current reservoir fill level in BITS; updated in place, even on failure
  *                  (the caller must restore it from a saved copy rather than trust it after false).
@@ -395,7 +359,7 @@ int main(int argc, char* argv[]) {
             // (see advanceReservoirFrame). A correct model must never reject a real
             // chunk sequence.
             if (prof0.isLayerIII()) {
-                const int sideInfo0     = sideInfoBytes(prof0);
+                const int sideInfo0     = sideInfoSize(prof0.versionID, prof0.isMono());
                 const int maxReservoir0 = (prof0.versionID == 0b11) ? 511 : 255;
                 int level = 0;
                 int reservoirBreaks = 0;
@@ -494,7 +458,7 @@ int main(int argc, char* argv[]) {
     // Reservoir parameters for this stream, computed once up front and threaded through
     // every DFS call rather than recomputed per edge.
     const bool isLayerIII   = profile.isLayerIII();
-    const int  sideInfo     = sideInfoBytes(profile);
+    const int  sideInfo     = sideInfoSize(profile.versionID, profile.isMono());
     const int  maxReservoir = (profile.versionID == 0b11) ? 511 : 255;
 
     DfsState state;

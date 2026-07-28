@@ -5,12 +5,7 @@
 
 using namespace std;
 
-/**
- * Determines the length of side information in a chunk.
- * @return Side information length in bytes.
- */
-static int sideInfoSize(const int versionID, const bool isMono) {
-    // MPEG1: 32 (stereo) / 17 (mono)   MPEG2/2.5: 17 (stereo) / 9 (mono)
+int sideInfoSize(const int versionID, const bool isMono) {
     if (versionID == 0b11)
         return isMono ? 17 : 32;
     else
@@ -66,44 +61,25 @@ static bool isXingFrame(const vector<uint8_t>& chunk, const int off, const Heade
        std::memcmp(ptr, "VBRI", 4) == 0;
 }
 
-/* Helper function that eliminates repeating code.
- * Check if chunk is long enough for a header are still needed before using this function. */
+// Caller must first check the chunk has at least 4 bytes remaining from `index`.
 static uint32_t computeChunkHeader(const vector<uint8_t>& chunk, const int index) {
-    return (static_cast<uint32_t>(chunk[index])   << 24) |
-           (static_cast<uint32_t>(chunk[index + 1]) << 16) |
-           (static_cast<uint32_t>(chunk[index + 2]) << 8)  |
-            static_cast<uint32_t>(chunk[index + 3]);
+    return packHeaderBytes(&chunk[index]);
 }
 
 /**
- * Extracts `main_data_begin` and the sum of 'part2_3_length' (the actual main-data bits a
- * Layer III frame consumes from the bit reservoir) across every granule/channel, reading from
- * a side-info block that starts at bit 0 of `sideBuf` (i.e. `sideBuf` must already be
- * positioned at the first byte immediately after the frame's 4-byte header).
+ * Extracts `main_data_begin` and the sum of `part2_3_length` (actual main-data bits this frame
+ * consumes from the bit reservoir) across every granule/channel, from a side-info block starting
+ * at bit 0 of `sideBuf` (i.e. immediately after the frame's 4-byte header).
  *
- * part2_3_length is returned in BITS, not bytes: it is a bit-granular quantity (the exact
- * number of bits spent on scalefactors + Huffman data), and the reservoir bookkeeping in
- * main.cpp accumulates it every frame. Rounding up to bytes here would add up to ~7 bits of
- * phantom "consumption" on *every single frame*, and that systematic bias compounds across a
- * whole file into a large false deficit - confirmed empirically: it caused the reservoir check
- * to reject `test7_shorter.mp3`'s true, correct chunk order by chunk 7 (see CLAUDE.md). Only
- * `mainDataBegin` (a byte-granular field in the bitstream) should ever be compared/rounded at
- * the byte level; the running reservoir level itself must stay bit-precise.
+ * part2_3_length is returned in BITS, not bytes, and must stay that way: it's a bit-granular
+ * quantity, and rounding it up to bytes on every frame compounds into a large false reservoir
+ * deficit over a whole file. Only `mainDataBegin` is a byte-granular bitstream field.
  *
- * Side-info layout (ISO/IEC 11172-3 / 13818-3), all fields MSB-first (CRC is not accounted for,
- * i.e. protection_bit is assumed set / no CRC present):
- *   MPEG1:      main_data_begin(9) + private_bits(mono:5/stereo:3) + scfsi(4 bits/channel)
- *               then 2 granules x numChannels blocks of 59 bits, part2_3_length is the
- *               leading 12 bits of each block.
+ * Side-info layout (ISO/IEC 11172-3 / 13818-3), all fields MSB-first, no CRC:
+ *   MPEG1:      main_data_begin(9) + private_bits(mono:5/stereo:3) + scfsi(4 bits/channel),
+ *               then 2 granules x numChannels blocks of 59 bits (leading 12 = part2_3_length).
  *   MPEG2/2.5:  main_data_begin(8) + private_bits(mono:1/stereo:2), no scfsi,
- *               then 1 granule x numChannels blocks of 63 bits, part2_3_length is the
- *               leading 12 bits of each block.
- * (Block sizes/private_bits widths cross-checked against the documented side-info byte totals
- * in sideInfoSize() - both must agree exactly, and they do. Note: main_data_begin's width
- * genuinely differs between MPEG1 (9 bits) and MPEG2/2.5 (8 bits) - unifying this function
- * fixed a latent bug where the old, separate readMainDataBegin() always read 9 bits regardless
- * of version, which would have under/misread mainDataBegin for any MPEG2/2.5 stream; dormant
- * until now because every existing test fixture is MPEG1.)
+ *               then 1 granule x numChannels blocks of 63 bits (leading 12 = part2_3_length).
  *
  * @param sideBuf Bit source positioned at the start of the side-info block.
  * @return .valid is false if the side-info block doesn't fully fit in `sideBuf`.
@@ -154,11 +130,9 @@ static SideInfoResult readFrameSideInfo(const vector<uint8_t>& chunk, const int 
  * the chunk boundary: the header (and >=0 bytes of side info) sits in the tail of chunk `a`, and
  * the rest of the side info (if any) is the first bytes of the immediate successor chunk `b`.
  *
- * By construction in tryParse/computeChunkMeta, whenever `a.tailPartialLen > 0` (Case 1) the
- * frame's full 4-byte header was read successfully from within `a`, so `a.tailOverflow >= 4` and
- * `a.tailBytes[0..4)` is that header. This function only needs `a`'s ChunkMeta (for tailBytes/
- * tailOverflow/profile) and `b`'s raw bytes - no header re-decoding, since the header was already
- * validated when `a`'s metadata was computed.
+ * Whenever `a.tailPartialLen > 0` (Case 1), tryParse/computeChunkMeta guarantee the frame's full
+ * 4-byte header was already read from within `a`, so `a.tailOverflow >= 4` and `a.tailBytes[0..4)`
+ * is that header - no header re-decoding needed here.
  *
  * @param a      Metadata for the chunk containing the split frame's header and start of payload.
  * @param bBytes Raw bytes of the candidate successor chunk `b` (bytes [0, rem) of `bBytes` are
@@ -212,9 +186,9 @@ static int tryParse(const vector<uint8_t>& chunk,
         const uint32_t raw = computeChunkHeader(chunk, i);
         if (!Mp3FrameScanner::isValidHeader(raw)) break;
 
-        int err;
-        Header h(raw, err);
-        if (err != 0) break;
+        bool ok;
+        Header h(raw, ok);
+        if (!ok) break;
         if (!expected.matches(h)) break;
 
         const int len = h.getFrameLength();
@@ -299,9 +273,9 @@ ChunkMeta computeChunkMeta(const int chunkIndex,
 
         if (!Mp3FrameScanner::isValidHeader(raw)) continue;
 
-        int err;
-        Header h(raw, err);
-        if (err != 0) continue;
+        bool ok;
+        Header h(raw, ok);
+        if (!ok) continue;
         if (!expected.matches(h)) continue;
 
         meta.frameStarts.push_back(off);
@@ -340,17 +314,9 @@ ChunkMeta computeChunkMeta(const int chunkIndex,
     for (int j = 0; j < 4 && j < static_cast<int>(chunk.size()); ++j)
         meta.chunkHead[j] = chunk[j];
 
-    // Store first min(tailOverflow, 3) bytes of the partial tail frame's header
-    // (only meaningful when tailOverflow 1-3)
-    if (meta.tailOverflow >= 1 && meta.tailOverflow <= 3) {
-        const int partialStart = static_cast<int>(chunk.size()) - meta.tailOverflow;
-        for (int j = 0; j < meta.tailOverflow; ++j)
-            meta.tailHeadBytes[j] = chunk[partialStart + j];
-    }
-
-    // Store the full partial-tail-frame region (superset of tailHeadBytes above, and long
-    // enough to cover a Case-1 split frame's side-info block, not just its 4-byte header) -
-    // see decodeSplitFrameSideInfo.
+    // Store the full partial-tail-frame region: its first 1-3 bytes double as a split header's
+    // leading bytes (Case 2), and the whole thing covers a Case-1 split frame's side-info block
+    // once a successor chunk is known - see decodeSplitFrameSideInfo.
     if (meta.tailOverflow > 0) {
         const int partialStart = static_cast<int>(chunk.size()) - meta.tailOverflow;
         meta.tailBytes.assign(chunk.begin() + partialStart, chunk.end());
@@ -372,9 +338,9 @@ bool deriveProfile(const vector<uint8_t>& chunk, StreamProfile& out) {
 
         if (!Mp3FrameScanner::isValidHeader(raw)) continue;
 
-        int err;
-        Header h(raw, err);
-        if (err != 0) continue;
+        bool ok;
+        Header h(raw, ok);
+        if (!ok) continue;
         const int frameLen = h.getFrameLength();
         if (frameLen <= 0) continue;
 

@@ -14,8 +14,7 @@ add_executable(rp
         adjacency.hpp
         huffman_tables.cpp
         huffman_tables.hpp
-        main.cpp
-        main.hpp)
+        main.cpp)
 
 add_executable(evaluate_order
         test/evaluate_order.cpp

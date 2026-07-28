@@ -6,38 +6,25 @@
 #include <cstdint>
 
 struct FrameData {
-    std::string mpeg_version;
-    std::string layer;
-    bool crc;
-    int bitrate;
-    int sample_rate;
-    std::string channel_mode;
     std::vector<uint8_t> rawBits;
 };
-
-inline std::ostream& operator<<(std::ostream &os, const FrameData& data) {
-    os << "MPEG: " << data.mpeg_version << std::endl;
-    os << "Layer: " << data.layer << std::endl;
-    os << "CRC: " << ((data.crc) ? "Used" : "Not used") << std::endl;
-    os << "Bitrate: " << data.bitrate << std::endl;
-    os << "Sample rate: " << data.sample_rate << std::endl;
-    os << "Channel mode: " << data.channel_mode << std::endl;
-    return os;
-}
 
 struct FrameInfo {
     size_t position{};   // byte offset in file
     int length{};     // frame length in bytes
-    FrameData frame_data;
 };
 
+// Packs 4 consecutive bytes (MSB-first) into the 32-bit value an MP3 frame header decodes from.
+inline uint32_t packHeaderBytes(const uint8_t* b) {
+    return (static_cast<uint32_t>(b[0]) << 24) | (static_cast<uint32_t>(b[1]) << 16)
+         | (static_cast<uint32_t>(b[2]) << 8)  |  static_cast<uint32_t>(b[3]);
+}
 
 class Mp3FrameScanner {
     public:
     Mp3FrameScanner(const std::string& filename);
     const std::vector<FrameInfo>& getFrames();
     unsigned long getFrameCount() const;
-    FrameData getFrame(size_t index);
     static bool isValidHeader(uint32_t headerRaw);
     /** Returns each frame's raw bytes, in file order - one chunk per frame. */
     std::vector<std::vector<uint8_t>> getRawChunks() const;

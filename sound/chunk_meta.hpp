@@ -61,14 +61,11 @@ struct ChunkMeta {
 
     // First 4 bytes of the chunk (for cross-chunk header reconstruction when tailOverflow < 4)
     uint8_t chunkHead[4]{};
-    // First min(tailOverflow, 3) bytes of the partial tail frame's header
-    // (only relevant when 1 <= tailOverflow <= 3)
-    uint8_t tailHeadBytes[3]{};
 
     // Full partial-tail-frame region of this chunk (size == tailOverflow), i.e. chunk[chunk.size()
-    // - tailOverflow .. chunk.size()). Superset of tailHeadBytes/chunkHead's tail-side info - used
-    // to reconstruct a Case-1 split frame's side info (which can extend well past the 4-byte header)
-    // once a successor chunk is known. See decodeSplitFrameSideInfo in chunk_meta.cpp.
+    // - tailOverflow .. chunk.size()). When 1 <= tailOverflow <= 3 this doubles as the split
+    // header's first bytes; when tailOverflow >= 4 it also covers a Case-1 split frame's side
+    // info, reconstructed once a successor chunk is known - see decodeSplitFrameSideInfo.
     std::vector<uint8_t> tailBytes;
 };
 
@@ -85,6 +82,9 @@ inline int tailRemaining(const ChunkMeta& m) {
 
 // MAX_FRAME_LENGTH: MPEG1 Layer I @ 320kbps / 32kHz + padding = 1441 bytes
 static constexpr int MAX_FRAME_LENGTH = 1441;
+
+// Layer III side-info block size in bytes: MPEG1 32 (stereo) / 17 (mono), MPEG2/2.5 17 (stereo) / 9 (mono).
+int sideInfoSize(int versionID, bool isMono);
 
 ChunkMeta computeChunkMeta(int chunkIndex,
                            const std::vector<uint8_t>& chunk,

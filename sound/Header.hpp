@@ -6,16 +6,11 @@
 
 class Header {
 public:
-    explicit Header(unsigned int input, int &output);
+    explicit Header(unsigned int input, bool &ok);
 
-    uint32_t getRaw() const;
-    std::string getMpegVersion() const;
-    std::string getLayer() const;
-    bool hasCRC() const;
     int getBitrate() const;
     int getSampleRate() const;
     bool hasPadding() const;
-    std::string getChannelMode() const;
     int getFrameLength() const;
 
     uint8_t getVersionID() const;
@@ -27,13 +22,9 @@ public:
 
 private:
     uint32_t raw;
-    std::string mpegVersion;
-    std::string layer;
-    uint8_t protectionBit{};
     int bitrate{};
     int sampleRate{};
     bool padding{};
-    std::string channelMode;
     int frameLength{};
 
     uint8_t versionID_raw{};
@@ -43,7 +34,7 @@ private:
 
     bool synchValid() const;
 
-    int decode();
+    bool decode();
     bool decodeVersion(uint8_t versionID);
     bool decodeLayer(uint8_t layerIndex);
     bool decodeBitrate(uint8_t bitrateIndex,
