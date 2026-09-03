@@ -27,6 +27,25 @@ all new logic is implemented and validated directly in C++.
 is the existing ground-truth comparator (Kendall's tau, exact-position %,
 adjacent-run coverage) for correctness verification.
 
+### Test fixtures (NOT in git — rights-restricted)
+
+The MP3 fixtures (`CBR.mp3`, `sample-3s.mp3`, `test7.mp3`, `test7_short.mp3`,
+`test7_shorter.mp3`, `test1..6*`) are third-party / rights-restricted and must
+never be committed — `.gitignore` blocks `*.mp3` for this reason. They have
+never been in git history.
+
+Local source on this machine (2026-09-03): a pre-`7a3103f` copy of the project
+at `/home/davidhrabcak/Desktop/python/sound/test/`. Copy the ones a given
+measurement needs into `sound/test/` before running `rp`/`evaluate_order`
+(`main.cpp`'s `FILENAME` default and the `test/…` paths are relative to
+`sound/`). Chunk counts as a sanity check: `CBR.mp3` 658, `sample-3s.mp3` 51,
+`test7_shorter.mp3` 320, `test7_short.mp3` 610, `test7.mp3` 3351.
+
+Build note (2026-09-03): `cmake` is not installed on this machine. Direct
+build that matches the doc's `-O2` A/B methodology:
+`g++ -std=c++14 -O2 -o cmake-build-debug/rp frame_scanner.cpp Header.cpp chunk_meta.cpp adjacency.cpp huffman_tables.cpp main.cpp`
+and `g++ -std=c++17 -O2 -o cmake-build-debug/evaluate_order test/evaluate_order.cpp frame_scanner.cpp Header.cpp`.
+
 ---
 
 ## Milestone 1 — Exact junction-frame reservoir consumption
@@ -86,10 +105,84 @@ scalefactor tables are out of scope — document as a known limitation.
       reflect the new file and Milestone-1-era usage changes (`argv[1]`
       input override, `RP_SEED` env var) that predated this step but hadn't
       been documented in the top-level `README.md` yet.
-- [ ] 2. `main_data_decoder.hpp`/`.cpp`: `GranuleSideInfo` parser (extends
-      Milestone 1's bit-source helper to capture `bigValues`, `globalGain`,
-      `scalefacCompress`, block-type/window flags, `tableSelect[3]`,
-      region0/1 counts, `scalefacScale`, `count1TableSelect`).
+- [x] 2. `GranuleSideInfo` / `FrameSideInfo` parser. Landed in
+      `chunk_meta.{hpp,cpp}` (not a new `main_data_decoder` file - it shares
+      Milestone 1's `SideInfoBitSource`/`readBitsMsb` directly). `parseFrameSideInfo`
+      now walks the full side-info block (all granule/channel fields:
+      `bigValues`, `globalGain`, `scalefacCompress`, window/block-type flags,
+      `tableSelect[3]`, `subblockGain[3]`, region0/1 counts, `preflag`,
+      `scalefacScale`, `count1TableSelect`); `computeSideInfoFields` (the M1
+      reservoir path) is now a thin wrapper over it, with a
+      `bitPos = blockStart + blockBits` guard so the `part2_3_length` sum
+      stays bit-identical to the pre-refactor skip loop. Public entry point
+      `parseFrameSideInfoAt(buf, off, mpeg1, mono)`. Regression-checked: M1
+      reservoir check still PASSES on the true order for all 5 fixtures
+      (`test7.mp3`'s 2 pre-existing breaks unchanged).
+
+---
+
+## Milestone 1.5 — Side-info-only continuity heuristic (Step 1 probe + wiring)
+
+Rationale for inserting this ahead of Milestone 2's full spectral decode: M1's
+exact reservoir consumption turned out to be "a wash" on hard VBR (CLAUDE.md
+item 7). Before building the expensive Huffman+requantize path, measure whether
+the *free* side-info fields alone (now that step 2 parses them) discriminate a
+chunk's true successor. They do - `global_gain` strongly.
+
+**Probe** (`test/sideinfo_probe.cpp`, built by CMake): runs on each fixture's
+true (unshuffled) order; for every chunk computes the trailing granule's side
+info and, for candidates, the leading granule's. Two measurements: (A)
+Mann-Whitney AUC of the junction |Δfeature| for true consecutive pairs vs
+random pairs; (B) rank of the true successor among a chunk's structural
+candidates `adj[i]` when sorted by |Δfeature|, vs the random-order baseline
+mean rank.
+
+- [x] 1. Measurement A - only `global_gain` is a consistent signal. AUC of
+      `|Δ global_gain|`: sample-3s 0.58, CBR 0.68, test7_shorter 0.77,
+      test7_short 0.73, test7 0.69. `bigValues` / `part2_3_length` are weak
+      secondaries (~0.56-0.65). Everything else (`blockType`,
+      `windowSwitching`, `tableSelect`, `scalefacCompress`, region counts) is
+      noise (AUC 0.48-0.57).
+- [x] 2. Measurement B (`global_gain` scorer, rank of true successor among
+      `adj[i]`, degree>=2): test7_shorter meanRank 1.31 vs 1.69 base, rank1
+      74% (deg>=3: 60%); test7_short 1.53 vs 1.99, rank1 64% (deg>=3: 55%);
+      test7 3.48 vs 5.24, rank1 27% (deg>=3: 27%, ~1.5x baseline); CBR 10.4
+      vs 17.0, rank1 9%; sample-3s 1.60 vs 1.82, rank1 52%. A naive z-scored
+      combo of global_gain+bigValues+part2_3_length was *not* better than
+      global_gain alone (dilutes it) - keep it single-feature.
+- [x] 3. Wired into `dfs()` (`main.cpp`): `BoundaryGain` per chunk (leading /
+      trailing granule `global_gain`), and each `dfs()` call `stable_sort`s a
+      copy of `superAdj[cur]` by `|Δ global_gain|` at the junction (unknown =
+      sorts last, stable). **Ranking only - never rejects an edge; reservoir
+      check unchanged.** `RP_RANK=0` env var disables it for A/B.
+- [x] 4. A/B on `sample-3s.mp3` (completes fast, 5 seeds, RP_RANK 0 vs 1):
+      dramatic. rank OFF exact-position 13-63%, tau +0.03..+0.48; rank ON
+      exact-position 76-100%, tau +0.69..+1.00, with **4 of 5 seeds a
+      perfect reconstruction** (tau exactly +1.0000). Same wall-clock (<1s
+      both).
+- [x] 5. A/B on `test7_shorter` (intractable VBR): ranking does **not** make
+      it complete - `RP_SEED=1 RP_RANK=1` still doesn't finish the exhaustive
+      DFS in 95s, same as baseline. Expected (traversal-order change, not a
+      graph change; fixture already documented intractable). So M1.5 is an
+      *answer-quality* win, not a *tractability* win for the largest files -
+      same axis split as M1. Evidence for keeping it = Measurement B +
+      sample-3s exact reconstruction, not a hard-fixture wall-clock number.
+      (Measuring completion cleanly is hampered by `rp` block-buffering its
+      cout to a pipe/file and losing the tail on SIGTERM - a `cout.flush()`
+      after the metadata table, or progress to stderr, would help future A/Bs.)
+- [x] 6. `CLAUDE.md` updated - item 7 gets a dated 2026-09-03 entry; the
+      hard-fixture paragraph reflects step 5's result.
+- [ ] 7. **Decision still open**: does M1.5 make Milestone 2's full spectral
+      decode unnecessary (skip steps 3-7), or is it a complement? Current
+      lean: M1.5 is enough for small/medium files; the full decode is only
+      worth it if the goal explicitly includes the multi-thousand-chunk VBR
+      case, and even then beam/A* may be the better next step. Needs a call
+      before sinking days into steps 3-7.
+
+**Gate for Milestone 2 steps 3-7 below**: only build the full Huffman +
+requantize + spectral-continuity path if M1.5's `global_gain` heuristic proves
+insufficient on the hard fixtures (step 5). On the evidence so far it may
+already be enough for small/medium files.
 - [ ] 3. `decodeScaleFactors(...)` (block-type/`scalefac_compress`-aware).
 - [ ] 4. `decodeHuffmanRegions(...)` (big_values + count1, stop at
       `part2_3_length` bit boundary).
@@ -118,3 +211,16 @@ scalefactor tables are out of scope — document as a known limitation.
 - Performance: pinned-seed A/B (DFS nodes via existing `Depth:` counter +
   wall-clock) per milestone before considering it "done."
 - `CLAUDE.md` gets a dated entry either way, following its existing style.
+
+## CI (2026-09-03)
+
+`.github/workflows/ci.yml` builds all three CMake targets and runs
+`sound/test/ci_sanity.sh` on every push/PR touching `sound/**`. The sanity
+check reconstructs `sound/test/ci_sanity.mp3` - a small synthetic VBR file
+(`test/make_ci_sanity.sh`, pure ffmpeg lavfi synthesis, committed so CI is
+hermetic; the `*.mp3` gitignore rule has an explicit exception for it) - from
+a pinned-seed shuffle and asserts an exact recovery (tau = +1.0, exact
+position 100%). It reconstructs perfectly across every seed tried and with the
+`global_gain` heuristic both on and off, so it catches pipeline regressions
+(build break, crash, hang, DFS no longer finding the correct order) without
+being brittle to heuristic tuning.

@@ -8,6 +8,7 @@
 #include <vector>
 #include <fstream>
 #include <cstdlib>
+#include <climits>
 #include "frame_scanner.hpp"
 #include "chunk_meta.hpp"
 #include "adjacency.hpp"
@@ -231,6 +232,24 @@ struct DfsState {
     int reservoirLevel = 0;   // bit-reservoir fill level after everything placed so far
 };
 
+// Per-chunk Layer III granule loudness at each end, for the continuity ranking heuristic.
+// .first  = global_gain of granule 0 of the chunk's first complete frame
+// .second = global_gain of the last granule of the chunk's last complete frame
+// Either is -1 when unavailable (no complete frame / side info didn't fit). See the
+// sideinfo_probe measurements in PLAN_sideinfo_mainbits.md Step 1: |Δ global_gain| across a
+// chunk junction ranks the true successor #1 in ~60-74% of branch points on VBR fixtures
+// (vs ~30% for the graph's own candidate order), so sorting DFS candidates by it explores
+// the likely-correct edge first. Ranking only - never rejects an edge.
+struct BoundaryGain { int first = -1; int last = -1; };
+
+// |Δ global_gain| between chunk `a`'s trailing granule and chunk `b`'s leading granule.
+// Returns INT_MAX when either side is unknown, so scored candidates sort ahead of unscored
+// ones (whose relative order a stable_sort then leaves untouched).
+static int continuityCost(const vector<BoundaryGain>& bg, const int a, const int b) {
+    if (bg[a].last < 0 || bg[b].first < 0) return INT_MAX;
+    return std::abs(bg[a].last - bg[b].first);
+}
+
 static uint64_t counter = 0;
 
 /**
@@ -254,6 +273,8 @@ bool dfs(DfsState& state,
          const vector<Supernode>& supernodes,
          const vector<vector<int>>& superAdj,
          const vector<ChunkMeta>& metas,
+         const vector<BoundaryGain>& boundaryGain,
+         const bool rankByContinuity,
          const int sideInfo,
          const int maxReservoir,
          const bool isLayerIII,
@@ -267,8 +288,18 @@ bool dfs(DfsState& state,
     }
 
     const int cur = state.order.back();
-    const auto& candidates = superAdj[cur];
     const int curTailChunk = supernodes[cur].chunks.back();
+
+    // Try structurally-legal successors in order of granule-loudness continuity (smallest
+    // |Δ global_gain| at the junction first). Pure exploration ordering - every candidate is
+    // still tried, and the reservoir check below is unchanged.
+    vector<int> candidates(superAdj[cur].begin(), superAdj[cur].end());
+    if (rankByContinuity && candidates.size() > 1) {
+        stable_sort(candidates.begin(), candidates.end(), [&](const int x, const int y) {
+            return continuityCost(boundaryGain, curTailChunk, supernodes[x].chunks.front())
+                 < continuityCost(boundaryGain, curTailChunk, supernodes[y].chunks.front());
+        });
+    }
 
     for (int si : candidates) {
         if (state.used[si]) continue;
@@ -298,7 +329,7 @@ bool dfs(DfsState& state,
                   << "/" << supernodes.size() << "\n";
          }
 
-        if (dfs(state, supernodes, superAdj, metas, sideInfo, maxReservoir, isLayerIII, result)) return true;
+        if (dfs(state, supernodes, superAdj, metas, boundaryGain, rankByContinuity, sideInfo, maxReservoir, isLayerIII, result)) return true;
 
         state.order.pop_back();
         state.used[si] = false;
@@ -415,6 +446,26 @@ int main(int argc, char* argv[]) {
     if (invalidCount > 0)
         cerr << invalidCount << " invalid chunks — reconstruction may fail\n";
 
+    // Boundary granule loudness for the DFS continuity heuristic (see BoundaryGain / dfs()).
+    // Off only if RP_RANK=0 - kept as a switch for the pinned-seed A/B in
+    // PLAN_sideinfo_mainbits.md Step 1.
+    const bool rankByContinuity = [] {
+        const char* v = std::getenv("RP_RANK");
+        return !(v && v[0] == '0');
+    }();
+    vector<BoundaryGain> boundaryGain(chunks.size());
+    if (profile.isLayerIII()) {
+        const bool mpeg1 = profile.versionID == 0b11;
+        const bool mono  = profile.isMono();
+        for (size_t i = 0; i < metas.size(); ++i) {
+            if (!metas[i].valid || metas[i].frames.empty()) continue;
+            const FrameSideInfo f0 = parseFrameSideInfoAt(chunks[i], metas[i].frames.front().offset, mpeg1, mono);
+            const FrameSideInfo f1 = parseFrameSideInfoAt(chunks[i], metas[i].frames.back().offset,  mpeg1, mono);
+            if (f0.valid) boundaryGain[i].first = f0.gr[0][0].globalGain;
+            if (f1.valid) boundaryGain[i].last  = f1.gr[f1.numGranules - 1][0].globalGain;
+        }
+    }
+
     // Print full metadata table
     cout << "\nChunk metadata:\n";
     cout << "  idx  headOff  tailOvfl  frames\n";
@@ -484,7 +535,8 @@ int main(int argc, char* argv[]) {
     vector<int> result;
     cout << "Starting DFS over " << supernodes.size() << " supernodes...\n";
 
-    if (dfs(state, supernodes, superAdj, metas, sideInfo, maxReservoir, isLayerIII, result)) {
+    cout << "Candidate continuity ranking: " << (rankByContinuity ? "ON" : "OFF") << "\n";
+    if (dfs(state, supernodes, superAdj, metas, boundaryGain, rankByContinuity, sideInfo, maxReservoir, isLayerIII, result)) {
         cout << "Reconstruction found\n";
         ofstream out("output.mp3", ios::binary | ios::trunc);
         if (!out) { cerr << "Cannot open output.mp3\n"; return 1; }

@@ -33,6 +33,37 @@ struct SideInfoResult {
     bool     valid         = false; // false if not Layer III or the side-info block didn't fit
 };
 
+// Full per-granule/-channel Layer III side info (ISO 11172-3 2.4.1.7 / 13818-3). Everything a
+// decoder needs *except* the main-data payload itself. Populated by parseFrameSideInfoAt;
+// consumed by the side-info-only continuity probe (test/sideinfo_probe.cpp) and, later,
+// Milestone 2's partial main-data decoder.
+struct GranuleSideInfo {
+    uint16_t part23Length     = 0; // 12 bits - main-data bits for this granule/channel
+    uint16_t bigValues        = 0; // 9 bits  - half the count of the big_values spectral region
+    uint16_t globalGain        = 0; // 8 bits  - granule quantiser step / loudness
+    uint16_t scalefacCompress = 0; // 4 bits (MPEG1) / 9 bits (MPEG2 LSF)
+    uint8_t  windowSwitching  = 0; // 1 bit
+    uint8_t  blockType        = 0; // 2 bits (0 = normal long; 1 start, 2 short, 3 stop) - 0 if !windowSwitching
+    uint8_t  mixedBlock       = 0; // 1 bit
+    uint8_t  tableSelect[3]   = {0,0,0}; // 5 bits each ([2] unused when windowSwitching)
+    uint8_t  subblockGain[3]  = {0,0,0}; // 3 bits each (windowSwitching only)
+    uint8_t  region0Count     = 0; // 4 bits (long blocks only; short blocks: not in bitstream)
+    uint8_t  region1Count     = 0; // 3 bits (long blocks only)
+    uint8_t  preflag          = 0; // 1 bit (MPEG1 only)
+    uint8_t  scalefacScale    = 0; // 1 bit
+    uint8_t  count1TableSelect = 0; // 1 bit
+};
+
+// One frame's complete side info: main_data_begin + every granule/channel block.
+struct FrameSideInfo {
+    uint16_t mainDataBegin  = 0;
+    uint32_t part23BitsTotal = 0; // sum of part23Length over all granules/channels (== SideInfoResult.part23Bits)
+    int      numGranules    = 0;  // 2 (MPEG1) / 1 (MPEG2/2.5)
+    int      numChannels    = 0;  // 1 (mono) / 2
+    GranuleSideInfo gr[2][2];     // [granule][channel]
+    bool     valid          = false;
+};
+
 struct FrameSlice {
     int      offset;          // byte offset of frame header within chunk
     int      length;          // frame length in bytes
@@ -101,5 +132,11 @@ bool deriveProfile(const std::vector<uint8_t>& chunk, StreamProfile& out);
 // Returns a result with .valid == false if `a` isn't a Case-1 split Layer III frame, or `b`
 // doesn't hold enough bytes to complete the side-info block.
 SideInfoResult decodeSplitFrameSideInfo(const ChunkMeta& a, const std::vector<uint8_t>& bBytes);
+
+// Parses the full Layer III side-info block of the frame whose 4-byte header starts at `off`
+// within `buf`. `mpeg1` = (versionID == 0b11); `mono` selects the 1- vs 2-channel layout.
+// Returns a result with .valid == false if the side-info block doesn't fully fit in `buf`.
+// Does not require `buf` to be a whole chunk - any byte range containing header + side info works.
+FrameSideInfo parseFrameSideInfoAt(const std::vector<uint8_t>& buf, int off, bool mpeg1, bool mono);
 
 #endif

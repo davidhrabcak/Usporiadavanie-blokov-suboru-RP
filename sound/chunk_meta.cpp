@@ -84,8 +84,50 @@ static uint32_t computeChunkHeader(const vector<uint8_t>& chunk, const int index
  * @param sideBuf Bit source positioned at the start of the side-info block.
  * @return .valid is false if the side-info block doesn't fully fit in `sideBuf`.
  */
-static SideInfoResult computeSideInfoFields(const SideInfoBitSource& sideBuf, const bool mpeg1, const bool mono) {
-    SideInfoResult result;
+/**
+ * Parses one granule/channel side-info block (59 bits MPEG1, 63 bits MPEG2/2.5 LSF) starting at
+ * `bitPos`. Field order/widths per ISO/IEC 11172-3 2.4.1.7 (MPEG1) and 13818-3 (LSF: 9-bit
+ * scalefac_compress, no preflag). Advances `bitPos` past the whole block.
+ */
+static GranuleSideInfo parseGranuleSideInfo(const SideInfoBitSource& src, int& bitPos, const bool mpeg1) {
+    GranuleSideInfo g;
+    g.part23Length     = static_cast<uint16_t>(readBitsMsb(src, bitPos, 12));
+    g.bigValues        = static_cast<uint16_t>(readBitsMsb(src, bitPos, 9));
+    g.globalGain       = static_cast<uint16_t>(readBitsMsb(src, bitPos, 8));
+    g.scalefacCompress = static_cast<uint16_t>(readBitsMsb(src, bitPos, mpeg1 ? 4 : 9));
+    g.windowSwitching  = static_cast<uint8_t>(readBitsMsb(src, bitPos, 1));
+
+    if (g.windowSwitching) {
+        g.blockType  = static_cast<uint8_t>(readBitsMsb(src, bitPos, 2));
+        g.mixedBlock = static_cast<uint8_t>(readBitsMsb(src, bitPos, 1));
+        g.tableSelect[0] = static_cast<uint8_t>(readBitsMsb(src, bitPos, 5));
+        g.tableSelect[1] = static_cast<uint8_t>(readBitsMsb(src, bitPos, 5));
+        g.tableSelect[2] = 0;
+        for (int r = 0; r < 3; ++r)
+            g.subblockGain[r] = static_cast<uint8_t>(readBitsMsb(src, bitPos, 3));
+        // region0_count/region1_count are not in the bitstream for short blocks - the decoder
+        // uses fixed conventions (see ISO 2.4.2.7). Not needed for the continuity probe; left 0.
+    } else {
+        for (int r = 0; r < 3; ++r)
+            g.tableSelect[r] = static_cast<uint8_t>(readBitsMsb(src, bitPos, 5));
+        g.region0Count = static_cast<uint8_t>(readBitsMsb(src, bitPos, 4));
+        g.region1Count = static_cast<uint8_t>(readBitsMsb(src, bitPos, 3));
+    }
+
+    if (mpeg1)
+        g.preflag = static_cast<uint8_t>(readBitsMsb(src, bitPos, 1));
+    g.scalefacScale     = static_cast<uint8_t>(readBitsMsb(src, bitPos, 1));
+    g.count1TableSelect = static_cast<uint8_t>(readBitsMsb(src, bitPos, 1));
+    return g;
+}
+
+/**
+ * Parses a full Layer III side-info block starting at bit 0 of `sideBuf` (immediately after the
+ * frame's 4-byte header, no CRC). See computeSideInfoFields's old comment (now below) for the
+ * top-level layout. `.valid` is false if the block doesn't fully fit in `sideBuf`.
+ */
+static FrameSideInfo parseFrameSideInfo(const SideInfoBitSource& sideBuf, const bool mpeg1, const bool mono) {
+    FrameSideInfo out;
 
     const int numChannels = mono ? 1 : 2;
     const int numGranules = mpeg1 ? 2 : 1;
@@ -95,21 +137,57 @@ static SideInfoResult computeSideInfoFields(const SideInfoBitSource& sideBuf, co
     const int scfsiBits   = mpeg1 ? numChannels * 4 : 0;
 
     const int totalSideBits = mdbBits + privBits + scfsiBits + numGranules * numChannels * blockBits;
-    if (sideBuf.size() * 8 < totalSideBits) return result; // side-info block doesn't fully fit
+    if (sideBuf.size() * 8 < totalSideBits) return out; // side-info block doesn't fully fit
 
     int bitPos = 0;
-    result.mainDataBegin = static_cast<uint16_t>(readBitsMsb(sideBuf, bitPos, mdbBits));
+    out.mainDataBegin = static_cast<uint16_t>(readBitsMsb(sideBuf, bitPos, mdbBits));
     bitPos += privBits + scfsiBits;
+    out.numGranules = numGranules;
+    out.numChannels = numChannels;
 
-    int totalBits = 0;
+    uint32_t part23Sum = 0;
     for (int g = 0; g < numGranules; ++g) {
         for (int c = 0; c < numChannels; ++c) {
-            totalBits += static_cast<int>(readBitsMsb(sideBuf, bitPos, 12));
-            bitPos += (blockBits - 12); // skip rest of this granule/channel block
+            const int blockStart = bitPos;
+            out.gr[g][c] = parseGranuleSideInfo(sideBuf, bitPos, mpeg1);
+            bitPos = blockStart + blockBits; // authoritative advance - keeps the part2_3_length
+                                             // sum bit-identical to the pre-refactor skip loop
+                                             // even if a per-field width above is ever wrong
+            part23Sum += out.gr[g][c].part23Length;
         }
     }
-    result.part23Bits = static_cast<uint16_t>(totalBits);
-    result.valid = true;
+    out.part23BitsTotal = part23Sum;
+    out.valid = true;
+    return out;
+}
+
+/**
+ * Extracts `main_data_begin` and the sum of `part2_3_length` (actual main-data bits this frame
+ * consumes from the bit reservoir) across every granule/channel, from a side-info block starting
+ * at bit 0 of `sideBuf` (i.e. immediately after the frame's 4-byte header).
+ *
+ * part2_3_length is returned in BITS, not bytes, and must stay that way: it's a bit-granular
+ * quantity, and rounding it up to bytes on every frame compounds into a large false reservoir
+ * deficit over a whole file. Only `mainDataBegin` is a byte-granular bitstream field.
+ *
+ * Side-info layout (ISO/IEC 11172-3 / 13818-3), all fields MSB-first, no CRC:
+ *   MPEG1:      main_data_begin(9) + private_bits(mono:5/stereo:3) + scfsi(4 bits/channel),
+ *               then 2 granules x numChannels blocks of 59 bits (leading 12 = part2_3_length).
+ *   MPEG2/2.5:  main_data_begin(8) + private_bits(mono:1/stereo:2), no scfsi,
+ *               then 1 granule x numChannels blocks of 63 bits (leading 12 = part2_3_length).
+ *
+ * Thin wrapper over parseFrameSideInfo - kept as the reservoir path's entry point so that code
+ * doesn't carry the full per-granule struct it doesn't use.
+ *
+ * @param sideBuf Bit source positioned at the start of the side-info block.
+ * @return .valid is false if the side-info block doesn't fully fit in `sideBuf`.
+ */
+static SideInfoResult computeSideInfoFields(const SideInfoBitSource& sideBuf, const bool mpeg1, const bool mono) {
+    const FrameSideInfo f = parseFrameSideInfo(sideBuf, mpeg1, mono);
+    SideInfoResult result;
+    result.mainDataBegin = f.mainDataBegin;
+    result.part23Bits    = static_cast<uint16_t>(f.part23BitsTotal);
+    result.valid         = f.valid;
     return result;
 }
 
@@ -123,6 +201,13 @@ static SideInfoResult readFrameSideInfo(const vector<uint8_t>& chunk, const int 
     const int sideStart = off + 4;
     const SideInfoBitSource src{&chunk[sideStart], static_cast<int>(chunk.size()) - sideStart};
     return computeSideInfoFields(src, h.getVersionID() == 0b11, h.isMono());
+}
+
+FrameSideInfo parseFrameSideInfoAt(const vector<uint8_t>& buf, const int off, const bool mpeg1, const bool mono) {
+    const int sideStart = off + 4;
+    if (sideStart < 0 || sideStart >= static_cast<int>(buf.size())) return {};
+    const SideInfoBitSource src{&buf[sideStart], static_cast<int>(buf.size()) - sideStart};
+    return parseFrameSideInfo(src, mpeg1, mono);
 }
 
 /**
