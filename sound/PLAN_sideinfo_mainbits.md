@@ -184,14 +184,24 @@ mean rank.
       delivered: `rp` now always terminates on large inputs with a bounded
       best-effort search instead of hanging; small/medium graphs unchanged.
       See `CLAUDE.md` item 7's 2026-09-07 update.
-- [ ] 8. **Decision still open**: near-exhaustive DFS is capped for large VBR
-      regardless of ordering/beam width. Remaining directions: (a) Milestone
-      2 spectral decode for a stronger junction signal; (b) true beam/A* over
-      *partial* orderings that emits the best partial path (current
-      beam-limited DFS still needs a *complete* ordering or outputs nothing);
-      (c) cheaper first: AC-3 / stronger forced-chain collapse to shrink the
-      branch-point count before searching. M1.5 (`global_gain` ranking)
-      stands on its own as the win for small/medium files.
+- [x] 8. A1 (best-of search) implemented and measured - **negative**. `RP_BESTOF=1`:
+      keep exploring past the first complete ordering, keep the min summed-junctionCost
+      one, branch-and-bound on partial score. On `sample-3s` it converges to a single
+      score-194 ordering that is only ~25% correct, vs 76-100% for first-valid. The
+      objective is misaligned: a real stream's true order contains large `global_gain`
+      steps, so the smoothest reorder is not the true one. Off by default, flag kept.
+      See `CLAUDE.md` item 7's "2026-09-07 update 2".
+- [x] 9. C1-C4 consistency/verification landed (`main.cpp` + `test/measurements.sh` +
+      `test/regression.sh` + `test/regression_baseline.tsv`): deterministic default
+      seed, reconstruction-vs-source report in `rp` output, one-command regeneration
+      of this doc's numbers, and a local accuracy-regression baseline. See `CLAUDE.md`
+      "Consistency & verification".
+- [ ] 10. **Decision still open**, now with a recommended order (see the top of
+      `CLAUDE.md`'s TODO section): A3 bitrate-continuity graph pruning → AC-3
+      constraint propagation → A4/A5 (CBR padding, embedded non-audio) → A2 fitted
+      multi-feature score → Milestone 2 spectral decode only if those don't get
+      large-VBR files there. M1.5 (`global_gain` ranking + first-valid) stands on its
+      own as the win for small/medium files.
 
 **Gate for Milestone 2 steps 3-7 below**: only build the full Huffman +
 requantize + spectral-continuity path if M1.5's `global_gain` heuristic proves

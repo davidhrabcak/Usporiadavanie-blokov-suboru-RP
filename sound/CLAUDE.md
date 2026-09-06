@@ -174,11 +174,57 @@ Wired into `dfs()` (`main.cpp`): a per-chunk `BoundaryGain` (leading/trailing gr
 - **Wider beams (2 → unlimited) all plateau at the same depth band** and the plateau depth is **seed-dependent**: `test7_shorter` ~100-130/202 (seeds 1/2/3 → ~111/128/102), `test7_short` ~260-330/512. Seed-dependence = the DFS is wandering an exponential number of ~half-complete orderings, not hitting one specific unreachable supernode. No bug, no graph gap (the true order passes `canFollow` + the reservoir check end to end).
 - **Net**: `rp` now always terminates on large inputs with a bounded best-effort search (previously it hung forever), and honestly reports "no complete ordering found" when the budget is spent. **No accuracy win on the hard fixtures** - beam search needs a stronger per-edge signal to be useful here, same conclusion as the ranking heuristic itself.
 
-**Decision this leaves open** (PLAN M1.5 step 7): near-exhaustive DFS over the current supernode graph is capped for large VBR *regardless of candidate ordering or beam width*. The two remaining directions, both non-trivial: (a) Milestone 2's partial spectral decode for a much stronger junction signal; (b) redesign the search as true beam/A* over *partial* orderings that emits the best partial path as `output.mp3` (the current beam-limited DFS still requires a *complete* 202/512/658-supernode ordering or it outputs nothing). A cheaper orthogonal experiment first: constraint propagation (AC-3) / stronger forced-chain collapse to shrink the ~120-330 branch points before any search.
+**Decision this leaves open** (PLAN M1.5 step 7): near-exhaustive DFS over the current supernode graph is capped for large VBR *regardless of candidate ordering or beam width*. The two remaining directions, both non-trivial: (a) Milestone 2's partial spectral decode for a much stronger junction signal; (b) redesign the search as true beam/A* over *partial* orderings that emits the best partial path as `output.mp3` (the current beam-limited DFS still requires a *complete* 202/512/658-supernode ordering or it outputs nothing). A cheaper orthogonal experiment first: constraint propagation (AC-3) / stronger forced-chain collapse to shrink the ~120-330 branch points before any search. See the recommended order at the top of the TODO section.
+
+**2026-09-07 update 2 - "best-of" search (keep exploring, minimise summed junction cost) tried; it is *worse*, and the reason is informative.** `main.cpp` `RP_BESTOF=1`: don't stop at the first complete ordering, keep the lowest-scoring one where score = summed `junctionCost` (= `|Δ global_gain|`, unknown junctions cost a flat 384) over every supernode boundary, with branch-and-bound on the partial score. Result on `sample-3s` (5 seeds): best-of converges to one score-194 ordering with **only 25% of chunks in place**, vs **76-100% for first-valid** (and 100% for seeds 1/3/777). The summed-junction-cost *global minimum is not the true order* - a real stream genuinely contains large `global_gain` steps at transients / section edges, so a "smoother than reality" reorder wins. **`global_gain` is a good local rank signal, not a good global objective.** first-valid + rank-ordered candidates stays the default; best-of stays behind the flag for trying a better objective (reservoir headroom, or a multi-feature score first *verified* to have the true order as its argmin - which needs a probe extension: "is `trueOrderScore < scoreOf(random valid orderings)` for objective X?").
 
 ---
 
 ## TODO / Future Improvements
+
+### Recommended implementation order (2026-09-07)
+
+Distilled from the item-7 findings. Rationale: `global_gain` ranking + first-valid
+already recovers the *exact* order on tractable files (`sample-3s` 76-100%,
+`ci_sanity` 100%); the open problem is (i) the ~25% of tractable-file cases where
+first-valid takes a wrong turn, and (ii) large-VBR files where no complete ordering
+is found at all. Cheapest, most-decisive levers first:
+
+1. **[done, negative] A1 - best-of search.** Implemented (`RP_BESTOF`), measured worse
+   than first-valid: summed-junction-cost is a misaligned objective (see item 7's
+   2026-09-07 update 2). Kept behind the flag.
+2. **[done] C1/C2/C3/C4 - consistency & verification** (deterministic seed,
+   reconstruction-vs-source report, `measurements.sh`, `regression.sh`). See below.
+3. **A3 - bitrate continuity in `canFollow` Case 1** (Medium-priority item below).
+   Prunes the *structural* graph, not just DFS order - directly attacks item 7's
+   branch-point count. Validate against true-order breaks first (item 6/7 method).
+4. **AC-3 constraint propagation before the DFS** (Alternative-approaches item below).
+   Orthogonal; shrinks the ~120-330 branch points that make large-VBR search explode.
+5. **A4 - CBR padding-bit cadence** (Medium-priority item) and **A5 - embedded
+   non-audio content** (High-priority item). Unblock the file classes that currently
+   cannot reconstruct at all (CBR aliasing; ID3v2/PRIV mid-stream).
+6. **A2 - fitted multi-feature junction score.** Logistic regression on
+   (Δglobal_gain, Δbig_values, Δpart2_3_length, Δbitrate, block_type match) against
+   true-order junctions - the `sideinfo_probe` harness already measures exactly this.
+   A better *local* signal (and, if verified, a usable global objective for A1).
+7. **Milestone 2 - partial spectral decode.** Strongest possible signal; only if
+   1-6 don't get large-VBR files there. See `PLAN_sideinfo_mainbits.md`.
+
+### Consistency & verification (done 2026-09-07)
+
+- [x] **C1 - deterministic shuffle seed.** `main.cpp`: default seed is fixed (1) so a
+  given input always reconstructs identically; `RP_SEED=<n>` pins another,
+  `RP_SEED=random` draws from the clock. Seed is printed.
+- [x] **C2 - reconstruction-vs-source report.** `origIndexOf[]` is shuffled in
+  lock-step with the chunks; after a reconstruction `rp` prints "X/N chunks in
+  original position" and "EXACT (byte-identical to the source stream)" when fully
+  correct. No more running `evaluate_order` by hand for a spot check.
+- [x] **C3 - `test/measurements.sh`.** Regenerates the quantitative claims in this
+  file (pre-shuffle / reservoir breaks, chunk & supernode counts, one-valid-successor
+  ratio, `global_gain` AUC + rank-1 rate) in one command, so a stale claim is caught.
+- [x] **C4 - `test/regression.sh` + `test/regression_baseline.tsv`.** Local accuracy
+  regression check (fails if breaks increase or exact-position % drops >3 points).
+  Not in CI - needs the fixtures.
 
 ### High priority — fixes to the current algorithm
 
@@ -267,6 +313,22 @@ cmake -B cmake-build-debug && cmake --build cmake-build-debug
 
 `input.mp3` defaults to the `FILENAME` macro in `main.cpp` if omitted (2026-07-18: this CLI override was previously undocumented-but-broken - `main()` ignored `argv` entirely despite this doc already showing the `[input.mp3]` usage; fixed alongside Milestone 1 so the two now actually agree).
 
-Output is written to `output.mp3` in the current directory. Chunk 0 of the input file is always treated as pinned (first in the output).
+Output is written to `output.mp3` in the current directory. Chunk 0 of the input file is always treated as pinned (first in the output). `rp` also prints, after a successful reconstruction, how many chunks landed in their original position and whether the output is byte-identical to the source (C2).
 
-An `RP_SEED` environment variable overrides the shuffle's RNG seed (normally drawn from the system clock) - added for the pinned-seed A/B methodology used throughout this doc (e.g. item 3's 2026-07-18 update); not needed for normal use.
+**Environment variables** (all optional; defaults give deterministic, first-valid behaviour):
+
+| var | default | effect |
+|---|---|---|
+| `RP_SEED` | `1` (fixed) | shuffle RNG seed. `RP_SEED=random` draws from the clock. Before 2026-09-07 the default *was* the clock; it is now fixed so runs are reproducible (C1). |
+| `RP_RANK` | on | `RP_RANK=0` disables the `global_gain` continuity ranking of DFS candidates. |
+| `RP_BESTOF` | off | `RP_BESTOF=1` keeps searching past the first complete ordering for the min summed-junction-cost one. Measured *worse* - see Known Limitations item 7. |
+| `RP_BEAM` | unset | `RP_BEAM=K` caps each DFS node to its K best-ranked reservoir-valid candidates (single fixed-width attempt). |
+| `RP_BROADEN` | auto (>120 supernodes) | `=1`/`=0` force/disable iterative broadening over K ∈ {1,2,3,4,6,9,unlimited}. |
+| `RP_TIME_BUDGET` | 45s broaden / 30s best-of / none otherwise | wall-clock stop for the whole search (seconds). |
+| `RP_MAX_NODES` | 0 (unlimited) | hard cap on supernode placements tried. |
+| `RP_PROGRESS` | ~10M | print a `[nodes=… depth=… elapsed=…]` line every N placements. |
+
+**Verification scripts** (in `sound/`, run from there):
+- `test/ci_sanity.sh build` - end-to-end pipeline check on the committed synthetic fixture (also run by CI).
+- `test/measurements.sh build` - regenerate this doc's quantitative claims (C3).
+- `test/regression.sh [--update] build` - local accuracy regression vs `test/regression_baseline.tsv` (C4; needs the fixtures).
