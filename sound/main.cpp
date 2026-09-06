@@ -5,6 +5,7 @@
 #include <string>
 #include <cstdint>
 #include <iostream>
+#include <iomanip>
 #include <vector>
 #include <fstream>
 #include <cstdlib>
@@ -250,7 +251,19 @@ static int continuityCost(const vector<BoundaryGain>& bg, const int a, const int
     return std::abs(bg[a].last - bg[b].first);
 }
 
-static uint64_t counter = 0;
+// DFS instrumentation / bounding. `counter` = number of supernode placements tried.
+// RP_MAX_NODES caps it (0 = unlimited) so a bounded A/B run stops cleanly instead of being
+// SIGTERM'd (which loses buffered stdout); RP_PROGRESS overrides how often a progress line
+// is printed. g_aborted unwinds the whole recursion once the cap is hit.
+static uint64_t counter        = 0;
+static uint64_t g_maxNodes     = 0;
+static uint64_t g_progressEvery = COUNTER_FREQUENCY;
+static bool     g_aborted      = false;
+static chrono::steady_clock::time_point g_dfsStart;
+
+static double dfsElapsedSec() {
+    return chrono::duration<double>(chrono::steady_clock::now() - g_dfsStart).count();
+}
 
 /**
  * Exhaustive DFS over the supernode graph, starting from the supernode containing chunk 0.
@@ -279,6 +292,8 @@ bool dfs(DfsState& state,
          const int maxReservoir,
          const bool isLayerIII,
          vector<int>& result) {
+
+    if (g_aborted) return false;
 
     if (state.order.size() == supernodes.size()) {
         // Reservoir validity has already been established incrementally for every
@@ -324,16 +339,19 @@ bool dfs(DfsState& state,
         state.used[si] = true;
         state.order.push_back(si);
 
-         if (++counter % COUNTER_FREQUENCY == 0) {
-             cout << "Depth: " << state.order.size()
-                  << "/" << supernodes.size() << "\n";
-         }
+        if (++counter % g_progressEvery == 0) {
+            cout << "  [nodes=" << counter << " depth=" << state.order.size()
+                 << "/" << supernodes.size() << " elapsed="
+                 << fixed << setprecision(1) << dfsElapsedSec() << "s]\n" << flush;
+        }
+        if (g_maxNodes && counter >= g_maxNodes) g_aborted = true;
 
-        if (dfs(state, supernodes, superAdj, metas, boundaryGain, rankByContinuity, sideInfo, maxReservoir, isLayerIII, result)) return true;
+        if (!g_aborted && dfs(state, supernodes, superAdj, metas, boundaryGain, rankByContinuity, sideInfo, maxReservoir, isLayerIII, result)) return true;
 
         state.order.pop_back();
         state.used[si] = false;
         state.reservoirLevel = savedLevel;
+        if (g_aborted) return false;
     }
     return false;
 }
@@ -534,9 +552,21 @@ int main(int argc, char* argv[]) {
 
     vector<int> result;
     cout << "Starting DFS over " << supernodes.size() << " supernodes...\n";
-
     cout << "Candidate continuity ranking: " << (rankByContinuity ? "ON" : "OFF") << "\n";
-    if (dfs(state, supernodes, superAdj, metas, boundaryGain, rankByContinuity, sideInfo, maxReservoir, isLayerIII, result)) {
+
+    if (const char* s = std::getenv("RP_MAX_NODES")) g_maxNodes = std::strtoull(s, nullptr, 10);
+    if (const char* s = std::getenv("RP_PROGRESS")) {
+        const uint64_t v = std::strtoull(s, nullptr, 10);
+        if (v) g_progressEvery = v;
+    }
+    g_dfsStart = chrono::steady_clock::now();
+
+    const bool found = dfs(state, supernodes, superAdj, metas, boundaryGain, rankByContinuity, sideInfo, maxReservoir, isLayerIII, result);
+    cout << "DFS explored " << counter << " nodes in "
+         << fixed << setprecision(2) << dfsElapsedSec() << "s"
+         << (g_aborted ? " (stopped at RP_MAX_NODES cap)" : "") << "\n";
+
+    if (found) {
         cout << "Reconstruction found\n";
         ofstream out("output.mp3", ios::binary | ios::trunc);
         if (!out) { cerr << "Cannot open output.mp3\n"; return 1; }
@@ -550,6 +580,8 @@ int main(int argc, char* argv[]) {
             }
 
         cout << "Written " << total << " bytes to output.mp3\n";
+    } else if (g_aborted) {
+        cout << "No reconstruction within the " << g_maxNodes << "-node budget.\n";
     } else {
         cout << "Failed to reconstruct.\n";
     }
