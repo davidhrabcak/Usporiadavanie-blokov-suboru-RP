@@ -260,6 +260,15 @@ static uint64_t g_maxNodes     = 0;
 static uint64_t g_progressEvery = COUNTER_FREQUENCY;
 static bool     g_aborted      = false;
 static chrono::steady_clock::time_point g_dfsStart;
+static chrono::steady_clock::time_point g_deadline;   // wall-clock stop for the whole search
+static bool     g_haveDeadline = false;
+
+// RP_BEAM: at each DFS node, recurse into at most this many reservoir-valid candidates,
+// taken in continuity-rank order (0 = unlimited = exhaustive). A small beam turns the DFS
+// into near-greedy descent - it reaches full depth fast when the global_gain heuristic is
+// right, but can dead-end with no complete ordering when the heuristic is wrong at some node,
+// so it is normally driven by the iterative-broadening loop in main().
+static int g_beamK = 0;
 
 static double dfsElapsedSec() {
     return chrono::duration<double>(chrono::steady_clock::now() - g_dfsStart).count();
@@ -316,6 +325,7 @@ bool dfs(DfsState& state,
         });
     }
 
+    int recursed = 0; // reservoir-valid candidates descended into so far, for the RP_BEAM cap
     for (int si : candidates) {
         if (state.used[si]) continue;
 
@@ -345,6 +355,9 @@ bool dfs(DfsState& state,
                  << fixed << setprecision(1) << dfsElapsedSec() << "s]\n" << flush;
         }
         if (g_maxNodes && counter >= g_maxNodes) g_aborted = true;
+        // Wall-clock stop, sampled sparsely (steady_clock::now is a syscall).
+        if (g_haveDeadline && (counter & 0x3FFFF) == 0 && chrono::steady_clock::now() >= g_deadline)
+            g_aborted = true;
 
         if (!g_aborted && dfs(state, supernodes, superAdj, metas, boundaryGain, rankByContinuity, sideInfo, maxReservoir, isLayerIII, result)) return true;
 
@@ -352,6 +365,7 @@ bool dfs(DfsState& state,
         state.used[si] = false;
         state.reservoirLevel = savedLevel;
         if (g_aborted) return false;
+        if (g_beamK && ++recursed >= g_beamK) break;
     }
     return false;
 }
@@ -530,18 +544,17 @@ int main(int argc, char* argv[]) {
     const int  sideInfo     = sideInfoSize(profile.versionID, profile.isMono());
     const int  maxReservoir = (profile.versionID == 0b11) ? 511 : 255;
 
-    DfsState state;
-    state.used.resize(supernodes.size(), false);
-    state.order.push_back(startSuper);
-    state.used[startSuper] = true;
-    state.reservoirLevel = 0;
-
-    // Prime the reservoir with chunk 0's own frames before the DFS explores any
-    // successor - chunk 0 is pinned, so it is always the first thing placed.
+    // Primed starting state: chunk 0's supernode placed, reservoir advanced through its
+    // own frames. Copied (cheap) per beam-schedule attempt below.
+    DfsState primed;
+    primed.used.assign(supernodes.size(), false);
+    primed.order.push_back(startSuper);
+    primed.used[startSuper] = true;
+    primed.reservoirLevel = 0;
     if (isLayerIII) {
         const ChunkMeta* prev = nullptr; // chunk 0 is always first placed - no predecessor
         for (int ci : supernodes[startSuper].chunks) {
-            if (!advanceReservoirChunk(state.reservoirLevel, prev, metas[ci], chunks[ci], sideInfo, maxReservoir)) {
+            if (!advanceReservoirChunk(primed.reservoirLevel, prev, metas[ci], chunks[ci], sideInfo, maxReservoir)) {
                 cerr << "Reservoir check failed on the pinned starting chunk - "
                         "mainDataBegin metadata is likely wrong for chunk 0\n";
                 return 1;
@@ -550,21 +563,66 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    vector<int> result;
-    cout << "Starting DFS over " << supernodes.size() << " supernodes...\n";
-    cout << "Candidate continuity ranking: " << (rankByContinuity ? "ON" : "OFF") << "\n";
-
     if (const char* s = std::getenv("RP_MAX_NODES")) g_maxNodes = std::strtoull(s, nullptr, 10);
     if (const char* s = std::getenv("RP_PROGRESS")) {
         const uint64_t v = std::strtoull(s, nullptr, 10);
         if (v) g_progressEvery = v;
     }
-    g_dfsStart = chrono::steady_clock::now();
 
-    const bool found = dfs(state, supernodes, superAdj, metas, boundaryGain, rankByContinuity, sideInfo, maxReservoir, isLayerIII, result);
-    cout << "DFS explored " << counter << " nodes in "
-         << fixed << setprecision(2) << dfsElapsedSec() << "s"
-         << (g_aborted ? " (stopped at RP_MAX_NODES cap)" : "") << "\n";
+    // Beam schedule. RP_BEAM=K forces a single fixed-width attempt. Otherwise, for graphs
+    // small enough that an exhaustive DFS is known to terminate we just run it unlimited;
+    // for larger ones we iteratively broaden (near-greedy first, widening on dead-end) so a
+    // heuristic-guided answer comes back even when the exhaustive search never would.
+    // RP_BROADEN=0 / =1 overrides the size heuristic.
+    vector<int> beamSchedule;
+    if (const char* s = std::getenv("RP_BEAM")) {
+        beamSchedule = { std::max(0, atoi(s)) };
+    } else {
+        bool broaden = supernodes.size() > 120;
+        if (const char* b = std::getenv("RP_BROADEN")) broaden = (b[0] != '0');
+        beamSchedule = broaden ? vector<int>{1, 2, 3, 4, 6, 9, 0} : vector<int>{0};
+        // Broadening's wider attempts are (near-)exhaustive DFS, which does not terminate on
+        // large VBR graphs. Bound the whole search by wall clock so it reports a best effort.
+        // RP_TIME_BUDGET (seconds) or RP_MAX_NODES override.
+        if (broaden && g_maxNodes == 0) {
+            double budget = 45.0;
+            if (const char* t = std::getenv("RP_TIME_BUDGET")) budget = atof(t);
+            g_deadline = chrono::steady_clock::now() +
+                         chrono::duration_cast<chrono::steady_clock::duration>(chrono::duration<double>(budget));
+            g_haveDeadline = true;
+        }
+    }
+    if (const char* t = std::getenv("RP_TIME_BUDGET")) { // also honoured outside broaden mode
+        g_deadline = chrono::steady_clock::now() +
+                     chrono::duration_cast<chrono::steady_clock::duration>(chrono::duration<double>(atof(t)));
+        g_haveDeadline = true;
+    }
+
+    cout << "Starting search over " << supernodes.size() << " supernodes"
+         << " (continuity ranking " << (rankByContinuity ? "ON" : "OFF") << ")\n";
+
+    vector<int> result;
+    bool found = false;
+    for (size_t attempt = 0; attempt < beamSchedule.size() && !found; ++attempt) {
+        if (g_haveDeadline && chrono::steady_clock::now() >= g_deadline) {
+            cout << "  (time budget spent - skipping remaining beam widths)\n";
+            break;
+        }
+        g_beamK   = beamSchedule[attempt];
+        counter   = 0;
+        g_aborted = false;
+        DfsState state = primed;
+        vector<int> res;
+        g_dfsStart = chrono::steady_clock::now();
+
+        cout << "  beam=" << (g_beamK ? std::to_string(g_beamK) : string("unlimited")) << " ... " << flush;
+        if (dfs(state, supernodes, superAdj, metas, boundaryGain, rankByContinuity, sideInfo, maxReservoir, isLayerIII, res)) {
+            result = res;
+            found = true;
+        }
+        cout << counter << " nodes, " << fixed << setprecision(2) << dfsElapsedSec() << "s"
+             << (found ? " -> FOUND" : (g_aborted ? " (stopped: budget)" : " (exhausted, no ordering)")) << "\n" << flush;
+    }
 
     if (found) {
         cout << "Reconstruction found\n";
@@ -580,10 +638,9 @@ int main(int argc, char* argv[]) {
             }
 
         cout << "Written " << total << " bytes to output.mp3\n";
-    } else if (g_aborted) {
-        cout << "No reconstruction within the " << g_maxNodes << "-node budget.\n";
     } else {
-        cout << "Failed to reconstruct.\n";
+        cout << "Failed to reconstruct (no complete ordering found"
+             << (g_aborted ? " within the search budget" : "") << ").\n";
     }
 
     return 0;

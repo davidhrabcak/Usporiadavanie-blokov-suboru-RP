@@ -172,12 +172,26 @@ mean rank.
       after the metadata table, or progress to stderr, would help future A/Bs.)
 - [x] 6. `CLAUDE.md` updated - item 7 gets a dated 2026-09-03 entry; the
       hard-fixture paragraph reflects step 5's result.
-- [ ] 7. **Decision still open**: does M1.5 make Milestone 2's full spectral
-      decode unnecessary (skip steps 3-7), or is it a complement? Current
-      lean: M1.5 is enough for small/medium files; the full decode is only
-      worth it if the goal explicitly includes the multi-thousand-chunk VBR
-      case, and even then beam/A* may be the better next step. Needs a call
-      before sinking days into steps 3-7.
+- [x] 7. Beam-limited search + iterative broadening added (`main.cpp`:
+      `g_beamK`, `RP_BEAM`, auto-broaden for >120 supernodes over
+      K ∈ {1..9,unlimited} under a wall-clock budget `RP_TIME_BUDGET`,
+      default 45s; plus DFS instrumentation `RP_MAX_NODES`/`RP_PROGRESS` and
+      a nodes/elapsed summary). **Does not crack the hard fixtures.** beam=1
+      dead-ends in 17-124 placements; wider beams all plateau at a
+      seed-dependent depth (~100-130/202 on `test7_shorter`, ~260-330/512 on
+      `test7_short`) - genuine exponential blowup, not a structural wall
+      (the true order passes `canFollow` + reservoir end to end). Value
+      delivered: `rp` now always terminates on large inputs with a bounded
+      best-effort search instead of hanging; small/medium graphs unchanged.
+      See `CLAUDE.md` item 7's 2026-09-07 update.
+- [ ] 8. **Decision still open**: near-exhaustive DFS is capped for large VBR
+      regardless of ordering/beam width. Remaining directions: (a) Milestone
+      2 spectral decode for a stronger junction signal; (b) true beam/A* over
+      *partial* orderings that emits the best partial path (current
+      beam-limited DFS still needs a *complete* ordering or outputs nothing);
+      (c) cheaper first: AC-3 / stronger forced-chain collapse to shrink the
+      branch-point count before searching. M1.5 (`global_gain` ranking)
+      stands on its own as the win for small/medium files.
 
 **Gate for Milestone 2 steps 3-7 below**: only build the full Huffman +
 requantize + spectral-continuity path if M1.5's `global_gain` heuristic proves
