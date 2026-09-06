@@ -17,3 +17,10 @@ __pycache__
 /sound/cmake-build-debug/
 /sound/build/
 /sound/output.mp3
+
+# Never commit private keys / credentials.
+*_ssh
+*_ssh.pub
+id_ed25519*
+id_rsa*
+*.pem
