@@ -176,6 +176,8 @@ Wired into `dfs()` (`main.cpp`): a per-chunk `BoundaryGain` (leading/trailing gr
 
 **Decision this leaves open** (PLAN M1.5 step 7): near-exhaustive DFS over the current supernode graph is capped for large VBR *regardless of candidate ordering or beam width*. The two remaining directions, both non-trivial: (a) Milestone 2's partial spectral decode for a much stronger junction signal; (b) redesign the search as true beam/A* over *partial* orderings that emits the best partial path as `output.mp3` (the current beam-limited DFS still requires a *complete* 202/512/658-supernode ordering or it outputs nothing). A cheaper orthogonal experiment first: constraint propagation (AC-3) / stronger forced-chain collapse to shrink the ~120-330 branch points before any search. See the recommended order at the top of the TODO section.
 
+**2026-09-09 update - A3 (bitrate) and A4 (arc-consistency) landed; neither cracks this, but A4 is the first structural win.** A3: VBR junction bitrate continuity is measured noise (AUC 0.55) and is not wired; the CBR-only bitrate header filter removes ~0.3% of edges. A4 (`propagateArcConsistency`): shrinks `test7_shorter` 202→164 supernodes (−19%), `test7_short` 512→446 (−13%), safely gated on the pre-shuffle diagnostic. `test7_shorter` still finds no complete ordering (164 supernodes is still exponential), but the reduction composes with any future per-edge signal. See the TODO items for both.
+
 **2026-09-07 update 2 - "best-of" search (keep exploring, minimise summed junction cost) tried; it is *worse*, and the reason is informative.** `main.cpp` `RP_BESTOF=1`: don't stop at the first complete ordering, keep the lowest-scoring one where score = summed `junctionCost` (= `|Δ global_gain|`, unknown junctions cost a flat 384) over every supernode boundary, with branch-and-bound on the partial score. Result on `sample-3s` (5 seeds): best-of converges to one score-194 ordering with **only 25% of chunks in place**, vs **76-100% for first-valid** (and 100% for seeds 1/3/777). The summed-junction-cost *global minimum is not the true order* - a real stream genuinely contains large `global_gain` steps at transients / section edges, so a "smoother than reality" reorder wins. **`global_gain` is a good local rank signal, not a good global objective.** first-valid + rank-ordered candidates stays the default; best-of stays behind the flag for trying a better objective (reservoir headroom, or a multi-feature score first *verified* to have the true order as its argmin - which needs a probe extension: "is `trueOrderScore < scoreOf(random valid orderings)` for objective X?").
 
 ---
@@ -199,16 +201,18 @@ is found at all. Cheapest, most-decisive levers first:
    bitrate continuity measured too weak to wire (AUC 0.55). CBR bitrate filter
    implemented but removes only 0.3% of edges - not a lever for item 1/7. See the
    Medium-priority item below.
-4. **AC-3 constraint propagation before the DFS** (Alternative-approaches item below).
-   Orthogonal; shrinks the ~120-330 branch points that make large-VBR search explode.
-   Now the most promising untried structural lever.
-5. **A4 - CBR padding-bit cadence** (Medium-priority item) and **A5 - embedded
-   non-audio content** (High-priority item). Unblock the file classes that currently
-   cannot reconstruct at all (CBR aliasing; ID3v2/PRIV mid-stream).
+4. **[done 2026-09-09] AC-3 constraint propagation before the DFS.** Implemented,
+   safely gated. Shrinks the graph 13-19% on the medium VBR fixtures but does not
+   crack them alone. See the Alternative-approaches item below.
+5. **A5 - embedded non-audio content** (High-priority item below) + **CBR
+   padding-bit cadence** (Medium-priority item). Unblock the file classes that
+   currently cannot reconstruct at all (ID3v2/PRIV mid-stream - also the thing
+   that blocks AC-3 on `test7`; CBR aliasing).
 6. **A2 - fitted multi-feature junction score.** Logistic regression on
-   (Δglobal_gain, Δbig_values, Δpart2_3_length, Δbitrate, block_type match) against
+   (Δglobal_gain, Δbig_values, Δpart2_3_length, block_type match) against
    true-order junctions - the `sideinfo_probe` harness already measures exactly this.
    A better *local* signal (and, if verified, a usable global objective for A1).
+   Δbitrate is measured noise (A3) - leave it out.
 7. **Milestone 2 - partial spectral decode.** Strongest possible signal; only if
    1-6 don't get large-VBR files there. See `PLAN_sideinfo_mainbits.md`.
 
@@ -304,8 +308,21 @@ is found at all. Cheapest, most-decisive levers first:
 - [ ] **Greedy best-first search instead of DFS.**
   Replace the exhaustive DFS with a beam search or A* over the supernode graph. Define a heuristic cost (e.g., mainDataBegin delta, spectral distance, bitrate continuity) and always expand the most-promising successor. Falls back to backtracking only on dead ends. Useful when the correct ordering can be ranked first by the heuristic, avoiding the exponential worst case of DFS.
 
-- [ ] **Constraint propagation (arc consistency) before DFS.**
-  After building the adjacency graph, apply AC-3 or similar: if chunk j is the only valid successor of chunk i, force that edge and remove all other successors of i and all other predecessors of j. Repeat until no more forced assignments can be made. This pre-collapse stage can dramatically reduce the search space before DFS begins, complementing the existing supernode approach.
+- [x] **Constraint propagation (arc consistency) before DFS (A4, 2026-09-09).**
+  `propagateArcConsistency()` in `adjacency.cpp`, run in `main()` between `buildAdjacency` and
+  `buildSupernodes`. Forces an edge whenever a chunk's in- or out-neighbourhood is already a
+  singleton (plus: nothing precedes chunk 0), deletes the competing edges, cascades to a
+  fixpoint; self-reverts on contradiction.
+  **Safety**: the inference is unsound when `canFollow` has a false negative (a real
+  predecessor missing from the graph makes the surviving one look "unique"). Gated on the
+  pre-shuffle diagnostic - runs only when it reported 0 breaks (`RP_AC3=1` forces, `RP_AC3=0`
+  disables). `test7` (2 known `canFollow` false negatives, item 5) correctly skips;
+  `sample-3s`/`ci_sanity` reconstruct byte-identically with it on and off.
+  **Effect**: first thing to actually shrink the large-VBR search space - `test7_shorter`
+  202→164 supernodes (−19%), `test7_short` 512→446 (−13%), `ci_sanity` 17→15. Not enough on
+  its own (`test7_shorter` still finds no complete ordering; tractable-file accuracy
+  unchanged - `sample-3s` seeds still 76.5%/100%), but it composes with a future stronger
+  per-edge signal.
 
 - [ ] **Graph-matching / Hungarian algorithm for dense CBR.**
   Model chunk ordering as a minimum-weight perfect matching on a bipartite graph: left nodes are "chunk as predecessor", right nodes are "chunk as successor". Edge weights encode junction dissimilarity (byte difference, spectral distance, reservoir delta). The Hungarian algorithm finds the globally optimal 1-to-1 matching in O(n³), which is tractable for n < 10,000. This completely sidesteps the exponential DFS.
@@ -336,6 +353,7 @@ Output is written to `output.mp3` in the current directory. Chunk 0 of the input
 | `RP_SEED` | `1` (fixed) | shuffle RNG seed. `RP_SEED=random` draws from the clock. Before 2026-09-07 the default *was* the clock; it is now fixed so runs are reproducible (C1). |
 | `RP_RANK` | on | `RP_RANK=0` disables the `global_gain` continuity ranking of DFS candidates. |
 | `RP_CBR` | on | `RP_CBR=0` disables the constant-bitrate frame-header filter (A3a) even when the stream is detected as CBR. |
+| `RP_AC3` | auto | arc-consistency prune (A4). Auto = on when the pre-shuffle check found 0 breaks. `RP_AC3=1` forces on, `=0` off. |
 | `RP_BESTOF` | off | `RP_BESTOF=1` keeps searching past the first complete ordering for the min summed-junction-cost one. Measured *worse* - see Known Limitations item 7. |
 | `RP_BEAM` | unset | `RP_BEAM=K` caps each DFS node to its K best-ranked reservoir-valid candidates (single fixed-width attempt). |
 | `RP_BROADEN` | auto (>120 supernodes) | `=1`/`=0` force/disable iterative broadening over K ∈ {1,2,3,4,6,9,unlimited}. |

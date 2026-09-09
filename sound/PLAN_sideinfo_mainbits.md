@@ -196,12 +196,18 @@ mean rank.
       seed, reconstruction-vs-source report in `rp` output, one-command regeneration
       of this doc's numbers, and a local accuracy-regression baseline. See `CLAUDE.md`
       "Consistency & verification".
-- [ ] 10. **Decision still open**, now with a recommended order (see the top of
-      `CLAUDE.md`'s TODO section): A3 bitrate-continuity graph pruning → AC-3
-      constraint propagation → A4/A5 (CBR padding, embedded non-audio) → A2 fitted
-      multi-feature score → Milestone 2 spectral decode only if those don't get
-      large-VBR files there. M1.5 (`global_gain` ranking + first-valid) stands on its
-      own as the win for small/medium files.
+- [x] 10. A3 (bitrate) done - negative: VBR junction bitrate continuity is noise
+      (AUC 0.55, not wired); CBR bitrate header filter implemented, 0.3% edge
+      reduction. See `CLAUDE.md` item 7's 2026-09-09 update.
+- [x] 11. A4 (arc-consistency prune) done - `propagateArcConsistency` in
+      `adjacency.cpp`, gated on the pre-shuffle diagnostic. First structural win:
+      `test7_shorter` 202→164 supernodes (−19%), `test7_short` 512→446. Still not
+      enough alone. See `CLAUDE.md` item 7's 2026-09-09 update + the AC-3 TODO item.
+- [ ] 12. **Decision still open.** Recommended order now (top of `CLAUDE.md` TODO):
+      A5 embedded non-audio (also unblocks AC-3 on `test7`) + CBR padding cadence →
+      A2 fitted multi-feature junction score → Milestone 2 spectral decode only if
+      those don't get large-VBR files there. M1.5 (`global_gain` ranking +
+      first-valid) + A4 stand as the wins for small/medium files.
 
 **Gate for Milestone 2 steps 3-7 below**: only build the full Huffman +
 requantize + spectral-continuity path if M1.5's `global_gain` heuristic proves
