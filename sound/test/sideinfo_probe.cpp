@@ -18,10 +18,12 @@
 //      predicts DFS branching reduction if `dfs()` sorts candidates by the score.
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <random>
@@ -187,6 +189,15 @@ int main(int argc, char** argv) {
         printf("frameStarts: %d total, modal bitrate %d kbps, %d (%.1f%%) at a different bitrate "
                "(a matches() bitrate filter would drop these)\n",
                total, modalKbps, nonModal, total ? 100.0 * nonModal / total : 0.0);
+
+        // item-5 signature: an orphaned tail (header bytes present but undecodable)
+        int orphanTails = 0, invalidChunks = 0;
+        for (int i = 0; i < n; ++i) {
+            if (!metas[i].valid) { ++invalidChunks; continue; }
+            if (metas[i].tailOverflow > 3 && metas[i].tailPartialLen == -1) ++orphanTails;
+        }
+        printf("chunks: %d invalid, %d with an orphaned tail (tailOverflow>3 && tailPartialLen==-1)\n",
+               invalidChunks, orphanTails);
     }
 
     const auto adj = buildAdjacency(metas);
@@ -196,6 +207,61 @@ int main(int argc, char** argv) {
         for (int i = 0; i < n; ++i) hist[min(outdeg[i], 7)]++;
         printf("out-degree histogram: {0:%d 1:%d 2:%d 3:%d 4:%d 5:%d 6:%d 7+:%d}\n",
                hist[0], hist[1], hist[2], hist[3], hist[4], hist[5], hist[6], hist[7]);
+    }
+
+    // ---- A5 investigation: dump every true-order break and look for non-audio magic ----
+    {
+        auto hexdump = [](const char* label, const uint8_t* p, int len) {
+            printf("  %-8s", label);
+            for (int k = 0; k < len; k++) printf(" %02x", p[k]);
+            printf("  |");
+            for (int k = 0; k < len; k++) putchar(isprint(p[k]) ? p[k] : '.');
+            printf("|\n");
+        };
+        auto scanMagic = [](const char* where, const vector<uint8_t>& c, int from, int to) {
+            for (int k = from; k + 4 <= to && k + 4 <= (int)c.size(); k++) {
+                if (!memcmp(&c[k], "ID3", 3))       printf("  ** %s: ID3v2 magic at offset %d (ver %d.%d, flags %02x)\n",
+                                                           where, k, c[k+3], k+4<(int)c.size()?c[k+4]:0, k+5<(int)c.size()?c[k+5]:0);
+                if (!memcmp(&c[k], "APETAGEX", 8))  printf("  ** %s: APE tag magic at offset %d\n", where, k);
+            }
+        };
+        int breaks = 0;
+        for (int i = 0; i + 1 < n; ++i) {
+            if (canFollow(metas[i], metas[i + 1])) continue;
+            ++breaks;
+            const ChunkMeta& A = metas[i];
+            const ChunkMeta& B = metas[i + 1];
+            printf("\nBREAK %d->%d  A.tailOverflow=%d A.tailPartialLen=%d  B.headOffset=%d  B.frameStarts=[",
+                   i, i + 1, A.tailOverflow, A.tailPartialLen, B.headOffset);
+            for (size_t k = 0; k < B.frameStarts.size() && k < 10; k++)
+                printf("%s%d", k ? "," : "", B.frameStarts[k]);
+            printf("%s]\n", B.frameStarts.size() > 10 ? ",..." : "");
+            const int rem = tailRemaining(A);
+            printf("  tailRemaining(A)=%d  -> canFollow needs a frame at offset %d in B\n", rem, rem);
+            const auto& ca = chunks[i];
+            const auto& cb = chunks[i + 1];
+            const int aFrom = max(0, (int)ca.size() - 24);
+            hexdump("A tail:", &ca[aFrom], (int)ca.size() - aFrom);
+            hexdump("B head:", cb.data(), min<int>(40, (int)cb.size()));
+            scanMagic("A", ca, aFrom, (int)ca.size());
+            scanMagic("B", cb, 0, 80);
+
+            // Every valid, profile-matching header near the A tail and the B head, with its
+            // decoded frame length - shows whether computeChunkMeta latched a spurious sync.
+            auto scanHeaders = [&](const char* where, const vector<uint8_t>& c, int from, int to) {
+                for (int k = from; k + 4 <= to && k + 4 <= (int)c.size(); k++) {
+                    const uint32_t raw = packHeaderBytes(&c[k]);
+                    if (!Mp3FrameScanner::isValidHeader(raw)) continue;
+                    bool ok; Header h(raw, ok);
+                    if (!ok || !profile.matches(h)) continue;
+                    printf("    %s header @%d: %d kbps, len %d%s\n", where, k, h.getBitrate(), h.getFrameLength(),
+                           (k + h.getFrameLength() > (int)c.size()) ? "  (spills past chunk end)" : "");
+                }
+            };
+            scanHeaders("A", ca, max(0, (int)ca.size() - 420), (int)ca.size());
+            scanHeaders("B", cb, 0, 120);
+        }
+        printf("\n%d true-order breaks total\n", breaks);
     }
 
     // ---- Measurement A -------------------------------------------------------------------
