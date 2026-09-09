@@ -195,11 +195,13 @@ is found at all. Cheapest, most-decisive levers first:
    2026-09-07 update 2). Kept behind the flag.
 2. **[done] C1/C2/C3/C4 - consistency & verification** (deterministic seed,
    reconstruction-vs-source report, `measurements.sh`, `regression.sh`). See below.
-3. **A3 - bitrate continuity in `canFollow` Case 1** (Medium-priority item below).
-   Prunes the *structural* graph, not just DFS order - directly attacks item 7's
-   branch-point count. Validate against true-order breaks first (item 6/7 method).
+3. **[done 2026-09-09] A3 - bitrate discriminator.** Mostly negative. VBR junction
+   bitrate continuity measured too weak to wire (AUC 0.55). CBR bitrate filter
+   implemented but removes only 0.3% of edges - not a lever for item 1/7. See the
+   Medium-priority item below.
 4. **AC-3 constraint propagation before the DFS** (Alternative-approaches item below).
    Orthogonal; shrinks the ~120-330 branch points that make large-VBR search explode.
+   Now the most promising untried structural lever.
 5. **A4 - CBR padding-bit cadence** (Medium-priority item) and **A5 - embedded
    non-audio content** (High-priority item). Unblock the file classes that currently
    cannot reconstruct at all (CBR aliasing; ID3v2/PRIV mid-stream).
@@ -264,9 +266,21 @@ is found at all. Cheapest, most-decisive levers first:
 
 ### Medium priority — algorithm improvements
 
-- [ ] **Bitrate as a discriminator in `frameStarts`.**
-  Extend `frameStarts` from `vector<int>` (positions) to `vector<pair<int,int>>` (position, bitrate). In VBR streams, consecutive chunks should have correlated bitrate sequences. In `canFollow` Case 1, additionally verify that the bitrate of the frame at `rem` in chunk b is consistent with the last frame of chunk a (e.g., within a plausible VBR range). Add `bitrate` to `StreamProfile` for CBR files to filter false-positive frame headers that happen to have a different bitrate index.
-  **Caution (2026-07-09)**: a related-but-different strengthening of Case 1 - requiring a decoded successor candidate to be followed by at least one more complete frame, as a proxy for "this is a real frame chain, not just a lone sync" - was tried against `test7_shorter.mp3` and made both correctness and branching *worse* (see Known Limitations item 7). A bitrate-continuity check is a distinct signal (doesn't require additional frames to fit in the chunk) and wasn't itself tested, but implement and measure against `test7_shorter.mp3`'s true-order breaks before trusting it, the same way item 6/7 were validated - don't assume it's safe by construction.
+- [x] **Bitrate as a discriminator (A3, 2026-09-09).** Measured with `sideinfo_probe`, then
+  the safe half implemented:
+  - **VBR bitrate *continuity* across a junction is too weak to use.** AUC of `|Δ bitrate|`
+    (true consecutive vs random pairs) is 0.55 on all three VBR fixtures; Measurement-B rank-1
+    45-54% (vs ~40-50% random baseline). Same tier as `big_values` / `part2_3_length` -
+    documented as noise. **Not wired into `canFollow`** - a hard reject on a 0.55 signal is
+    exactly the "plausible idea that makes things worse" trap. The `frameStarts`
+    `vector<int>` -> `vector<pair<int,int>>` extension is therefore *not* done.
+  - **CBR bitrate *filtering* implemented** (`StreamProfile::isCBR`/`bitrateKbps`, set by
+    `detectCBR()` when the first ~6 chunks show >=8 frames all at one bitrate and no Xing
+    tag; `matches()` then rejects other-bitrate syncs; `RP_CBR=0` disables). Zero-risk (0
+    true-order breaks on any fixture) but a tiny effect: on `CBR.mp3` it removes 66 of 21652
+    adjacency edges (0.3%), no change to forced-chain or supernode counts. **Not a lever for
+    item 1** - CBR aliasing is among *real* same-bitrate frames, which this can't touch.
+    `sample-3s` is correctly left as VBR (it has a Xing tag / non-constant first frames).
 
 - [ ] **Supernode-level reservoir pre-check.**
   Before admitting a supernode `s` as a candidate successor of the current DFS path, check whether the mainDataBegin of `s`'s first chunk's first frame is satisfiable given the maximum possible accumulated reservoir from the current path. Use the maximum reservoir (511 / 255 bytes) as a ceiling: if `mainDataBegin > min(maxReservoir, accumulated_so_far + max_production_of_s)`, prune without recursing.
@@ -321,6 +335,7 @@ Output is written to `output.mp3` in the current directory. Chunk 0 of the input
 |---|---|---|
 | `RP_SEED` | `1` (fixed) | shuffle RNG seed. `RP_SEED=random` draws from the clock. Before 2026-09-07 the default *was* the clock; it is now fixed so runs are reproducible (C1). |
 | `RP_RANK` | on | `RP_RANK=0` disables the `global_gain` continuity ranking of DFS candidates. |
+| `RP_CBR` | on | `RP_CBR=0` disables the constant-bitrate frame-header filter (A3a) even when the stream is detected as CBR. |
 | `RP_BESTOF` | off | `RP_BESTOF=1` keeps searching past the first complete ordering for the min summed-junction-cost one. Measured *worse* - see Known Limitations item 7. |
 | `RP_BEAM` | unset | `RP_BEAM=K` caps each DFS node to its K best-ranked reservoir-valid candidates (single fixed-width attempt). |
 | `RP_BROADEN` | auto (>120 supernodes) | `=1`/`=0` force/disable iterative broadening over K ∈ {1,2,3,4,6,9,unlimited}. |
