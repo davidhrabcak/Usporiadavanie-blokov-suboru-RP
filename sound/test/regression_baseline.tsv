@@ -1,6 +1,6 @@
 sample-3s	0	0	51	100.0
 CBR	0	0	658	FAILED
-test7_shorter	0	0	202	FAILED
-test7_short	0	0	512	FAILED
+test7_shorter	0	0	164	FAILED
+test7_short	0	0	446	FAILED
 test7	2	75	3351	FAILED
-ci_sanity	0	0	17	100.0
+ci_sanity	0	0	15	100.0

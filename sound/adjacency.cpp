@@ -1,4 +1,5 @@
 #include "adjacency.hpp"
+#include <algorithm>
 #include <unordered_map>
 
 #include "frame_scanner.hpp"
@@ -145,6 +146,58 @@ vector<vector<int>> buildAdjacency(const vector<ChunkMeta>& metas) {
     }
 
     return adj;
+}
+
+long propagateArcConsistency(vector<vector<int>>& adj, const int n, const int start) {
+    const vector<vector<int>> original = adj; // for rollback on contradiction
+
+    vector<vector<int>> pred(n);
+    for (int u = 0; u < n; ++u)
+        for (int v : adj[u]) pred[v].push_back(u);
+
+    long removed = 0;
+    bool contradiction = false;
+
+    auto removeEdge = [&](const int u, const int v) {
+        auto& au = adj[u];
+        const auto ai = find(au.begin(), au.end(), v);
+        if (ai == au.end()) return;
+        au.erase(ai);
+        auto& pv = pred[v];
+        pv.erase(find(pv.begin(), pv.end(), u));
+        ++removed;
+    };
+
+    // Nothing precedes the pinned first chunk.
+    for (const int u : vector<int>(pred[start])) removeEdge(u, start);
+
+    bool changed = true;
+    while (changed && !contradiction) {
+        changed = false;
+
+        for (int v = 0; v < n; ++v) {
+            if (v == start || pred[v].size() != 1) continue;
+            const int u = pred[v][0];                 // u -> v is forced
+            for (const int w : vector<int>(adj[u]))
+                if (w != v) { removeEdge(u, w); changed = true; }
+        }
+        for (int u = 0; u < n; ++u) {
+            if (adj[u].size() != 1) continue;
+            const int v = adj[u][0];                  // u -> v is forced
+            for (const int t : vector<int>(pred[v]))
+                if (t != u) { removeEdge(t, v); changed = true; }
+        }
+
+        int noSucc = 0;
+        for (int x = 0; x < n; ++x) {
+            if (adj[x].empty()) ++noSucc;
+            if (x != start && pred[x].empty()) contradiction = true;
+        }
+        if (noSucc > 1 || adj[start].empty()) contradiction = true;
+    }
+
+    if (contradiction) { adj = original; return -1; }
+    return removed;
 }
 
 /**

@@ -455,6 +455,7 @@ int main(int argc, char* argv[]) {
              << " kbps - frame-header bitrate filter enabled\n";
 
     // --- Pre-shuffle sanity check ---
+    int preShuffleBreaks = -1; // -1 = not computed; >=0 = broken consecutive-pair count on true order
     {
         StreamProfile prof0{};
         if (deriveProfile(chunks[0], prof0)) {
@@ -475,6 +476,7 @@ int main(int argc, char* argv[]) {
                     ++broken;
                 }
             }
+            preShuffleBreaks = broken;
             if (broken == 0)
                 cout << "Pre-shuffle check PASSED: all " << chunks.size()
                      << " consecutive pairs compatible\n";
@@ -591,6 +593,31 @@ int main(int argc, char* argv[]) {
 
     // Build adjacency graph
     auto adj    = buildAdjacency(metas);
+
+    // Arc-consistency prune (A4) - shrinks the branch-point count before the search. It is
+    // only sound when `canFollow` has no false negatives among the true consecutive pairs
+    // (otherwise it can force a wrong edge where a real predecessor is missing from the
+    // graph). Gate on the pre-shuffle diagnostic: skip when it found breaks. RP_AC3=0 forces
+    // off, RP_AC3=1 forces on regardless of the gate.
+    {
+        const char* e = std::getenv("RP_AC3");
+        const bool force = e && e[0] == '1';
+        const bool off   = e && e[0] == '0';
+        const bool safe  = preShuffleBreaks == 0;
+        if (off) {
+            // disabled
+        } else if (!safe && !force) {
+            cout << "Arc consistency: skipped (" << (preShuffleBreaks < 0 ? "no pre-shuffle diagnostic"
+                 : "pre-shuffle found breaks - canFollow is lossy on this file") << "; RP_AC3=1 to force)\n";
+        } else {
+            const long acRemoved = propagateArcConsistency(adj, static_cast<int>(chunks.size()), 0);
+            if (acRemoved < 0)
+                cout << "Arc consistency: contradiction (canFollow is missing a real edge) - graph left as built\n";
+            else
+                cout << "Arc consistency: removed " << acRemoved << " edges\n";
+        }
+    }
+
     auto indeg  = computeInDegree(adj, static_cast<int>(chunks.size()));
     auto outdeg = computeOutDegree(adj, static_cast<int>(chunks.size()));
 
