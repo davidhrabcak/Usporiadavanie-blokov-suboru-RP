@@ -134,9 +134,15 @@ Validated against all 5 fixtures' true unshuffled order: `sample-3s.mp3`, `test7
 
 ### 5. Non-audio embedded content causes unresolvable breaks
 
-**Symptom**: some chunks in `CBR.mp3` have `tailOverflow > 3` and `tailPartialLen = −1` (orphaned tail bytes). `canFollow` correctly returns false for these, but they represent genuine consecutive pairs in the original file.
+**2026-09-09 - does not reproduce on any fixture; the remaining test7.mp3 breaks are a different bug.** `sideinfo_probe` now counts the item-5 signature (`tailOverflow > 3 && tailPartialLen == -1`) and dumps every true-order break with a hex/`ID3`/`APE` scan. Across all 5 fixtures: **0 orphaned tails, 0 invalid chunks, no `ID3`/`APE` magic mid-stream anywhere.** The `CBR.mp3` orphaned-tail claim below is stale (same pattern as the "~0.17s" saga - treat un-dated claims here with suspicion).
 
-**Likely cause**: non-audio blocks (e.g., embedded ID3v2 chapter tags or PRIV frames) inserted mid-stream. The frame parser stops at the non-audio content, leaves the remaining bytes as "orphaned", and the tail metadata becomes useless. These chunks cannot be correctly connected without parsing the non-audio content.
+`test7.mp3`'s 2 pre-shuffle breaks (107→108, 641→642) are **not** embedded non-audio. Both are `computeChunkMeta` latching a **false-sync spilling header**:
+- 107→108: it picks a 112 kbps / len-365 "tail" at chunk offset 1013, which sits *inside* the real complete frame `[605, 1022)`. The real alignment is: frame @605, then a 2-byte Case-2 split header at 1022 (`ff fb` + `80 64` from chunk 108 → 112 kbps / 365 → successor frame at reconstructed offset 363, which chunk 108 **does** have). But `tailQuality` ranks the spurious `tailPartialLen>0` tail (quality 2) above the real Case-2 tail (quality 1).
+- 641→642: it picks a spurious 256 kbps / len-835 frame at offset 677 over the real 112 kbps / len-365 at offset 722 (both spill, both quality 2, so the earlier offset wins the tie).
+
+**Tried and reverted**: making "has ≥1 complete frame" the top scoring key (above `tailQuality`) fixes these 2 but creates **6** different breaks elsewhere in `test7.mp3` - a genuine large-frame-spanning chunk (item 6 shape) then loses to a spurious `count≥1` candidate. Net worse. A safe fix needs a cross-candidate check: *reject candidate offset X when X lies strictly inside `[Y, Y+len(Y))` for another candidate Y whose frame is complete in this chunk.* Not attempted (its own aliasing risk: a wrong early alignment can produce a "complete frame" that spuriously covers a real later start).
+
+**Original (stale) symptom**: some chunks in `CBR.mp3` have `tailOverflow > 3` and `tailPartialLen = −1` (orphaned tail bytes); `canFollow` correctly returns false for these, but they represent genuine consecutive pairs. **Likely cause was hypothesised as** non-audio blocks (embedded ID3v2 chapter tags / PRIV frames) mid-stream - unconfirmed and now not reproducible.
 
 ### 6. VBR files - `computeChunkMeta` wrongly invalidates chunks whose only frame doesn't fully fit
 
@@ -204,15 +210,18 @@ is found at all. Cheapest, most-decisive levers first:
 4. **[done 2026-09-09] AC-3 constraint propagation before the DFS.** Implemented,
    safely gated. Shrinks the graph 13-19% on the medium VBR fixtures but does not
    crack them alone. See the Alternative-approaches item below.
-5. **A5 - embedded non-audio content** (High-priority item below) + **CBR
-   padding-bit cadence** (Medium-priority item). Unblock the file classes that
-   currently cannot reconstruct at all (ID3v2/PRIV mid-stream - also the thing
-   that blocks AC-3 on `test7`; CBR aliasing).
+5. **[investigated 2026-09-09] A5 - embedded non-audio.** No repro on any fixture
+   (0 orphaned tails everywhere). `test7`'s 2 breaks are a `computeChunkMeta`
+   false-sync-tail bug instead (item 5, updated). Deprioritised - no test case.
+   The real remaining `computeChunkMeta` fix is the cross-candidate "offset X is
+   interior to complete frame Y" check (item 5), but it carries its own aliasing
+   risk and isn't attempted. **CBR padding-bit cadence** (Medium-priority item)
+   is still open and untried.
 6. **A2 - fitted multi-feature junction score.** Logistic regression on
    (Δglobal_gain, Δbig_values, Δpart2_3_length, block_type match) against
    true-order junctions - the `sideinfo_probe` harness already measures exactly this.
    A better *local* signal (and, if verified, a usable global objective for A1).
-   Δbitrate is measured noise (A3) - leave it out.
+   Δbitrate is measured noise (A3) - leave it out. **Now the top open item.**
 7. **Milestone 2 - partial spectral decode.** Strongest possible signal; only if
    1-6 don't get large-VBR files there. See `PLAN_sideinfo_mainbits.md`.
 
@@ -247,7 +256,14 @@ is found at all. Cheapest, most-decisive levers first:
   Implemented in `adjacency.cpp` (`byChunkHeadPrefix` index + `packPrefix()`). Valid chunks are grouped by the exact `chunkHead` prefix bytes Case 2 needs (one map per `tov` value 1-3); each distinct prefix bucket reconstructs and validates its candidate header once instead of once per chunk in the file.
 
 - [ ] **Handle embedded non-audio content (ID3v2 mid-stream, PRIV frames).**
-  Not attempted this pass. Before computing `ChunkMeta`, scan each chunk for embedded ID3v2 tags (`ID3` magic at any offset). If found, skip the tag body and resume frame parsing from after it. Record the tag size so `tailRemaining` can account for the non-audio bytes when computing expected successor `headOffset`.
+  **2026-09-09: no repro.** `sideinfo_probe` finds 0 chunks with the orphaned-tail signature
+  and no `ID3`/`APE` magic mid-stream on any of the 5 fixtures (see Known Limitations item 5).
+  Deprioritised - nothing to build against. If a fixture with a mid-stream ID3v2 tag turns up:
+  before computing `ChunkMeta`, scan each chunk for `ID3` magic, skip `10 + syncsafe(size)`
+  bytes, resume frame parsing, and record the skip so `tailRemaining` accounts for it. The
+  *reproducible* `computeChunkMeta` bug (`test7.mp3`'s 2 breaks) is the false-sync-tail
+  selection described in item 5 - needs the cross-candidate "offset interior to a complete
+  frame" check, not non-audio handling.
 
 - [x] **Correctly detect and skip Xing/Info/VBRI headers in `computeChunkMeta`.**
   Implemented in `chunk_meta.cpp` (`isXingFrame` moved above `tryParse` and called from inside its loop). A Xing/Info/VBRI frame still counts towards `i`'s advance and is still kept in `out`/`frames` (its bytes are real and need to end up in the reconstructed output, and dropping it from the reservoir accounting would be its own inaccuracy), but it no longer inflates `count`, so it can no longer bias which offset `computeChunkMeta` picks as `headOffset`.

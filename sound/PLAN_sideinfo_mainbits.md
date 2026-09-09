@@ -203,11 +203,17 @@ mean rank.
       `adjacency.cpp`, gated on the pre-shuffle diagnostic. First structural win:
       `test7_shorter` 202→164 supernodes (−19%), `test7_short` 512→446. Still not
       enough alone. See `CLAUDE.md` item 7's 2026-09-09 update + the AC-3 TODO item.
-- [ ] 12. **Decision still open.** Recommended order now (top of `CLAUDE.md` TODO):
-      A5 embedded non-audio (also unblocks AC-3 on `test7`) + CBR padding cadence →
-      A2 fitted multi-feature junction score → Milestone 2 spectral decode only if
-      those don't get large-VBR files there. M1.5 (`global_gain` ranking +
-      first-valid) + A4 stand as the wins for small/medium files.
+- [x] 12. A5 (embedded non-audio) investigated - **no repro**: 0 orphaned tails / no
+      `ID3`/`APE` magic on any of the 5 fixtures (`sideinfo_probe`). `test7`'s 2 breaks
+      are a `computeChunkMeta` false-sync-tail selection bug instead (`CLAUDE.md` item 5,
+      updated); the obvious `(hasCompleteFrame, ...)` scoring reorder trades those 2 for
+      6 elsewhere, reverted.
+- [ ] 13. **Decision still open.** Recommended order now (top of `CLAUDE.md` TODO):
+      A2 fitted multi-feature junction score → Milestone 2 spectral decode only if that
+      doesn't get large-VBR files there. Also open but lower-value: CBR padding cadence,
+      and the cross-candidate "offset interior to a complete frame" check for item 5.
+      M1.5 (`global_gain` ranking + first-valid) + A4 stand as the wins for small/medium
+      files.
 
 **Gate for Milestone 2 steps 3-7 below**: only build the full Huffman +
 requantize + spectral-continuity path if M1.5's `global_gain` heuristic proves
