@@ -234,26 +234,33 @@ struct DfsState {
     long long score  = 0;     // summed junctionCost over the junctions between placed supernodes
 };
 
-// Per-chunk Layer III granule loudness at each end, for the continuity ranking heuristic.
-// .first  = global_gain of granule 0 of the chunk's first complete frame
-// .second = global_gain of the last granule of the chunk's last complete frame
-// Either is -1 when unavailable (no complete frame / side info didn't fit). See the
-// sideinfo_probe measurements in PLAN_sideinfo_mainbits.md Step 1: |Δ global_gain| across a
-// chunk junction ranks the true successor #1 in ~60-74% of branch points on VBR fixtures
-// (vs ~30% for the graph's own candidate order), so sorting DFS candidates by it explores
-// the likely-correct edge first. Ranking only - never rejects an edge.
-struct BoundaryGain { int first = -1; int last = -1; };
+// Per-chunk Layer III side-info features at each end, for the continuity ranking heuristic.
+// *First = granule 0 of the chunk's first complete frame; *Last = last granule of the last
+// complete frame. -1 when unavailable (no complete frame / side info didn't fit).
+// See PLAN_sideinfo_mainbits.md Step 1 + A2: `global_gain` (granule loudness) is the dominant
+// junction-continuity signal - |Δ global_gain| ranks the true successor #1 in ~60-74% of VBR
+// branch points (vs ~30% for the graph's own order). A2: adding a small |Δ big_values|
+// (spectral-occupancy) term robustly nudges rank-1 up ~1-3pp on every fixture. Ranking only -
+// never rejects an edge.
+struct BoundaryGain {
+    int ggFirst = -1, ggLast = -1;   // global_gain
+    int bvFirst = -1, bvLast = -1;   // big_values
+};
 
-// Junction cost of putting a supernode whose first chunk is `b` right after a supernode whose
-// last chunk is `a`: |Δ global_gain| across that boundary. When either side's loudness is
-// unknown, a fixed penalty above the 255 max real delta - so an ordering that resolves more
-// junctions scores better, unknowns sort last in the ranking, and the running sum stays
-// finite (needed for the best-of branch-and-bound). Used for both the DFS exploration order
-// and the total-ordering score.
+// Junction cost of putting a supernode whose first chunk is `b` right after one whose last
+// chunk is `a`: |Δ global_gain| + |Δ big_values|/BV_DIV across that boundary (A2 - the /32
+// matches the z-scored 1.0*gg + 0.15*bv the probe found robust). When global_gain is unknown
+// on either side, a fixed penalty above the 255 max real delta - so an ordering that resolves
+// more junctions scores better, unknowns sort last, and the running sum stays finite (needed
+// for the best-of branch-and-bound). Used for both DFS exploration order and the best-of score.
 static constexpr int UNKNOWN_JUNCTION_COST = 384;
+static constexpr int BV_DIV = 32;
 static int junctionCost(const vector<BoundaryGain>& bg, const int a, const int b) {
-    if (bg[a].last < 0 || bg[b].first < 0) return UNKNOWN_JUNCTION_COST;
-    return std::abs(bg[a].last - bg[b].first);
+    if (bg[a].ggLast < 0 || bg[b].ggFirst < 0) return UNKNOWN_JUNCTION_COST;
+    int cost = std::abs(bg[a].ggLast - bg[b].ggFirst);
+    if (bg[a].bvLast >= 0 && bg[b].bvFirst >= 0)
+        cost += std::abs(bg[a].bvLast - bg[b].bvFirst) / BV_DIV;
+    return cost;
 }
 
 // DFS instrumentation / bounding. `counter` = number of supernode placements tried.
@@ -575,8 +582,14 @@ int main(int argc, char* argv[]) {
             if (!metas[i].valid || metas[i].frames.empty()) continue;
             const FrameSideInfo f0 = parseFrameSideInfoAt(chunks[i], metas[i].frames.front().offset, mpeg1, mono);
             const FrameSideInfo f1 = parseFrameSideInfoAt(chunks[i], metas[i].frames.back().offset,  mpeg1, mono);
-            if (f0.valid) boundaryGain[i].first = f0.gr[0][0].globalGain;
-            if (f1.valid) boundaryGain[i].last  = f1.gr[f1.numGranules - 1][0].globalGain;
+            if (f0.valid) {
+                boundaryGain[i].ggFirst = f0.gr[0][0].globalGain;
+                boundaryGain[i].bvFirst = f0.gr[0][0].bigValues;
+            }
+            if (f1.valid) {
+                boundaryGain[i].ggLast = f1.gr[f1.numGranules - 1][0].globalGain;
+                boundaryGain[i].bvLast = f1.gr[f1.numGranules - 1][0].bigValues;
+            }
         }
     }
 

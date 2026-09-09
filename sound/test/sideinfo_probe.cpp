@@ -18,6 +18,7 @@
 //      predicts DFS branching reduction if `dfs()` sorts candidates by the score.
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -357,6 +358,78 @@ int main(int argc, char** argv) {
         evalScorer(f.name, [&, f](int i, int j){ return featDelta(f, si[i].last, si[j].first); });
     }
     evalScorer("COMBINED(z:gg+bv+p23)", scoreCombined);
+
+    // ---- Measurement C: fitted logistic combination (A2) -------------------------------
+    // Fit w over z-scored junction feature deltas: y=1 for a true consecutive pair, y=0 for a
+    // random pair (class-balanced, small L2). Then rank DFS candidates by the linear predictor.
+    // Compare the FITTED rank-1 rate against `globalGain` alone in Measurement B - only worth
+    // wiring into main.cpp if it's clearly better here AND the weights look stable across
+    // fixtures (else it's overfitting the 5 available files).
+    {
+        auto zrow = [&](const Feat& a, const Feat& b, double* x) {
+            for (int k = 0; k < kNumFeatures; ++k)
+                x[k] = (featDelta(kFeatures[k], a, b) - mean[k]) / sd[k];
+        };
+        vector<array<double, kNumFeatures>> Xpos, Xneg;
+        for (int i = 0; i + 1 < n; ++i) {
+            if (!si[i].ok || !si[i + 1].ok) continue;
+            array<double, kNumFeatures> x; zrow(si[i].last, si[i + 1].first, x.data());
+            Xpos.push_back(x);
+        }
+        mt19937 rng2(777);
+        for (int r = 0; r < numRandomPairs && Xneg.size() < 40000; ++r) {
+            const int a = pick(rng2), b = pick(rng2);
+            if (a == b || b == a + 1 || !si[a].ok || !si[b].ok) continue;
+            array<double, kNumFeatures> x; zrow(si[a].last, si[b].first, x.data());
+            Xneg.push_back(x);
+        }
+
+        double w[kNumFeatures] = {0}, b0 = 0;
+        const double lr = 0.2, lam = 2e-3;
+        const double wp = 1.0 / std::max<size_t>(1, Xpos.size());
+        const double wn = 1.0 / std::max<size_t>(1, Xneg.size());
+        for (int it = 0; it < 600; ++it) {
+            double g[kNumFeatures] = {0}, gb = 0;
+            auto accum = [&](const array<double, kNumFeatures>& x, const double y, const double wt) {
+                double z = b0;
+                for (int k = 0; k < kNumFeatures; ++k) z += w[k] * x[k];
+                const double e = (1.0 / (1.0 + exp(-z)) - y) * wt;
+                for (int k = 0; k < kNumFeatures; ++k) g[k] += e * x[k];
+                gb += e;
+            };
+            for (const auto& x : Xpos) accum(x, 1.0, wp);
+            for (const auto& x : Xneg) accum(x, 0.0, wn);
+            for (int k = 0; k < kNumFeatures; ++k) { g[k] += lam * w[k]; w[k] -= lr * g[k]; }
+            b0 -= lr * gb;
+        }
+
+        printf("\n== Measurement C: fitted logistic junction score (A2) ==\n");
+        printf("  fit on %zu true / %zu random junctions. weights (z-scored deltas; "
+               "positive weight => a larger delta pushes toward 'true junction'):\n", Xpos.size(), Xneg.size());
+        for (int k = 0; k < kNumFeatures; ++k)
+            printf("    %-18s % .3f\n", kFeatures[k].name, w[k]);
+
+        // Rank candidates by -z (higher z = more true-like, so smallest -z first).
+        evalScorer("FITTED-LOGISTIC", [&](int i, int j) {
+            array<double, kNumFeatures> x; zrow(si[i].last, si[j].first, x.data());
+            double z = b0;
+            for (int k = 0; k < kNumFeatures; ++k) z += w[k] * x[k];
+            return -z;
+        });
+
+        // Fixed, hand-set weights that only use the two features whose fitted weight sign is
+        // stable across fixtures (globalGain dominant, bigValues small negative). If this
+        // doesn't robustly beat globalGain-alone everywhere, a multi-feature score isn't worth
+        // the overfitting risk of hardcoding fitted weights.
+        auto fixedScore = [&](double wgg, double wbv) {
+            return [&, wgg, wbv](int i, int j) {
+                array<double, kNumFeatures> x; zrow(si[i].last, si[j].first, x.data());
+                return wgg * x[0] + wbv * x[1]; // 0=globalGain, 1=bigValues
+            };
+        };
+        evalScorer("FIXED gg+0.15bv", fixedScore(1.0, 0.15));
+        evalScorer("FIXED gg+0.30bv", fixedScore(1.0, 0.30));
+    }
 
     return 0;
 }
