@@ -182,7 +182,7 @@ Wired into `dfs()` (`main.cpp`): a per-chunk `BoundaryGain` (leading/trailing gr
 
 **Decision this leaves open** (PLAN M1.5 step 7): near-exhaustive DFS over the current supernode graph is capped for large VBR *regardless of candidate ordering or beam width*. The two remaining directions, both non-trivial: (a) Milestone 2's partial spectral decode for a much stronger junction signal; (b) redesign the search as true beam/A* over *partial* orderings that emits the best partial path as `output.mp3` (the current beam-limited DFS still requires a *complete* 202/512/658-supernode ordering or it outputs nothing). A cheaper orthogonal experiment first: constraint propagation (AC-3) / stronger forced-chain collapse to shrink the ~120-330 branch points before any search. See the recommended order at the top of the TODO section.
 
-**2026-09-09 update - A3 (bitrate) and A4 (arc-consistency) landed; neither cracks this, but A4 is the first structural win.** A3: VBR junction bitrate continuity is measured noise (AUC 0.55) and is not wired; the CBR-only bitrate header filter removes ~0.3% of edges. A4 (`propagateArcConsistency`): shrinks `test7_shorter` 202→164 supernodes (−19%), `test7_short` 512→446 (−13%), safely gated on the pre-shuffle diagnostic. `test7_shorter` still finds no complete ordering (164 supernodes is still exponential), but the reduction composes with any future per-edge signal. See the TODO items for both.
+**2026-09-09 update - A3 (bitrate), A4 (arc-consistency), A2 (multi-feature score) landed; none crack this, A4 is the one structural win.** A3: VBR junction bitrate continuity is measured noise (AUC 0.55), not wired; CBR-only bitrate header filter removes ~0.3% of edges. A4 (`propagateArcConsistency`): `test7_shorter` 202→164 supernodes (−19%), `test7_short` 512→446 (−13%), safely gated on the pre-shuffle diagnostic - still no complete ordering (164 is still exponential) but composes with a future per-edge signal. A2 (`sideinfo_probe` Measurement C): full logistic fit over 11 junction features overfits (secondary weights sign-flip across fixtures); shipped only the robust part - `junctionCost` is now `|Δglobal_gain| + |Δbig_values|/32`, which lifts probe rank-1 ~1-3pp on every fixture but doesn't move DFS accuracy on the observable ones (sample-3s seeds still 76.5%/100%). **Per-edge signal work is now exhausted for the near term - the large-VBR case needs Milestone 2's spectral decode, or a different search (beam/A*/Hungarian), not another metadata feature.**
 
 **2026-09-07 update 2 - "best-of" search (keep exploring, minimise summed junction cost) tried; it is *worse*, and the reason is informative.** `main.cpp` `RP_BESTOF=1`: don't stop at the first complete ordering, keep the lowest-scoring one where score = summed `junctionCost` (= `|Δ global_gain|`, unknown junctions cost a flat 384) over every supernode boundary, with branch-and-bound on the partial score. Result on `sample-3s` (5 seeds): best-of converges to one score-194 ordering with **only 25% of chunks in place**, vs **76-100% for first-valid** (and 100% for seeds 1/3/777). The summed-junction-cost *global minimum is not the true order* - a real stream genuinely contains large `global_gain` steps at transients / section edges, so a "smoother than reality" reorder wins. **`global_gain` is a good local rank signal, not a good global objective.** first-valid + rank-ordered candidates stays the default; best-of stays behind the flag for trying a better objective (reservoir headroom, or a multi-feature score first *verified* to have the true order as its argmin - which needs a probe extension: "is `trueOrderScore < scoreOf(random valid orderings)` for objective X?").
 
@@ -217,13 +217,15 @@ is found at all. Cheapest, most-decisive levers first:
    interior to complete frame Y" check (item 5), but it carries its own aliasing
    risk and isn't attempted. **CBR padding-bit cadence** (Medium-priority item)
    is still open and untried.
-6. **A2 - fitted multi-feature junction score.** Logistic regression on
-   (Δglobal_gain, Δbig_values, Δpart2_3_length, block_type match) against
-   true-order junctions - the `sideinfo_probe` harness already measures exactly this.
-   A better *local* signal (and, if verified, a usable global objective for A1).
-   Δbitrate is measured noise (A3) - leave it out. **Now the top open item.**
-7. **Milestone 2 - partial spectral decode.** Strongest possible signal; only if
-   1-6 don't get large-VBR files there. See `PLAN_sideinfo_mainbits.md`.
+6. **[done 2026-09-09] A2 - fitted multi-feature junction score.** `sideinfo_probe`
+   Measurement C. Full logistic fit overfits (secondary weights sign-flip across
+   fixtures, only +1-6pp). Shipped the robust distillation: `junctionCost` is now
+   `|Δglobal_gain| + |Δbig_values|/32` - improves probe rank-1 ~1-3pp on every
+   fixture but does not move DFS reconstruction accuracy on the observable ones.
+7. **Milestone 2 - partial spectral decode.** Strongest possible signal; **now the
+   top open item** for the large-VBR case. See `PLAN_sideinfo_mainbits.md`. If it
+   too doesn't get large-VBR files there, the search itself has to change (true
+   beam/A* over partial orderings, or Hungarian matching) - not the per-edge signal.
 
 ### Consistency & verification (done 2026-09-07)
 
