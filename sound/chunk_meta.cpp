@@ -417,6 +417,35 @@ ChunkMeta computeChunkMeta(const int chunkIndex,
  * @param out Output struct StreamProfile
  * @return True if the profile was constructed successfully.
  */
+bool detectCBR(const vector<uint8_t>& stream, const StreamProfile& prof, int& kbpsOut, const int minFrames) {
+    int i = 0, frames = 0, kbps = -1;
+    while (i + 4 <= static_cast<int>(stream.size())) {
+        const uint32_t raw = computeChunkHeader(stream, i);
+        if (!Mp3FrameScanner::isValidHeader(raw)) break;
+        bool ok;
+        Header h(raw, ok);
+        if (!ok || !prof.matches(h)) break;
+        const int len = h.getFrameLength();
+        if (len <= 0) break;
+        const int br = h.getBitrate();
+        if (kbps < 0) kbps = br;
+        else if (br != kbps) return false; // a second bitrate -> not CBR
+        // A Xing (as opposed to Info) header marks the stream as VBR even if these first
+        // frames happen to share a bitrate - bail so we don't wrongly filter.
+        if (frames == 0 && isXingFrame(stream, i, h)) {
+            const int side = sideInfoSize(h.getVersionID(), h.isMono());
+            if (i + 4 + side + 4 <= static_cast<int>(stream.size()) &&
+                std::memcmp(&stream[i + 4 + side], "Xing", 4) == 0)
+                return false;
+        }
+        ++frames;
+        i += len;
+    }
+    if (frames < minFrames || kbps <= 0) return false;
+    kbpsOut = kbps;
+    return true;
+}
+
 bool deriveProfile(const vector<uint8_t>& chunk, StreamProfile& out) {
     for (int i = 0; i + 4 <= static_cast<int>(chunk.size()); ++i) {
         const uint32_t raw = computeChunkHeader(chunk, i);

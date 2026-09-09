@@ -15,13 +15,21 @@ struct StreamProfile {
     uint8_t channelIdx;
     int     sampleRate;
 
+    // Set only when the stream has been positively identified as constant-bitrate (A3a):
+    // then every real frame carries this exact bitrate, so a header at any other bitrate is a
+    // false-positive sync and matches() rejects it. Left off for VBR (where real frames
+    // legitimately span many bitrates) and when CBR can't be confirmed - conservative.
+    bool    isCBR       = false;
+    int     bitrateKbps = 0;
+
     bool isMono() const    { return channelIdx == 0b11; }
     bool isLayerIII() const{ return layerID == 0b01; }
 
     bool matches(const Header& h) const {
         return h.getVersionID()    == versionID
             && h.getLayerID()      == layerID
-            && h.getSampleRate()   == sampleRate;
+            && h.getSampleRate()   == sampleRate
+            && (!isCBR || h.getBitrate() == bitrateKbps);
     }
 };
 
@@ -124,6 +132,13 @@ ChunkMeta computeChunkMeta(int chunkIndex,
 // Derive a StreamProfile from the very first valid frame in a chunk.
 // Returns false if no valid header found.
 bool deriveProfile(const std::vector<uint8_t>& chunk, StreamProfile& out);
+
+// Walks consecutive frames from the start of `stream` (which must begin on a frame boundary)
+// and returns true iff at least `minFrames` profile-matching frames were parsed and every one
+// carried the same bitrate - i.e. the stream is constant-bitrate. `kbpsOut` gets that bitrate.
+// Conservative: any parse hiccup or a second bitrate value -> returns false (treat as VBR).
+bool detectCBR(const std::vector<uint8_t>& stream, const StreamProfile& prof,
+               int& kbpsOut, int minFrames = 8);
 
 // Decodes the real main_data_begin/part2_3_length of a Case-1 split frame (one whose 4-byte
 // header and start of payload are in `a`'s tail, continuing into successor chunk `b`), by

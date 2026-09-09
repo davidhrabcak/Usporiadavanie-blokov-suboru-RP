@@ -435,10 +435,30 @@ int main(int argc, char* argv[]) {
         chunks.emplace_back(buf.begin(), buf.begin() + static_cast<long>(n));
     }
 
+    // Constant-bitrate detection (A3a): walk the first few chunks (still in true order here)
+    // and, if every frame shares one bitrate, enable the frame-header bitrate filter in
+    // StreamProfile::matches so false-positive syncs at other bitrates are rejected.
+    bool cbr = false;
+    int  cbrKbps = 0;
+    {
+        StreamProfile tmp{};
+        if (deriveProfile(chunks[0], tmp)) {
+            vector<uint8_t> head;
+            for (size_t i = 0; i < chunks.size() && i < 6; ++i)
+                head.insert(head.end(), chunks[i].begin(), chunks[i].end());
+            cbr = detectCBR(head, tmp, cbrKbps);
+        }
+    }
+    if (const char* s = std::getenv("RP_CBR")) if (s[0] == '0') cbr = false; // A/B toggle for A3a
+    if (cbr)
+        cout << "Detected constant bitrate: " << cbrKbps
+             << " kbps - frame-header bitrate filter enabled\n";
+
     // --- Pre-shuffle sanity check ---
     {
         StreamProfile prof0{};
         if (deriveProfile(chunks[0], prof0)) {
+            if (cbr) { prof0.isCBR = true; prof0.bitrateKbps = cbrKbps; }
             vector<ChunkMeta> origMetas;
             origMetas.reserve(chunks.size());
             for (int i = 0; i < static_cast<int>(chunks.size()); ++i)
@@ -517,10 +537,12 @@ int main(int argc, char* argv[]) {
         cerr << "Could not derive stream profile from first chunk\n";
         return 1;
     }
+    if (cbr) { profile.isCBR = true; profile.bitrateKbps = cbrKbps; }
     cout << "Stream profile: versionID=" << static_cast<int>(profile.versionID)
          << " layerID=" << static_cast<int>(profile.layerID)
          << " sampleRate=" << profile.sampleRate
-         << " mono=" << profile.isMono() << "\n";
+         << " mono=" << profile.isMono()
+         << (profile.isCBR ? (" cbr=" + std::to_string(profile.bitrateKbps) + "kbps") : string(" vbr")) << "\n";
 
     // Compute per-chunk metadata
     vector<ChunkMeta> metas;
@@ -574,9 +596,12 @@ int main(int argc, char* argv[]) {
 
     // Report graph stats
     int forced = 0;
-    for (int i = 0; i < static_cast<int>(chunks.size()); ++i)
+    long edges = 0;
+    for (int i = 0; i < static_cast<int>(chunks.size()); ++i) {
         if (outdeg[i] == 1) ++forced;
-    cout << "\nAdjacency graph: "
+        edges += static_cast<long>(adj[i].size());
+    }
+    cout << "\nAdjacency graph: " << edges << " edges, "
          << forced << "/" << chunks.size()
          << " chunks have exactly one valid successor\n";
 

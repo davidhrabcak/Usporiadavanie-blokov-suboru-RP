@@ -49,6 +49,7 @@ struct Feat {
     double windowSwitching;  // categorical
     double count1TableSel;   // categorical
     double tableSel0;        // categorical
+    double bitrate = 0;      // frame-header kbps (not side info) - filled in from ChunkMeta::frames
 };
 
 static Feat toFeat(const GranuleSideInfo& g) {
@@ -56,7 +57,7 @@ static Feat toFeat(const GranuleSideInfo& g) {
         double(g.globalGain), double(g.bigValues), double(g.part23Length),
         double(g.scalefacCompress), double(g.region0Count), double(g.region1Count),
         double(g.blockType), double(g.windowSwitching),
-        double(g.count1TableSelect), double(g.tableSelect[0]),
+        double(g.count1TableSelect), double(g.tableSelect[0]), 0.0,
     };
 }
 
@@ -77,6 +78,7 @@ static const NamedFeature kFeatures[] = {
     {"windowSwitching",  true,  &Feat::windowSwitching},
     {"count1TableSel",   true,  &Feat::count1TableSel},
     {"tableSel0",        true,  &Feat::tableSel0},
+    {"bitrate",          false, &Feat::bitrate},
 };
 static constexpr int kNumFeatures = sizeof(kFeatures) / sizeof(kFeatures[0]);
 
@@ -150,10 +152,42 @@ int main(int argc, char** argv) {
         si[i].ok = true;
         si[i].first = toFeat(f0.gr[0][0]);
         si[i].last  = toFeat(f1.gr[f1.numGranules - 1][0]);
+        si[i].first.bitrate = metas[i].frames.front().bitrate;
+        si[i].last.bitrate  = metas[i].frames.back().bitrate;
     }
     int okChunks = 0;
     for (int i = 0; i < n; ++i) if (si[i].ok) ++okChunks;
     printf("chunks with usable boundary side info: %d/%d\n", okChunks, n);
+
+    // ---- A3a probe: how many frameStarts a bitrate filter in StreamProfile::matches would
+    // reject as false positives (headers that decode as the profile stream but at a different
+    // bitrate). For CBR this is the whole point - see CLAUDE.md TODO "Bitrate as a
+    // discriminator". Also reports the bitrate distribution over all real complete frames.
+    {
+        int brHist[16] = {0};                 // by bitrate index is awkward; bucket by kbps/8 -> coarse
+        int total = 0, nonModal = 0;
+        // modal bitrate over complete frames
+        int cnt[512] = {0}, modal = 0, modalKbps = 0;
+        for (int i = 0; i < n; ++i)
+            for (const auto& fr : metas[i].frames)
+                if (fr.bitrate > 0 && fr.bitrate < 512) { if (++cnt[fr.bitrate] > modal) { modal = cnt[fr.bitrate]; modalKbps = fr.bitrate; } }
+        for (int i = 0; i < n; ++i) {
+            if (!metas[i].valid) continue;
+            for (int off : metas[i].frameStarts) {
+                if (off + 4 > (int)chunks[i].size()) continue;
+                bool ok = false;
+                Header h(packHeaderBytes(&chunks[i][off]), ok);
+                if (!ok) continue;
+                const int br = h.getBitrate();
+                ++total;
+                if (br != modalKbps) ++nonModal;
+                (void)brHist;
+            }
+        }
+        printf("frameStarts: %d total, modal bitrate %d kbps, %d (%.1f%%) at a different bitrate "
+               "(a matches() bitrate filter would drop these)\n",
+               total, modalKbps, nonModal, total ? 100.0 * nonModal / total : 0.0);
+    }
 
     const auto adj = buildAdjacency(metas);
     const auto outdeg = computeOutDegree(adj, n);
