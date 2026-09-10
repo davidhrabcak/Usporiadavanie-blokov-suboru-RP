@@ -617,5 +617,119 @@ int main(int argc, char** argv) {
         }
     }
 
+    // ---- Measurement E: split-frame Huffman-decode consistency as a junction filter -----
+    // At each chunk boundary the straddling frame F has an exact part2_3_length. Decode F with
+    // (a) its TRUE tail bytes and (b) the head bytes of many WRONG chunks, using the true
+    // reservoir. True should always land on part2_3_length; a wrong successor should almost
+    // always fail (invalid leaf, or bit-count far off). This is the go/no-go for turning the
+    // decoder into a hard structural prune - see PLAN_huffman_junction_filter.md.
+    {
+        using namespace Mp3MainData;
+        vector<uint8_t> stream;
+        for (const auto& c : chunks) stream.insert(stream.end(), c.begin(), c.end());
+        const auto& frames = scanner.getFrames();
+        const long base = static_cast<long>(frames.empty() ? 0 : frames[0].position);
+        const int nf = static_cast<int>(frames.size());
+
+        // A decode "passes" iff every granule block landed within 8 bits of its part2_3_length.
+        // Returns {tested, pass}; tested=false if any block is window-switching (can't check).
+        auto passOf = [](const FrameSpectra& sp, const FrameSideInfo& fsi) -> pair<bool,bool> {
+            bool anyChecked = false;
+            for (int g = 0; g < fsi.numGranules; ++g)
+                for (int c = 0; c < fsi.numChannels; ++c) {
+                    const auto& gi = fsi.gr[g][c];
+                    if (gi.windowSwitching) return {false, false};
+                    if (gi.part23Length == 0) continue;
+                    anyChecked = true;
+                    const auto& gs = sp.gr[g][c];
+                    if (!gs.valid || std::abs(gs.bitsConsumed - gi.part23Length) > 8) return {true, false};
+                }
+            return {anyChecked, true};
+        };
+
+        mt19937 rE(20260910);
+        long junctions = 0, wsSkip = 0, resvSkip = 0, onBoundary = 0;
+        long trueTested = 0, truePass = 0;
+        long wrongTested = 0, wrongPass = 0;
+        double nzRatioSum = 0; long nzRatioN = 0;
+
+        vector<uint8_t> res;
+        for (int k = 0; k < nf; ++k) {
+            const long soff = static_cast<long>(frames[k].position) - base;
+            if (soff < 0 || soff + 4 > (long)stream.size()) break;
+            bool ok; Header h(packHeaderBytes(&stream[soff]), ok);
+            if (!ok || !profile.matches(h)) { res.clear(); continue; }
+            const int sideSz = sideInfoSize(h.getVersionID(), h.isMono());
+            const int flen = h.getFrameLength();
+            const long payStart = soff + 4 + sideSz;
+            const long payEnd = soff + flen;
+            if (flen <= 0 || payEnd > (long)stream.size()) { res.clear(); continue; }
+
+            const long endByte = soff + flen - 1;
+            const bool straddles = (soff / CHUNK_SIZE) != (endByte / CHUNK_SIZE);
+            if (straddles && k > 0) {
+                ++junctions;
+                const long bnd = (soff / CHUNK_SIZE + 1) * CHUNK_SIZE;
+                const int  rem = static_cast<int>(soff + flen - bnd);   // F bytes after the boundary
+                const int  bChunk = static_cast<int>(bnd / CHUNK_SIZE); // the true successor chunk index
+                const FrameSideInfo fsi = parseFrameSideInfoAt(stream, static_cast<int>(soff), mpeg1, mono);
+
+                if (!fsi.valid || (int)fsi.mainDataBegin > (int)res.size()) { ++resvSkip; }
+                else if (rem <= 0 || bnd + rem > (long)stream.size()) { ++onBoundary; }
+                else {
+                    // F payload = [F bytes in the predecessor chunk] + [rem bytes in the successor]
+                    const long partAstart = payStart, partAend = bnd;
+                    auto buildAndDecode = [&](const uint8_t* headBytes) {
+                        vector<uint8_t> buf;
+                        buf.insert(buf.end(), res.end() - fsi.mainDataBegin, res.end());
+                        if (partAend > partAstart)
+                            buf.insert(buf.end(), stream.begin() + partAstart, stream.begin() + partAend);
+                        buf.insert(buf.end(), headBytes, headBytes + rem);
+                        return decodeFrameSpectra(buf, 0, fsi, profile.sampleRate);
+                    };
+                    auto nzOf = [](const FrameSpectra& sp, const FrameSideInfo& fsi) {
+                        int nz = 0;
+                        for (int g = 0; g < fsi.numGranules; ++g)
+                            for (int c = 0; c < fsi.numChannels; ++c) nz += sp.gr[g][c].nonzero;
+                        return nz;
+                    };
+                    const FrameSpectra trSp = buildAndDecode(&stream[bnd]);
+                    const auto tr = passOf(trSp, fsi);
+                    if (!tr.first) { ++wsSkip; }
+                    else {
+                        ++trueTested; if (tr.second) ++truePass;
+                        const int trueNz = nzOf(trSp, fsi);
+                        uniform_int_distribution<int> pj(0, n - 1);
+                        for (int s = 0; s < 16; ++s) {
+                            const int j = pj(rE);
+                            if (j == bChunk || rem > (int)chunks[j].size()) continue;
+                            const FrameSpectra wrSp = buildAndDecode(chunks[j].data());
+                            const auto wr = passOf(wrSp, fsi);
+                            if (!wr.first) continue;
+                            ++wrongTested; if (wr.second) ++wrongPass;
+                            // nonzero-count ratio: does garbage decode denser?
+                            if (trueNz > 0) { nzRatioSum += (double)nzOf(wrSp, fsi) / trueNz; ++nzRatioN; }
+                        }
+                    }
+                }
+            }
+            res.insert(res.end(), stream.begin() + payStart, stream.begin() + payEnd);
+            if (res.size() > 4096) res.erase(res.begin(), res.end() - 4096);
+        }
+
+        printf("\n== Measurement E: split-frame Huffman-decode junction filter (go/no-go) ==\n");
+        printf("  straddling junctions: %ld  (window-switching %ld, reservoir-underrun %ld, on-boundary %ld)\n",
+               junctions, wsSkip, resvSkip, onBoundary);
+        printf("  TRUE successor : %ld/%ld pass  (want ~100%%)\n", truePass, trueTested);
+        printf("  WRONG successor: %ld/%ld pass = %.1f%%  (want < 5%%)\n",
+               wrongPass, wrongTested, wrongTested ? 100.0 * wrongPass / wrongTested : 0.0);
+        printf("  wrong-decode nonzero-count ratio vs true (garbage should be denser, ~>>1): mean %.2f\n",
+               nzRatioN ? nzRatioSum / nzRatioN : 0.0);
+        if (trueTested && wrongTested)
+            printf("  -> a hard filter would cut ~%.0fx of wrong Case-1 edges%s\n",
+                   wrongPass ? (double)wrongTested / wrongPass : (double)wrongTested,
+                   truePass == trueTested ? "" : "  BUT it also rejects some TRUE edges - unsafe as-is");
+    }
+
     return 0;
 }
