@@ -508,6 +508,46 @@ int main(int argc, char** argv) {
                totalBlocks, decoded, shortBlocks, mismatch,
                (totalBlocks - shortBlocks) ? 100.0 * decoded / (totalBlocks - shortBlocks) : 0.0);
 
+        // --- chunk-local boundary spectra: decode using ONLY the chunk's own bytes as the
+        // reservoir (no cross-chunk assembly). This is what main.cpp could compute per-chunk
+        // without DFS-time decoding; measure whether its coverage and signal hold up.
+        vector<GranuleSpectrum> clFirst(n), clLast(n);
+        int clFirstOk = 0, clLastOk = 0, clChunks = 0;
+        for (int i = 0; i < n; ++i) {
+            if (!metas[i].valid || metas[i].frames.empty()) continue;
+            bool ok; Header h(packHeaderBytes(&chunks[i][metas[i].frames.front().offset]), ok);
+            if (!ok) continue;
+            const int sideSz = sideInfoSize(h.getVersionID(), h.isMono());
+            ++clChunks;
+            // chunk-local main-data stream: leading headOffset bytes + each complete frame's payload.
+            vector<uint8_t> md(chunks[i].begin(), chunks[i].begin() + metas[i].headOffset);
+            vector<int> payMdStart;                 // md offset of each frame's payload start
+            for (const auto& fr : metas[i].frames) {
+                payMdStart.push_back((int)md.size());
+                const int ps = fr.offset + 4 + sideSz, pe = fr.offset + fr.length;
+                if (pe <= (int)chunks[i].size() && ps < pe)
+                    md.insert(md.end(), chunks[i].begin() + ps, chunks[i].begin() + pe);
+            }
+            auto decodeAt = [&](int frameIdx) -> FrameSpectra {
+                const int off = metas[i].frames[frameIdx].offset;
+                const FrameSideInfo fsi = parseFrameSideInfoAt(chunks[i], off, mpeg1, mono);
+                if (!fsi.valid) return {};
+                const int startBit = (payMdStart[frameIdx] - (int)fsi.mainDataBegin) * 8;
+                if (startBit < 0) return {};          // main data reaches into the previous chunk
+                return decodeFrameSpectra(md, startBit, fsi, profile.sampleRate);
+            };
+            const FrameSpectra sf = decodeAt(0);
+            const FrameSpectra sl = decodeAt((int)metas[i].frames.size() - 1);
+            if (sf.valid) { clFirst[i] = sf.gr[0][0]; if (clFirst[i].valid) ++clFirstOk; }
+            if (sl.valid) {
+                const int ng = parseFrameSideInfoAt(chunks[i], metas[i].frames.back().offset, mpeg1, mono).numGranules;
+                clLast[i] = sl.gr[ng - 1][0];
+                if (clLast[i].valid) ++clLastOk;
+            }
+        }
+        printf("  chunk-local coverage: first-granule %d/%d, last-granule %d/%d chunks\n",
+               clFirstOk, clChunks, clLastOk, clChunks);
+
         // Per-chunk boundary spectra, via the chunk's first/last complete frame.
         auto specOf = [&](int chunk, bool firstFrame) -> const GranuleSpectrum* {
             if (!metas[chunk].valid || metas[chunk].frames.empty()) return nullptr;
@@ -562,6 +602,16 @@ int main(int argc, char** argv) {
             evalScorer("SPECTRAL-L2", [&](int i, int j) { return specZ(i, j); });
             evalScorer("gg + 0.5*spectral",  [&](int i, int j) { return ggZ(i, j) + 0.5 * specZ(i, j); });
             evalScorer("gg + 1.0*spectral",  [&](int i, int j) { return ggZ(i, j) + 1.0 * specZ(i, j); });
+
+            // Same, but with the chunk-local spectra (what main.cpp could actually compute).
+            auto clL2 = [&](int i, int j) -> double {
+                if (!clLast[i].valid || !clFirst[j].valid) return 3.0;
+                double s = 0;
+                for (int q = 0; q < NBANDS; ++q) { const double d = clLast[i].bandEnergy[q] - clFirst[j].bandEnergy[q]; s += d * d; }
+                return (sqrt(s) - specMean) / specSd;
+            };
+            evalScorer("CL-SPECTRAL", [&](int i, int j) { return clL2(i, j); });
+            evalScorer("gg + 0.5*CL-spectral", [&](int i, int j) { return ggZ(i, j) + 0.5 * clL2(i, j); });
         } else {
             printf("  (too few usable boundary spectra for a verdict)\n");
         }
