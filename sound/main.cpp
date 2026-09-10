@@ -5,11 +5,16 @@
 #include <string>
 #include <cstdint>
 #include <iostream>
+#include <iomanip>
 #include <vector>
 #include <fstream>
+#include <cstdlib>
+#include <climits>
+#include <unordered_map>
 #include "frame_scanner.hpp"
 #include "chunk_meta.hpp"
 #include "adjacency.hpp"
+#include "main_data_decoder.hpp"
 
 #define CHUNK_SIZE 1024
 #define COUNTER_FREQUENCY 9999999
@@ -24,61 +29,28 @@ using namespace std;
 vector<vector<uint8_t>> chunks; // moved for debugging
 
 /**
- * Determines the length of side information in a chunk.
- * @return Side information length in bytes.
- */
-static int sideInfoBytes(const StreamProfile& p) {
-    if (p.versionID == 0b11) return p.isMono() ? 17 : 32;
-    return p.isMono() ? 9 : 17;
-}
-
-/**
  * Advances the Layer III bit-reservoir level through a single frame and checks that
  * the frame's mainDataBegin is actually satisfiable by what has accumulated so far.
  *
- * `level` is tracked in BITS, not bytes, even though callers (advanceReservoirChunk,
- * DfsState::reservoirLevel) treat it as an opaque running total - see below for why.
+ * `level` is tracked in BITS, not bytes (see below for why), even though callers treat it
+ * as an opaque running total.
  *
  * level_after = clamp(f.mainDataBegin*8 + producedBits - f.part23Bits, 0, maxReservoir*8).
- * The critical detail (cross-checked against minimp3's L3_restore_reservoir/
- * L3_save_reservoir, a widely-used reference decoder): the "history" contribution to
- * level_after is `f.mainDataBegin`, NOT `level_before`. A frame only ever reaches back
- * exactly as far as its own mainDataBegin says; any reservoir surplus beyond that
- * (level_before - mainDataBegin, when the frame didn't need to reach all the way back) is
- * *not* carried forward - the decoder's reservoir buffer only ever keeps the trailing
- * leftover of the (mainDataBegin + produced) window actually used by this frame, so older,
- * unclaimed bytes are gone once a later frame's mainDataBegin doesn't reach them. Using
- * `level_before` instead of `f.mainDataBegin` here was an earlier, incorrect version of
- * this fix - it let unused surplus accumulate indefinitely, and produced a systematic
- * downward drift that rejected `test7_shorter.mp3`'s true, correct chunk order by chunk 7
- * (confirmed empirically: `level_before` and `f.mainDataBegin` diverge starting exactly
- * where a stretch of near-silent frames - each leaving most of a saturated reservoir
- * unclaimed - is followed by louder frames whose real consumption then gets checked
- * against a `level` that never should have kept that surplus).
+ * Cross-checked against minimp3's L3_restore_reservoir/L3_save_reservoir: the "history"
+ * contribution to level_after is `f.mainDataBegin`, NOT `level_before` - a frame only ever
+ * reaches back exactly as far as its own mainDataBegin declares, so any reservoir surplus
+ * beyond that is discarded, not carried forward. The separate check `f.mainDataBegin >
+ * level_before` still applies: mainDataBegin(N) can never exceed what was genuinely
+ * available after frame N-1.
  *
- * The check itself (`f.mainDataBegin > level_before`) stays: mainDataBegin(N) can never
- * exceed what was genuinely available after frame N-1.
- *
- * Bit-precision also matters: part2_3_length is a bit-granular quantity, so it and
- * `produced` are both kept in bits internally, only flooring to bytes when compared
- * against mainDataBegin (a byte-granular bitstream field) - rounding part2_3_length up to
- * bytes per frame (an earlier version of this fix did exactly that) adds up to ~7 bits of
- * phantom consumption on every frame, which also compounds into false rejections.
- *
- * A first attempt at this function subtracted mainDataBegin itself as a stand-in for
- * consumption (not as the reservoir's history anchor, which is what this version does -
- * a different thing). That regressed real reconstructions: instrumenting a known-good file
- * (sample-3s.mp3) showed mainDataBegin sitting near the 511-byte cap on nearly every
- * frame while `produced` was ~382 bytes/frame, so the subtract-based level went net
- * negative every frame and saturated at 0 within a handful of chunks - after which every
- * subsequent frame with mainDataBegin > 0 was (wrongly) rejected, and the true ordering
- * could no longer pass. part2_3_length is the correct quantity to subtract - validated by
- * replaying the true, unshuffled chunk order through this function (see the pre-shuffle
- * sanity check below) before trusting it inside the DFS.
+ * part2_3_length/producedBits are kept in BITS throughout, only compared against
+ * mainDataBegin (byte-granular) at the byte level - rounding part2_3_length up to bytes
+ * per frame would add ~7 bits of phantom consumption per frame, compounding into false
+ * rejections over a whole file.
  *
  * @param level  Current reservoir fill level in BITS; updated in place.
  * @param f      The frame to advance through.
- * @param sideInfo Side-information size in bytes for this stream (see sideInfoBytes).
+ * @param sideInfo Side-information size in bytes for this stream (see sideInfoSize).
  * @param maxReservoir Reservoir capacity in bytes (511 for MPEG1, 255 for MPEG2/2.5).
  * @return False if `f.mainDataBegin` reaches further back than `level` allows, or if this
  *         frame's actual consumption (`part23Bits`) exceeds what became available.
@@ -105,45 +77,52 @@ static bool advanceReservoirFrame(int& level, const FrameSlice& f, const int sid
  * `meta.frames` only holds *complete* frames (fully contained in this chunk) - a frame that
  * straddles a chunk boundary (routine, since chunk_size=1024 rarely divides evenly into
  * frame lengths of ~100-800 bytes) contributes no FrameSlice to *either* chunk on its own.
- * Its payload bytes are nonetheless real, physical reservoir bytes, so this credits them on
- * both sides of the split: `meta.headOffset` bytes at the *start* of this chunk complete the
- * previous chunk's split tail (pure payload, no header/side-info overhead - the predecessor
- * already accounted for those), and `meta.tailOverflow` bytes at the *end* of this chunk are
- * the start of the next split frame's payload (once its 4-byte header + side info are
- * subtracted). Omitting either credit was confirmed (by cross-checking against minimp3, a
- * reference decoder, byte-for-byte on `test7_shorter.mp3`) to systematically undercount the
- * reservoir - the level drifts below the bitstream's own true mainDataBegin values within a
- * handful of chunks, which made this check reject the correct, unshuffled chunk order.
  *
- * The split frame's own mainDataBegin/part2_3_length are deliberately *not* validated or
- * consumed here (that would need to happen exactly once, using the combined view of both
- * chunks, which the current per-chunk loop structure doesn't have). Only crediting its
- * payload bytes without also modeling its consumption makes this conservative - it can
- * under-prune (miss a constraint a full model would catch) but cannot wrongly reject a
- * valid chain, which is what correctness requires here.
+ * When `prevMeta` is a Case-1 split (`prevMeta->tailPartialLen > 0`), the split frame's own
+ * side info is decoded exactly from `prevMeta`'s tail bytes + `metaBytes`'s head
+ * (`decodeSplitFrameSideInfo`, chunk_meta.cpp) and validated/consumed via `advanceReservoirFrame`
+ * like any other frame - possible here because the DFS already knows both chunks of the
+ * candidate edge being tried. If the exact decode isn't possible (not enough bytes to complete
+ * the side-info block), this falls back to crediting `meta.headOffset` raw payload bytes without
+ * validating the split frame's own mainDataBegin/part2_3_length.
  *
- * @param level Current reservoir fill level in BITS; updated in place, even on failure
- *              (the caller must restore it from a saved copy rather than trust it after false).
- * @param meta  Metadata for the chunk being appended to the candidate order.
- * @param sideInfo Side-information size in bytes for this stream.
+ * @param level     Current reservoir fill level in BITS; updated in place, even on failure
+ *                  (the caller must restore it from a saved copy rather than trust it after false).
+ * @param prevMeta  Metadata for the chunk immediately preceding `meta` in the candidate order,
+ *                  or nullptr if `meta` is the first chunk placed (chunk 0).
+ * @param meta      Metadata for the chunk being appended to the candidate order.
+ * @param metaBytes Raw bytes of `meta`'s own chunk (needed to decode `prevMeta`'s split-frame
+ *                  side info, which may extend past `prevMeta`'s own bytes).
+ * @param sideInfo  Side-information size in bytes for this stream.
  * @param maxReservoir Reservoir capacity in bytes.
- * @return False as soon as any complete frame in this chunk is invalid; true otherwise.
+ * @return False as soon as any complete frame (or the exactly-decoded split frame) is invalid;
+ *         true otherwise.
  */
-static bool advanceReservoirChunk(int& level, const ChunkMeta& meta, const int sideInfo, const int maxReservoir) {
+static bool advanceReservoirChunk(int& level,
+                                   const ChunkMeta* prevMeta,
+                                   const ChunkMeta& meta,
+                                   const vector<uint8_t>& metaBytes,
+                                   const int sideInfo,
+                                   const int maxReservoir) {
     const int maxBits = maxReservoir * 8;
+    bool creditedExactly = false;
 
-    if (meta.headOffset > 0) {
+    if (prevMeta != nullptr && prevMeta->tailPartialLen > 0) {
+        const SideInfoResult side = decodeSplitFrameSideInfo(*prevMeta, metaBytes);
+        if (side.valid) {
+            const FrameSlice splitFrame{-1, prevMeta->tailPartialLen, 0, side.mainDataBegin, side.part23Bits};
+            if (!advanceReservoirFrame(level, splitFrame, sideInfo, maxReservoir)) return false;
+            creditedExactly = true;
+        }
+    }
+
+    if (!creditedExactly && meta.headOffset > 0) {
         level += meta.headOffset * 8;
         if (level > maxBits) level = maxBits;
     }
 
     for (const FrameSlice& f : meta.frames) {
         if (!advanceReservoirFrame(level, f, sideInfo, maxReservoir)) return false;
-    }
-
-    if (meta.tailPartialLen > 0 && meta.tailOverflow > 4 + sideInfo) {
-        level += (meta.tailOverflow - 4 - sideInfo) * 8;
-        if (level > maxBits) level = maxBits;
     }
 
     return true;
@@ -254,9 +233,122 @@ struct DfsState {
     vector<int> order;    // supernode indices placed so far
     vector<bool> used;
     int reservoirLevel = 0;   // bit-reservoir fill level after everything placed so far
+    long long score  = 0;     // summed junctionCost over the junctions between placed supernodes
 };
 
-static uint64_t counter = 0;
+// Per-chunk Layer III side-info features at each end, for the continuity ranking heuristic.
+// *First = granule 0 of the chunk's first complete frame; *Last = last granule of the last
+// complete frame. -1 when unavailable (no complete frame / side info didn't fit).
+// See PLAN_sideinfo_mainbits.md Step 1 + A2: `global_gain` (granule loudness) is the dominant
+// junction-continuity signal - |Δ global_gain| ranks the true successor #1 in ~60-74% of VBR
+// branch points (vs ~30% for the graph's own order). A2: adding a small |Δ big_values|
+// (spectral-occupancy) term robustly nudges rank-1 up ~1-3pp on every fixture. Ranking only -
+// never rejects an edge.
+struct BoundaryGain {
+    int ggFirst = -1, ggLast = -1;   // global_gain
+    int bvFirst = -1, bvLast = -1;   // big_values
+};
+
+// Junction cost of putting a supernode whose first chunk is `b` right after one whose last
+// chunk is `a`: |Δ global_gain| + |Δ big_values|/BV_DIV across that boundary (A2 - the /32
+// matches the z-scored 1.0*gg + 0.15*bv the probe found robust). When global_gain is unknown
+// on either side, a fixed penalty above the 255 max real delta - so an ordering that resolves
+// more junctions scores better, unknowns sort last, and the running sum stays finite (needed
+// for the best-of branch-and-bound). Used for both DFS exploration order and the best-of score.
+static constexpr int UNKNOWN_JUNCTION_COST = 384;
+static constexpr int BV_DIV = 32;
+static int junctionCost(const vector<BoundaryGain>& bg, const int a, const int b) {
+    if (bg[a].ggLast < 0 || bg[b].ggFirst < 0) return UNKNOWN_JUNCTION_COST;
+    int cost = std::abs(bg[a].ggLast - bg[b].ggFirst);
+    if (bg[a].bvLast >= 0 && bg[b].bvFirst >= 0)
+        cost += std::abs(bg[a].bvLast - bg[b].bvFirst) / BV_DIV;
+    return cost;
+}
+
+// --- Milestone 2: spectral-continuity term added to the candidate ranking (not to the
+// best-of score / branch-and-bound). Decodes the trailing granule of `cur`'s last frame and
+// the leading granule of a candidate's first frame - cross-chunk main-data assembly, so the
+// trailing spectrum needs `cur`'s predecessor and the leading one needs `cur` itself.
+// Memoised by (predecessor, chunk); distinct keys ~= edge count. RP_SPEC=0 disables.
+// The probe (sideinfo_probe Measurement D) found z(global_gain) + 0.5*z(spectralL2) a strong
+// net win; here the raw 12-band-energy L2 distance is scaled by g_specScale, auto-calibrated
+// per file at startup so a median junction contributes a gentle ~3 (RP_SPEC_SCALE overrides).
+static bool   g_specRank   = true;
+static int    g_sampleRate = 44100;
+static double g_specScale  = 10.0;
+static std::unordered_map<long long, Mp3MainData::GranuleSpectrum> g_specHead, g_specTail;
+
+static const Mp3MainData::GranuleSpectrum* memoSpec(bool head, const vector<ChunkMeta>& metas,
+                                                    int prev, int chunk) {
+    if (chunk < 0 || !metas[chunk].valid || metas[chunk].frames.empty()) return nullptr;
+    auto& memo = head ? g_specHead : g_specTail;
+    const long long key = ((long long)(prev + 1) << 20) | (unsigned)chunk;
+    auto it = memo.find(key);
+    if (it == memo.end()) {
+        static const vector<uint8_t> empty;
+        const vector<uint8_t>& pv = (prev >= 0) ? chunks[prev] : empty;
+        const ChunkMeta* pm = (prev >= 0) ? &metas[prev] : nullptr;
+        const int off = head ? metas[chunk].frames.front().offset : metas[chunk].frames.back().offset;
+        const Mp3MainData::FrameSpectra fsp =
+            Mp3MainData::decodeChunkFrame(pm, pv, chunks[chunk], metas[chunk], off, g_sampleRate);
+        const bool mpeg1 = metas[chunk].profile.versionID == 0b11;
+        Mp3MainData::GranuleSpectrum gs; // gs.valid == false by default
+        if (fsp.valid) gs = head ? fsp.gr[0][0] : fsp.gr[mpeg1 ? 1 : 0][0];
+        it = memo.emplace(key, gs).first;
+    }
+    return it->second.valid ? &it->second : nullptr;
+}
+
+static double spectralJunctionCost(const vector<ChunkMeta>& metas, int curPrev, int curTail, int candHead) {
+    const Mp3MainData::GranuleSpectrum* A = memoSpec(false, metas, curPrev, curTail);
+    const Mp3MainData::GranuleSpectrum* B = memoSpec(true, metas, curTail, candHead);
+    if (!A || !B) return 0.0; // no spectrum on one side -> spectral term contributes nothing
+    double s = 0;
+    for (int q = 0; q < Mp3MainData::NBANDS; ++q) {
+        const double d = A->bandEnergy[q] - B->bandEnergy[q];
+        s += d * d;
+    }
+    return g_specScale * std::sqrt(s);
+}
+
+// DFS instrumentation / bounding. `counter` = number of supernode placements tried.
+// RP_MAX_NODES caps it (0 = unlimited) so a bounded A/B run stops cleanly instead of being
+// SIGTERM'd (which loses buffered stdout); RP_PROGRESS overrides how often a progress line
+// is printed. g_aborted unwinds the whole recursion once the cap is hit.
+static uint64_t counter        = 0;
+static uint64_t g_maxNodes     = 0;
+static uint64_t g_progressEvery = COUNTER_FREQUENCY;
+static bool     g_aborted      = false;
+static chrono::steady_clock::time_point g_dfsStart;
+static chrono::steady_clock::time_point g_deadline;   // wall-clock stop for the whole search
+static bool     g_haveDeadline = false;
+
+// Best-of search (A1, RP_BESTOF=1): instead of returning the first complete valid ordering,
+// keep exploring (bounded by the deadline) and remember the lowest-scoring one, score =
+// summed junctionCost over every supernode boundary; branch-and-bound prunes any prefix whose
+// partial score already meets/exceeds the best complete score.
+//
+// OFF by default: measured worse than first-valid. The summed-junctionCost objective is
+// misaligned with truth - its global minimum is a "smoother than reality" reorder (sample-3s:
+// 25% of chunks in place vs 76-100% for first-valid), because a real stream's true order
+// genuinely contains large global_gain steps at transients/section edges. global_gain is a
+// good *local rank* signal, not a good *global objective*. Kept behind the flag for
+// experimenting with a better objective (reservoir margin, or a multi-feature score verified
+// to have the true order as its argmin). See CLAUDE.md item 7.
+static bool          g_bestOf     = false;
+static long long     g_bestScore  = LLONG_MAX;
+static vector<int>   g_bestOrder;
+
+// RP_BEAM: at each DFS node, recurse into at most this many reservoir-valid candidates,
+// taken in continuity-rank order (0 = unlimited = exhaustive). A small beam turns the DFS
+// into near-greedy descent - it reaches full depth fast when the global_gain heuristic is
+// right, but can dead-end with no complete ordering when the heuristic is wrong at some node,
+// so it is normally driven by the iterative-broadening loop in main().
+static int g_beamK = 0;
+
+static double dfsElapsedSec() {
+    return chrono::duration<double>(chrono::steady_clock::now() - g_dfsStart).count();
+}
 
 /**
  * Exhaustive DFS over the supernode graph, starting from the supernode containing chunk 0.
@@ -279,32 +371,83 @@ bool dfs(DfsState& state,
          const vector<Supernode>& supernodes,
          const vector<vector<int>>& superAdj,
          const vector<ChunkMeta>& metas,
+         const vector<BoundaryGain>& boundaryGain,
+         const bool rankByContinuity,
          const int sideInfo,
          const int maxReservoir,
          const bool isLayerIII,
          vector<int>& result) {
 
+    if (g_aborted) return false;
+
     if (state.order.size() == supernodes.size()) {
-        // Reservoir validity has already been established incrementally for every
-        // chunk placed so far - nothing left to verify.
-        result = state.order;
-        return true;
+        // Reservoir validity has already been established incrementally for every chunk
+        // placed so far - nothing left to verify.
+        if (!g_bestOf) {
+            result = state.order;
+            return true;
+        }
+        if (state.score < g_bestScore) {
+            g_bestScore = state.score;
+            g_bestOrder = state.order;
+            cout << "  [ordering found: score=" << state.score
+                 << " nodes=" << counter
+                 << " elapsed=" << fixed << setprecision(1) << dfsElapsedSec() << "s]\n" << flush;
+        }
+        return g_bestScore == 0; // score 0 = perfect continuity, cannot be beaten - stop early
     }
 
     const int cur = state.order.back();
-    const auto& candidates = superAdj[cur];
+    const int curTailChunk = supernodes[cur].chunks.back();
 
+    // Chunk immediately preceding curTailChunk in the current path (for the trailing spectrum's
+    // cross-chunk main-data assembly). -1 when cur is the pinned start.
+    int curPrevChunk = -1;
+    if (supernodes[cur].chunks.size() >= 2)
+        curPrevChunk = supernodes[cur].chunks[supernodes[cur].chunks.size() - 2];
+    else if (state.order.size() >= 2)
+        curPrevChunk = supernodes[state.order[state.order.size() - 2]].chunks.back();
+
+    // Try structurally-legal successors in order of junction continuity (smallest cost first).
+    // Pure exploration ordering - every candidate is still tried (subject to the beam cap),
+    // and the reservoir check below is unchanged.
+    vector<int> candidates(superAdj[cur].begin(), superAdj[cur].end());
+    if (rankByContinuity && candidates.size() > 1) {
+        const bool useSpec = g_specRank && isLayerIII;
+        stable_sort(candidates.begin(), candidates.end(), [&](const int x, const int y) {
+            double cx = junctionCost(boundaryGain, curTailChunk, supernodes[x].chunks.front());
+            double cy = junctionCost(boundaryGain, curTailChunk, supernodes[y].chunks.front());
+            if (useSpec) {
+                cx += spectralJunctionCost(metas, curPrevChunk, curTailChunk, supernodes[x].chunks.front());
+                cy += spectralJunctionCost(metas, curPrevChunk, curTailChunk, supernodes[y].chunks.front());
+            }
+            return cx < cy;
+        });
+    }
+
+    int recursed = 0; // reservoir-valid candidates descended into so far, for the RP_BEAM cap
     for (int si : candidates) {
         if (state.used[si]) continue;
+
+        const int jc = junctionCost(boundaryGain, curTailChunk, supernodes[si].chunks.front());
+        // Branch-and-bound: this prefix can only get more expensive, so if it already ties or
+        // beats the best complete ordering there is no point descending. Candidates are sorted
+        // ascending by jc when ranking is on, so every later one is >= this: break, not continue.
+        if (g_bestOf && state.score + jc >= g_bestScore) {
+            if (rankByContinuity) break;
+            continue;
+        }
 
         const int savedLevel = state.reservoirLevel;
         bool reservoirOk = true;
         if (isLayerIII) {
+            int prevCi = curTailChunk; // last chunk of `cur`'s supernode directly precedes si's first chunk
             for (int ci : supernodes[si].chunks) {
-                if (!advanceReservoirChunk(state.reservoirLevel, metas[ci], sideInfo, maxReservoir)) {
+                if (!advanceReservoirChunk(state.reservoirLevel, &metas[prevCi], metas[ci], chunks[ci], sideInfo, maxReservoir)) {
                     reservoirOk = false;
                     break;
                 }
+                prevCi = ci;
             }
         }
         if (!reservoirOk) {
@@ -314,23 +457,35 @@ bool dfs(DfsState& state,
 
         state.used[si] = true;
         state.order.push_back(si);
+        state.score += jc;
 
-         if (++counter % COUNTER_FREQUENCY == 0) {
-             cout << "Depth: " << state.order.size()
-                  << "/" << supernodes.size() << "\n";
-         }
+        if (++counter % g_progressEvery == 0) {
+            cout << "  [nodes=" << counter << " depth=" << state.order.size()
+                 << "/" << supernodes.size() << " elapsed="
+                 << fixed << setprecision(1) << dfsElapsedSec() << "s]\n" << flush;
+        }
+        if (g_maxNodes && counter >= g_maxNodes) g_aborted = true;
+        // Wall-clock stop, sampled sparsely (steady_clock::now is a syscall).
+        if (g_haveDeadline && (counter & 0x3FFFF) == 0 && chrono::steady_clock::now() >= g_deadline)
+            g_aborted = true;
 
-        if (dfs(state, supernodes, superAdj, metas, sideInfo, maxReservoir, isLayerIII, result)) return true;
+        const bool hit = !g_aborted &&
+            dfs(state, supernodes, superAdj, metas, boundaryGain, rankByContinuity, sideInfo, maxReservoir, isLayerIII, result);
 
         state.order.pop_back();
         state.used[si] = false;
         state.reservoirLevel = savedLevel;
+        state.score -= jc;
+
+        if (hit) return true;              // first-valid mode, or best-of early-out (score 0)
+        if (g_aborted) return false;
+        if (g_beamK && ++recursed >= g_beamK) break;
     }
     return false;
 }
 
 int main(int argc, char* argv[]) {
-    const string filename = FILENAME;
+    const string filename = (argc > 1) ? argv[1] : FILENAME;
 
     Mp3FrameScanner scanner(filename);
     if (scanner.getFrameCount() == 0) {
@@ -349,10 +504,31 @@ int main(int argc, char* argv[]) {
         chunks.emplace_back(buf.begin(), buf.begin() + static_cast<long>(n));
     }
 
+    // Constant-bitrate detection (A3a): walk the first few chunks (still in true order here)
+    // and, if every frame shares one bitrate, enable the frame-header bitrate filter in
+    // StreamProfile::matches so false-positive syncs at other bitrates are rejected.
+    bool cbr = false;
+    int  cbrKbps = 0;
+    {
+        StreamProfile tmp{};
+        if (deriveProfile(chunks[0], tmp)) {
+            vector<uint8_t> head;
+            for (size_t i = 0; i < chunks.size() && i < 6; ++i)
+                head.insert(head.end(), chunks[i].begin(), chunks[i].end());
+            cbr = detectCBR(head, tmp, cbrKbps);
+        }
+    }
+    if (const char* s = std::getenv("RP_CBR")) if (s[0] == '0') cbr = false; // A/B toggle for A3a
+    if (cbr)
+        cout << "Detected constant bitrate: " << cbrKbps
+             << " kbps - frame-header bitrate filter enabled\n";
+
     // --- Pre-shuffle sanity check ---
+    int preShuffleBreaks = -1; // -1 = not computed; >=0 = broken consecutive-pair count on true order
     {
         StreamProfile prof0{};
         if (deriveProfile(chunks[0], prof0)) {
+            if (cbr) { prof0.isCBR = true; prof0.bitrateKbps = cbrKbps; }
             vector<ChunkMeta> origMetas;
             origMetas.reserve(chunks.size());
             for (int i = 0; i < static_cast<int>(chunks.size()); ++i)
@@ -369,6 +545,7 @@ int main(int argc, char* argv[]) {
                     ++broken;
                 }
             }
+            preShuffleBreaks = broken;
             if (broken == 0)
                 cout << "Pre-shuffle check PASSED: all " << chunks.size()
                      << " consecutive pairs compatible\n";
@@ -381,12 +558,13 @@ int main(int argc, char* argv[]) {
             // (see advanceReservoirFrame). A correct model must never reject a real
             // chunk sequence.
             if (prof0.isLayerIII()) {
-                const int sideInfo0     = sideInfoBytes(prof0);
+                const int sideInfo0     = sideInfoSize(prof0.versionID, prof0.isMono());
                 const int maxReservoir0 = (prof0.versionID == 0b11) ? 511 : 255;
                 int level = 0;
                 int reservoirBreaks = 0;
                 for (int i = 0; i < static_cast<int>(origMetas.size()); ++i) {
-                    if (!advanceReservoirChunk(level, origMetas[i], sideInfo0, maxReservoir0)) {
+                    const ChunkMeta* prev = (i > 0) ? &origMetas[i - 1] : nullptr;
+                    if (!advanceReservoirChunk(level, prev, origMetas[i], chunks[i], sideInfo0, maxReservoir0)) {
                         cout << "  RESERVOIR BREAK at chunk " << i << "\n";
                         ++reservoirBreaks;
                     }
@@ -402,10 +580,27 @@ int main(int argc, char* argv[]) {
     }
     // --- End sanity check ---
 
-    unsigned seed = chrono::system_clock::now().time_since_epoch().count();
+    // Shuffle seed. Deterministic by default (C1) so a given input always reconstructs the
+    // same way and results are reproducible; RP_SEED=<n> pins a specific one, RP_SEED=random
+    // draws from the clock.
+    unsigned seed = 1;
+    bool randomSeed = false;
+    if (const char* s = std::getenv("RP_SEED")) {
+        if (std::string(s) == "random") randomSeed = true;
+        else seed = static_cast<unsigned>(std::strtoul(s, nullptr, 10));
+    }
+    if (randomSeed) seed = static_cast<unsigned>(chrono::system_clock::now().time_since_epoch().count());
+
+    // origIndexOf[i] = original (pre-shuffle) index of the chunk now at position i. Shuffled
+    // with the same seed/engine as `chunks`, so it stays in lock-step and lets us score the
+    // reconstruction against the true order at the end (C2).
+    vector<int> origIndexOf(chunks.size());
+    for (size_t i = 0; i < origIndexOf.size(); ++i) origIndexOf[i] = static_cast<int>(i);
     shuffle(chunks.begin() + 1, chunks.end(), default_random_engine(seed));
+    shuffle(origIndexOf.begin() + 1, origIndexOf.end(), default_random_engine(seed));
 
     cout << "Total chunks: " << chunks.size() << "\n";
+    cout << "Shuffle seed: " << seed << (randomSeed ? " (random)" : " (fixed default; RP_SEED to override)") << "\n";
 
     // Derive stream profile from chunk 0 (pinned, never shuffled)
     StreamProfile profile{};
@@ -413,10 +608,12 @@ int main(int argc, char* argv[]) {
         cerr << "Could not derive stream profile from first chunk\n";
         return 1;
     }
+    if (cbr) { profile.isCBR = true; profile.bitrateKbps = cbrKbps; }
     cout << "Stream profile: versionID=" << static_cast<int>(profile.versionID)
          << " layerID=" << static_cast<int>(profile.layerID)
          << " sampleRate=" << profile.sampleRate
-         << " mono=" << profile.isMono() << "\n";
+         << " mono=" << profile.isMono()
+         << (profile.isCBR ? (" cbr=" + std::to_string(profile.bitrateKbps) + "kbps") : string(" vbr")) << "\n";
 
     // Compute per-chunk metadata
     vector<ChunkMeta> metas;
@@ -432,6 +629,37 @@ int main(int argc, char* argv[]) {
     if (invalidCount > 0)
         cerr << invalidCount << " invalid chunks — reconstruction may fail\n";
 
+    // Boundary granule loudness for the DFS continuity heuristic (see BoundaryGain / dfs()).
+    // Off only if RP_RANK=0 - kept as a switch for the pinned-seed A/B in
+    // PLAN_sideinfo_mainbits.md Step 1.
+    const bool rankByContinuity = [] {
+        const char* v = std::getenv("RP_RANK");
+        return !(v && v[0] == '0');
+    }();
+    // Milestone 2 spectral-continuity term in the ranking (see spectralJunctionCost). RP_SPEC=0
+    // disables it for A/B.
+    g_sampleRate = profile.sampleRate;
+    if (const char* v = std::getenv("RP_SPEC")) g_specRank = (v[0] != '0');
+    if (const char* v = std::getenv("RP_SPEC_SCALE")) g_specScale = atof(v);
+    vector<BoundaryGain> boundaryGain(chunks.size());
+    if (profile.isLayerIII()) {
+        const bool mpeg1 = profile.versionID == 0b11;
+        const bool mono  = profile.isMono();
+        for (size_t i = 0; i < metas.size(); ++i) {
+            if (!metas[i].valid || metas[i].frames.empty()) continue;
+            const FrameSideInfo f0 = parseFrameSideInfoAt(chunks[i], metas[i].frames.front().offset, mpeg1, mono);
+            const FrameSideInfo f1 = parseFrameSideInfoAt(chunks[i], metas[i].frames.back().offset,  mpeg1, mono);
+            if (f0.valid) {
+                boundaryGain[i].ggFirst = f0.gr[0][0].globalGain;
+                boundaryGain[i].bvFirst = f0.gr[0][0].bigValues;
+            }
+            if (f1.valid) {
+                boundaryGain[i].ggLast = f1.gr[f1.numGranules - 1][0].globalGain;
+                boundaryGain[i].bvLast = f1.gr[f1.numGranules - 1][0].bigValues;
+            }
+        }
+    }
+
     // Print full metadata table
     cout << "\nChunk metadata:\n";
     cout << "  idx  headOff  tailOvfl  frames\n";
@@ -445,14 +673,42 @@ int main(int argc, char* argv[]) {
 
     // Build adjacency graph
     auto adj    = buildAdjacency(metas);
+
+    // Arc-consistency prune (A4) - shrinks the branch-point count before the search. It is
+    // only sound when `canFollow` has no false negatives among the true consecutive pairs
+    // (otherwise it can force a wrong edge where a real predecessor is missing from the
+    // graph). Gate on the pre-shuffle diagnostic: skip when it found breaks. RP_AC3=0 forces
+    // off, RP_AC3=1 forces on regardless of the gate.
+    {
+        const char* e = std::getenv("RP_AC3");
+        const bool force = e && e[0] == '1';
+        const bool off   = e && e[0] == '0';
+        const bool safe  = preShuffleBreaks == 0;
+        if (off) {
+            // disabled
+        } else if (!safe && !force) {
+            cout << "Arc consistency: skipped (" << (preShuffleBreaks < 0 ? "no pre-shuffle diagnostic"
+                 : "pre-shuffle found breaks - canFollow is lossy on this file") << "; RP_AC3=1 to force)\n";
+        } else {
+            const long acRemoved = propagateArcConsistency(adj, static_cast<int>(chunks.size()), 0);
+            if (acRemoved < 0)
+                cout << "Arc consistency: contradiction (canFollow is missing a real edge) - graph left as built\n";
+            else
+                cout << "Arc consistency: removed " << acRemoved << " edges\n";
+        }
+    }
+
     auto indeg  = computeInDegree(adj, static_cast<int>(chunks.size()));
     auto outdeg = computeOutDegree(adj, static_cast<int>(chunks.size()));
 
     // Report graph stats
     int forced = 0;
-    for (int i = 0; i < static_cast<int>(chunks.size()); ++i)
+    long edges = 0;
+    for (int i = 0; i < static_cast<int>(chunks.size()); ++i) {
         if (outdeg[i] == 1) ++forced;
-    cout << "\nAdjacency graph: "
+        edges += static_cast<long>(adj[i].size());
+    }
+    cout << "\nAdjacency graph: " << edges << " edges, "
          << forced << "/" << chunks.size()
          << " chunks have exactly one valid successor\n";
 
@@ -475,46 +731,174 @@ int main(int argc, char* argv[]) {
     // Reservoir parameters for this stream, computed once up front and threaded through
     // every DFS call rather than recomputed per edge.
     const bool isLayerIII   = profile.isLayerIII();
-    const int  sideInfo     = sideInfoBytes(profile);
+    const int  sideInfo     = sideInfoSize(profile.versionID, profile.isMono());
     const int  maxReservoir = (profile.versionID == 0b11) ? 511 : 255;
 
-    DfsState state;
-    state.used.resize(supernodes.size(), false);
-    state.order.push_back(startSuper);
-    state.used[startSuper] = true;
-    state.reservoirLevel = 0;
-
-    // Prime the reservoir with chunk 0's own frames before the DFS explores any
-    // successor - chunk 0 is pinned, so it is always the first thing placed.
+    // Primed starting state: chunk 0's supernode placed, reservoir advanced through its
+    // own frames. Copied (cheap) per beam-schedule attempt below.
+    DfsState primed;
+    primed.used.assign(supernodes.size(), false);
+    primed.order.push_back(startSuper);
+    primed.used[startSuper] = true;
+    primed.reservoirLevel = 0;
     if (isLayerIII) {
+        const ChunkMeta* prev = nullptr; // chunk 0 is always first placed - no predecessor
         for (int ci : supernodes[startSuper].chunks) {
-            if (!advanceReservoirChunk(state.reservoirLevel, metas[ci], sideInfo, maxReservoir)) {
+            if (!advanceReservoirChunk(primed.reservoirLevel, prev, metas[ci], chunks[ci], sideInfo, maxReservoir)) {
                 cerr << "Reservoir check failed on the pinned starting chunk - "
                         "mainDataBegin metadata is likely wrong for chunk 0\n";
                 return 1;
             }
+            prev = &metas[ci];
         }
     }
 
-    vector<int> result;
-    cout << "Starting DFS over " << supernodes.size() << " supernodes...\n";
+    if (const char* s = std::getenv("RP_MAX_NODES")) g_maxNodes = std::strtoull(s, nullptr, 10);
+    if (const char* s = std::getenv("RP_PROGRESS")) {
+        const uint64_t v = std::strtoull(s, nullptr, 10);
+        if (v) g_progressEvery = v;
+    }
+    if (const char* s = std::getenv("RP_BESTOF")) g_bestOf = (s[0] != '0'); // OFF by default - see g_bestOf
 
-    if (dfs(state, supernodes, superAdj, metas, sideInfo, maxReservoir, isLayerIII, result)) {
-        cout << "Reconstruction found\n";
+    // Beam schedule. RP_BEAM=K forces a single fixed-width attempt. Otherwise, for graphs
+    // small enough that an exhaustive DFS is known to terminate we just run it unlimited;
+    // for larger ones we iteratively broaden (near-greedy first, widening on dead-end) so a
+    // heuristic-guided answer comes back even when the exhaustive search never would.
+    // RP_BROADEN=0 / =1 overrides the size heuristic.
+    vector<int> beamSchedule;
+    bool broaden = false;
+    if (const char* s = std::getenv("RP_BEAM")) {
+        beamSchedule = { std::max(0, atoi(s)) };
+    } else {
+        broaden = supernodes.size() > 120;
+        if (const char* b = std::getenv("RP_BROADEN")) broaden = (b[0] != '0');
+        beamSchedule = broaden ? vector<int>{1, 2, 3, 4, 6, 9, 0} : vector<int>{0};
+    }
+
+    // Wall-clock budget for the whole search. Needed whenever the search is not a plain
+    // first-valid exhaustive DFS: broadening's wider attempts and best-of both keep going
+    // past the first complete ordering and would otherwise not terminate on large graphs.
+    // RP_TIME_BUDGET (seconds) overrides; RP_MAX_NODES (node cap) also bounds it.
+    if (g_maxNodes == 0 && (broaden || g_bestOf)) {
+        double budget = broaden ? 45.0 : 30.0;
+        if (const char* t = std::getenv("RP_TIME_BUDGET")) budget = atof(t);
+        g_deadline = chrono::steady_clock::now() +
+                     chrono::duration_cast<chrono::steady_clock::duration>(chrono::duration<double>(budget));
+        g_haveDeadline = true;
+    } else if (const char* t = std::getenv("RP_TIME_BUDGET")) {
+        g_deadline = chrono::steady_clock::now() +
+                     chrono::duration_cast<chrono::steady_clock::duration>(chrono::duration<double>(atof(t)));
+        g_haveDeadline = true;
+    }
+
+    // Auto-calibrate the spectral term: sample random (prev, a, b) triples, take the median
+    // raw L2 distance, and scale so a median junction contributes SPEC_TARGET (~a gentle
+    // nudge, well below a typical |Δglobal_gain|). Removes the magic constant and adapts per
+    // file. RP_SPEC_SCALE overrides the result.
+    if (g_specRank && isLayerIII && !std::getenv("RP_SPEC_SCALE")) {
+        vector<int> validChunks;
+        for (int i = 0; i < static_cast<int>(chunks.size()); ++i)
+            if (metas[i].valid && !metas[i].frames.empty()) validChunks.push_back(i);
+        if (validChunks.size() >= 8) {
+            const double savedScale = g_specScale;
+            g_specScale = 1.0; // raw L2
+            std::mt19937 rc(12345);
+            std::uniform_int_distribution<int> pc(0, static_cast<int>(validChunks.size()) - 1);
+            vector<double> d;
+            for (int t = 0; t < 3000 && d.size() < 800; ++t) {
+                const int p = validChunks[pc(rc)], a = validChunks[pc(rc)], b = validChunks[pc(rc)];
+                if (a == b || a == p) continue;
+                const double v = spectralJunctionCost(metas, p, a, b);
+                if (v > 0) d.push_back(v);
+            }
+            if (d.size() >= 30) {
+                std::nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
+                const double med = d[d.size() / 2];
+                constexpr double SPEC_TARGET = 3.0;
+                g_specScale = med > 1e-6 ? SPEC_TARGET / med : savedScale;
+            } else {
+                g_specScale = savedScale;
+            }
+            g_specHead.clear();
+            g_specTail.clear();
+            cout << "Spectral term: calibrated scale = " << fixed << setprecision(2) << g_specScale
+                 << " (" << d.size() << " samples)\n";
+        }
+    }
+
+    cout << "Starting search over " << supernodes.size() << " supernodes"
+         << " (continuity ranking " << (rankByContinuity ? "ON" : "OFF")
+         << ", " << (g_bestOf ? "best-of" : "first-valid")
+         << (g_specRank && isLayerIII ? ", +spectral" : "") << ")\n";
+
+    g_bestScore = LLONG_MAX;
+    g_bestOrder.clear();
+    vector<int> result;
+    bool found = false;
+    for (size_t attempt = 0; attempt < beamSchedule.size(); ++attempt) {
+        if (g_haveDeadline && chrono::steady_clock::now() >= g_deadline) {
+            cout << "  (time budget spent - skipping remaining beam widths)\n";
+            break;
+        }
+        g_beamK   = beamSchedule[attempt];
+        counter   = 0;
+        g_aborted = false;
+        DfsState state = primed;
+        vector<int> res;
+        g_dfsStart = chrono::steady_clock::now();
+
+        cout << "  beam=" << (g_beamK ? std::to_string(g_beamK) : string("unlimited")) << " ... " << flush;
+        const bool hit = dfs(state, supernodes, superAdj, metas, boundaryGain, rankByContinuity,
+                             sideInfo, maxReservoir, isLayerIII, res);
+
+        if (g_bestOf) {
+            found = !g_bestOrder.empty();
+            cout << counter << " nodes, " << fixed << setprecision(2) << dfsElapsedSec() << "s";
+            if (found) cout << ", best score=" << g_bestScore;
+            else       cout << (g_aborted ? " (stopped: budget)" : " (exhausted, no ordering)");
+            cout << "\n" << flush;
+            if (found && g_bestScore == 0) break;       // perfect continuity - cannot improve
+        } else {
+            if (hit) { result = res; found = true; }
+            cout << counter << " nodes, " << fixed << setprecision(2) << dfsElapsedSec() << "s"
+                 << (found ? " -> FOUND" : (g_aborted ? " (stopped: budget)" : " (exhausted, no ordering)"))
+                 << "\n" << flush;
+            if (found) break;
+        }
+    }
+    if (g_bestOf && found) result = g_bestOrder;
+
+    if (found) {
+        cout << "Reconstruction found" << (g_bestOf ? (" (score " + std::to_string(g_bestScore) + ")") : "") << "\n";
         ofstream out("output.mp3", ios::binary | ios::trunc);
         if (!out) { cerr << "Cannot open output.mp3\n"; return 1; }
 
+        vector<int> reconOrig; // original index of each chunk, in reconstructed order
+        reconOrig.reserve(chunks.size());
         size_t total = 0;
         for (int si : result)
             for (int ci : supernodes[si].chunks) {
                 out.write(reinterpret_cast<const char*>(chunks[ci].data()),
                           static_cast<long>(chunks[ci].size()));
                 total += chunks[ci].size();
+                reconOrig.push_back(origIndexOf[ci]);
             }
-
         cout << "Written " << total << " bytes to output.mp3\n";
+
+        // C2: score the reconstruction against the true (pre-shuffle) order.
+        int exactPos = 0;
+        for (size_t i = 0; i < reconOrig.size(); ++i)
+            if (reconOrig[i] == static_cast<int>(i)) ++exactPos;
+        const bool exactMatch = (reconOrig.size() == chunks.size()) &&
+                                std::is_sorted(reconOrig.begin(), reconOrig.end());
+        cout << "Reconstruction vs source: " << exactPos << "/" << reconOrig.size()
+             << " chunks in original position ("
+             << fixed << setprecision(1) << (100.0 * exactPos / std::max<size_t>(1, reconOrig.size())) << "%)"
+             << (exactMatch ? "  --  EXACT (output.mp3 is byte-identical to the source stream)" : "")
+             << "\n";
     } else {
-        cout << "Failed to reconstruct.\n";
+        cout << "Failed to reconstruct (no complete ordering found"
+             << (g_aborted ? " within the search budget" : "") << ").\n";
     }
 
     return 0;

@@ -19,10 +19,6 @@ using namespace std;
         return frames.size();
     }
 
-    FrameData Mp3FrameScanner::getFrame(const size_t index) {
-        return frame_data.at(index);
-    }
-
     vector<vector<uint8_t>> Mp3FrameScanner::getRawChunks() const {
         vector<vector<uint8_t>> chunks;
         chunks.reserve(frame_data.size());
@@ -76,20 +72,15 @@ bool Mp3FrameScanner::isValidHeader(uint32_t headerRaw) {
     void Mp3FrameScanner::scanFrames() {
         size_t i = skipID3();
         while (i + 4 <= data.size()) {
-            const uint32_t headerRaw =
-                (static_cast<uint32_t>(data[i]) << 24) |
-                (static_cast<uint32_t>(data[i + 1]) << 16) |
-                (static_cast<uint32_t>(data[i + 2]) << 8) |
-                static_cast<uint32_t>(data[i + 3]);
-
+            const uint32_t headerRaw = packHeaderBytes(&data[i]);
 
             if (!isValidHeader(headerRaw)) {
                 ++i;
                 continue;
             }
-            int return_value;
-            Header header(headerRaw, return_value);
-            if (return_value != 0) {
+            bool ok;
+            Header header(headerRaw, ok);
+            if (!ok) {
                 ++i;
                 continue;
             }
@@ -104,12 +95,9 @@ bool Mp3FrameScanner::isValidHeader(uint32_t headerRaw) {
             if (i + frameLength > data.size()) {
                 break;
             }
-            
+
             frames.push_back({i, frameLength});
-            frame_data.push_back({header.getMpegVersion(), header.getLayer(),
-                                        header.hasCRC(), header.getBitrate(),
-                header.getSampleRate(), header.getChannelMode(),
-                std::vector<uint8_t>(data.begin() + i, data.begin() + i + frameLength)});
+            frame_data.push_back({std::vector<uint8_t>(data.begin() + i, data.begin() + i + frameLength)});
 
             i += frameLength; // jump to next frame
         }
