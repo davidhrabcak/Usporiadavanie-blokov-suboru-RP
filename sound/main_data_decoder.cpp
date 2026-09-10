@@ -259,4 +259,63 @@ FrameSpectra decodeFrameSpectra(const std::vector<uint8_t>& buf, int mainDataBit
     return fs;
 }
 
+// A chunk's own main-data stream: the leading headOffset bytes (tail of the previous chunk's
+// split frame - main data) followed by every complete frame's payload (bytes after its 4-byte
+// header + side info). `payMdStart[k]` = md offset of frame k's payload.
+static std::vector<uint8_t> buildChunkMainData(const std::vector<uint8_t>& bytes, const ChunkMeta& m,
+                                               int sideSz, std::vector<int>& payMdStart) {
+    payMdStart.clear();
+    std::vector<uint8_t> md(bytes.begin(),
+                            bytes.begin() + std::min<int>(std::max(0, m.headOffset), (int)bytes.size()));
+    for (const auto& fr : m.frames) {
+        payMdStart.push_back((int)md.size());
+        const int ps = fr.offset + 4 + sideSz;
+        const int pe = fr.offset + fr.length;
+        if (ps >= 0 && pe <= (int)bytes.size() && ps < pe)
+            md.insert(md.end(), bytes.begin() + ps, bytes.begin() + pe);
+    }
+    return md;
+}
+
+FrameSpectra decodeChunkFrame(const ChunkMeta* prevMeta, const std::vector<uint8_t>& prevBytes,
+                              const std::vector<uint8_t>& chunk, const ChunkMeta& chunkMeta,
+                              int frameOffset, int sampleRate) {
+    FrameSpectra fs;
+    if (!chunkMeta.valid || chunkMeta.frames.empty()) return fs;
+
+    const bool mpeg1 = chunkMeta.profile.versionID == 0b11;
+    const bool mono  = chunkMeta.profile.isMono();
+    const int  sideSz = sideInfoSize(chunkMeta.profile.versionID, mono);
+
+    std::vector<int> payMdStart;
+    std::vector<uint8_t> chunkMd = buildChunkMainData(chunk, chunkMeta, sideSz, payMdStart);
+
+    int frameIdx = -1;
+    for (size_t k = 0; k < chunkMeta.frames.size(); ++k)
+        if (chunkMeta.frames[k].offset == frameOffset) { frameIdx = (int)k; break; }
+    if (frameIdx < 0) return fs;
+
+    const FrameSideInfo fsi = parseFrameSideInfoAt(chunk, frameOffset, mpeg1, mono);
+    if (!fsi.valid) return fs;
+
+    // Prepend the predecessor's main-data stream so the reservoir back-pointer resolves.
+    // prevMd ends exactly where chunkMd begins (chunkMd's leading headOffset bytes are the
+    // continuation of prevMd's trailing split frame), so the concatenation is contiguous.
+    std::vector<uint8_t> fullMd;
+    int prevLen = 0;
+    if (prevMeta && prevMeta->valid) {
+        std::vector<int> pStarts;
+        std::vector<uint8_t> prevMd = buildChunkMainData(prevBytes, *prevMeta, sideSz, pStarts);
+        prevLen = (int)prevMd.size();
+        fullMd = std::move(prevMd);
+    }
+    fullMd.insert(fullMd.end(), chunkMd.begin(), chunkMd.end());
+
+    const int mdb = (int)fsi.mainDataBegin;
+    const int startByte = prevLen + payMdStart[frameIdx] - mdb;
+    if (startByte < 0) return fs; // reservoir reaches back past the predecessor chunk
+
+    return decodeFrameSpectra(fullMd, startByte * 8, fsi, sampleRate);
+}
+
 } // namespace Mp3MainData

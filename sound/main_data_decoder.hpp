@@ -64,6 +64,17 @@ struct FrameSpectra {
 FrameSpectra decodeFrameSpectra(const std::vector<uint8_t>& buf, int mainDataBitStart,
                                 const FrameSideInfo& si, int sampleRate);
 
+// Decode one complete frame of `chunk` - the frame whose header is at chunk byte offset
+// `frameOffset` (must be a complete frame in `chunkMeta.frames`) - assembling its main data
+// from the predecessor chunk's main-data stream (headers/side-info removed) followed by
+// `chunk`'s. The Layer III bit reservoir routinely reaches into the previous chunk, so
+// `prevMeta`/`prevBytes` are normally required; pass prevMeta = nullptr when `chunk` is first.
+// Returns .valid = false when the reservoir reaches back past the predecessor, or the frame is
+// window-switching.
+FrameSpectra decodeChunkFrame(const ChunkMeta* prevMeta, const std::vector<uint8_t>& prevBytes,
+                              const std::vector<uint8_t>& chunk, const ChunkMeta& chunkMeta,
+                              int frameOffset, int sampleRate);
+
 } // namespace Mp3MainData
 
 #endif

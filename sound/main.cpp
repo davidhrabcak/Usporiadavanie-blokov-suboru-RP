@@ -10,9 +10,11 @@
 #include <fstream>
 #include <cstdlib>
 #include <climits>
+#include <unordered_map>
 #include "frame_scanner.hpp"
 #include "chunk_meta.hpp"
 #include "adjacency.hpp"
+#include "main_data_decoder.hpp"
 
 #define CHUNK_SIZE 1024
 #define COUNTER_FREQUENCY 9999999
@@ -263,6 +265,52 @@ static int junctionCost(const vector<BoundaryGain>& bg, const int a, const int b
     return cost;
 }
 
+// --- Milestone 2: spectral-continuity term added to the candidate ranking (not to the
+// best-of score / branch-and-bound). Decodes the trailing granule of `cur`'s last frame and
+// the leading granule of a candidate's first frame - cross-chunk main-data assembly, so the
+// trailing spectrum needs `cur`'s predecessor and the leading one needs `cur` itself.
+// Memoised by (predecessor, chunk); distinct keys ~= edge count. RP_SPEC=0 disables.
+// The probe (sideinfo_probe Measurement D) found z(global_gain) + 0.5*z(spectralL2) a strong
+// net win; here the raw 12-band-energy L2 distance is scaled by g_specScale, auto-calibrated
+// per file at startup so a median junction contributes a gentle ~3 (RP_SPEC_SCALE overrides).
+static bool   g_specRank   = true;
+static int    g_sampleRate = 44100;
+static double g_specScale  = 10.0;
+static std::unordered_map<long long, Mp3MainData::GranuleSpectrum> g_specHead, g_specTail;
+
+static const Mp3MainData::GranuleSpectrum* memoSpec(bool head, const vector<ChunkMeta>& metas,
+                                                    int prev, int chunk) {
+    if (chunk < 0 || !metas[chunk].valid || metas[chunk].frames.empty()) return nullptr;
+    auto& memo = head ? g_specHead : g_specTail;
+    const long long key = ((long long)(prev + 1) << 20) | (unsigned)chunk;
+    auto it = memo.find(key);
+    if (it == memo.end()) {
+        static const vector<uint8_t> empty;
+        const vector<uint8_t>& pv = (prev >= 0) ? chunks[prev] : empty;
+        const ChunkMeta* pm = (prev >= 0) ? &metas[prev] : nullptr;
+        const int off = head ? metas[chunk].frames.front().offset : metas[chunk].frames.back().offset;
+        const Mp3MainData::FrameSpectra fsp =
+            Mp3MainData::decodeChunkFrame(pm, pv, chunks[chunk], metas[chunk], off, g_sampleRate);
+        const bool mpeg1 = metas[chunk].profile.versionID == 0b11;
+        Mp3MainData::GranuleSpectrum gs; // gs.valid == false by default
+        if (fsp.valid) gs = head ? fsp.gr[0][0] : fsp.gr[mpeg1 ? 1 : 0][0];
+        it = memo.emplace(key, gs).first;
+    }
+    return it->second.valid ? &it->second : nullptr;
+}
+
+static double spectralJunctionCost(const vector<ChunkMeta>& metas, int curPrev, int curTail, int candHead) {
+    const Mp3MainData::GranuleSpectrum* A = memoSpec(false, metas, curPrev, curTail);
+    const Mp3MainData::GranuleSpectrum* B = memoSpec(true, metas, curTail, candHead);
+    if (!A || !B) return 0.0; // no spectrum on one side -> spectral term contributes nothing
+    double s = 0;
+    for (int q = 0; q < Mp3MainData::NBANDS; ++q) {
+        const double d = A->bandEnergy[q] - B->bandEnergy[q];
+        s += d * d;
+    }
+    return g_specScale * std::sqrt(s);
+}
+
 // DFS instrumentation / bounding. `counter` = number of supernode placements tried.
 // RP_MAX_NODES caps it (0 = unlimited) so a bounded A/B run stops cleanly instead of being
 // SIGTERM'd (which loses buffered stdout); RP_PROGRESS overrides how often a progress line
@@ -352,14 +400,28 @@ bool dfs(DfsState& state,
     const int cur = state.order.back();
     const int curTailChunk = supernodes[cur].chunks.back();
 
-    // Try structurally-legal successors in order of granule-loudness continuity (smallest
-    // junctionCost first). Pure exploration ordering - every candidate is still tried
-    // (subject to the beam cap), and the reservoir check below is unchanged.
+    // Chunk immediately preceding curTailChunk in the current path (for the trailing spectrum's
+    // cross-chunk main-data assembly). -1 when cur is the pinned start.
+    int curPrevChunk = -1;
+    if (supernodes[cur].chunks.size() >= 2)
+        curPrevChunk = supernodes[cur].chunks[supernodes[cur].chunks.size() - 2];
+    else if (state.order.size() >= 2)
+        curPrevChunk = supernodes[state.order[state.order.size() - 2]].chunks.back();
+
+    // Try structurally-legal successors in order of junction continuity (smallest cost first).
+    // Pure exploration ordering - every candidate is still tried (subject to the beam cap),
+    // and the reservoir check below is unchanged.
     vector<int> candidates(superAdj[cur].begin(), superAdj[cur].end());
     if (rankByContinuity && candidates.size() > 1) {
+        const bool useSpec = g_specRank && isLayerIII;
         stable_sort(candidates.begin(), candidates.end(), [&](const int x, const int y) {
-            return junctionCost(boundaryGain, curTailChunk, supernodes[x].chunks.front())
-                 < junctionCost(boundaryGain, curTailChunk, supernodes[y].chunks.front());
+            double cx = junctionCost(boundaryGain, curTailChunk, supernodes[x].chunks.front());
+            double cy = junctionCost(boundaryGain, curTailChunk, supernodes[y].chunks.front());
+            if (useSpec) {
+                cx += spectralJunctionCost(metas, curPrevChunk, curTailChunk, supernodes[x].chunks.front());
+                cy += spectralJunctionCost(metas, curPrevChunk, curTailChunk, supernodes[y].chunks.front());
+            }
+            return cx < cy;
         });
     }
 
@@ -574,6 +636,11 @@ int main(int argc, char* argv[]) {
         const char* v = std::getenv("RP_RANK");
         return !(v && v[0] == '0');
     }();
+    // Milestone 2 spectral-continuity term in the ranking (see spectralJunctionCost). RP_SPEC=0
+    // disables it for A/B.
+    g_sampleRate = profile.sampleRate;
+    if (const char* v = std::getenv("RP_SPEC")) g_specRank = (v[0] != '0');
+    if (const char* v = std::getenv("RP_SPEC_SCALE")) g_specScale = atof(v);
     vector<BoundaryGain> boundaryGain(chunks.size());
     if (profile.isLayerIII()) {
         const bool mpeg1 = profile.versionID == 0b11;
@@ -724,9 +791,45 @@ int main(int argc, char* argv[]) {
         g_haveDeadline = true;
     }
 
+    // Auto-calibrate the spectral term: sample random (prev, a, b) triples, take the median
+    // raw L2 distance, and scale so a median junction contributes SPEC_TARGET (~a gentle
+    // nudge, well below a typical |Δglobal_gain|). Removes the magic constant and adapts per
+    // file. RP_SPEC_SCALE overrides the result.
+    if (g_specRank && isLayerIII && !std::getenv("RP_SPEC_SCALE")) {
+        vector<int> validChunks;
+        for (int i = 0; i < static_cast<int>(chunks.size()); ++i)
+            if (metas[i].valid && !metas[i].frames.empty()) validChunks.push_back(i);
+        if (validChunks.size() >= 8) {
+            const double savedScale = g_specScale;
+            g_specScale = 1.0; // raw L2
+            std::mt19937 rc(12345);
+            std::uniform_int_distribution<int> pc(0, static_cast<int>(validChunks.size()) - 1);
+            vector<double> d;
+            for (int t = 0; t < 3000 && d.size() < 800; ++t) {
+                const int p = validChunks[pc(rc)], a = validChunks[pc(rc)], b = validChunks[pc(rc)];
+                if (a == b || a == p) continue;
+                const double v = spectralJunctionCost(metas, p, a, b);
+                if (v > 0) d.push_back(v);
+            }
+            if (d.size() >= 30) {
+                std::nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
+                const double med = d[d.size() / 2];
+                constexpr double SPEC_TARGET = 3.0;
+                g_specScale = med > 1e-6 ? SPEC_TARGET / med : savedScale;
+            } else {
+                g_specScale = savedScale;
+            }
+            g_specHead.clear();
+            g_specTail.clear();
+            cout << "Spectral term: calibrated scale = " << fixed << setprecision(2) << g_specScale
+                 << " (" << d.size() << " samples)\n";
+        }
+    }
+
     cout << "Starting search over " << supernodes.size() << " supernodes"
          << " (continuity ranking " << (rankByContinuity ? "ON" : "OFF")
-         << ", " << (g_bestOf ? "best-of" : "first-valid") << ")\n";
+         << ", " << (g_bestOf ? "best-of" : "first-valid")
+         << (g_specRank && isLayerIII ? ", +spectral" : "") << ")\n";
 
     g_bestScore = LLONG_MAX;
     g_bestOrder.clear();
