@@ -213,35 +213,43 @@ mean rank.
       +1-6pp only). Shipped the robust distillation - `junctionCost` = `|Δglobal_gain| +
       |Δbig_values|/32` - probe rank-1 +1-3pp everywhere, no measurable DFS-accuracy
       change on the observable fixtures. See `CLAUDE.md` item 7's 2026-09-09 update.
-- [ ] 14. **Per-edge signal work is exhausted for now** (M1.5 global_gain ranking, A2,
-      A3, A4 all landed; item-3/reservoir already done). Remaining paths for the
-      large-VBR case, in order: **Milestone 2 partial spectral decode** (steps 3-7
-      below - the strongest possible per-edge signal); then if that also doesn't get
-      there, **the search itself** must change - true beam/A* over partial orderings
-      that emits a best partial path, or Hungarian matching. Small/medium files are
-      already solved (`global_gain`+A2 ranking, first-valid, A4 prune, deterministic).
+- [x] 14. **Milestone 2 (partial spectral decode) landed - see steps 3-11 below.**
+      First fixture-level accuracy win: `sample-3s` now byte-exact on every seed.
+      Decoder bit-exact on ~46k granules. Neutral on the test7 family; the hard VBR
+      fixtures still find no complete ordering. Per-edge signal work is now complete
+      (M1.5 global_gain + A2 + A3 + A4 + reservoir + M2 spectral all in).
+- [ ] 15. **The large-VBR case now needs the search to change, not the signal.**
+      Options: true beam/A* over *partial* orderings that emits a best partial path
+      (`rp` currently needs a complete ordering or outputs nothing); Hungarian /
+      min-cost perfect matching (sidesteps the exponential DFS); or strengthening M2
+      on dense content (requantised energy + short-block support).
 
-**Gate for Milestone 2 steps 3-7 below**: only build the full Huffman +
-requantize + spectral-continuity path if M1.5's `global_gain` heuristic proves
-insufficient on the hard fixtures (step 5). On the evidence so far it may
-already be enough for small/medium files.
-- [ ] 3. `decodeScaleFactors(...)` (block-type/`scalefac_compress`-aware).
-- [ ] 4. `decodeHuffmanRegions(...)` (big_values + count1, stop at
-      `part2_3_length` bit boundary).
-- [ ] 5. `requantize(...)` -> frequency-domain magnitudes (no MDCT/IMDCT
-      needed).
-- [ ] 6. `main.cpp`: cross-chunk main-data byte assembly helper (walks
-      backward through already-placed DFS chunks using `mainDataBegin`).
-- [ ] 7. `computeGranuleEnergyProfile(coeffs)` + similarity function
-      (cosine/L2) between boundary granules.
-- [ ] 8. Wire into `dfs()`: sort `superAdj[cur]` candidates by continuity
-      score (ranking heuristic only, never a hard reject).
-- [ ] 9. Validate: cross-check decode against minimp3 on sample frames;
-      confirm true-order adjacent granules score higher than random pairs
-      on all 5 fixtures.
-- [ ] 10. Measure: pinned-seed A/B, DFS nodes/wall-clock, ranking on/off, on
-      `test7_shorter.mp3`. Keep only if it demonstrably helps.
-- [ ] 11. Update `CLAUDE.md` with dated findings (either outcome).
+### Milestone 2 steps (done 2026-09-10)
+
+- [x] 3-5. Scalefactor **bit-length** skipping (`scalefac_compress` -> slen1/slen2,
+      scfsi group reuse for granule 1) + big_values pair + count1 quad Huffman decode
+      in `main_data_decoder.cpp`. No requantisation - the raw |Huffman value| per band
+      is enough for a continuity profile, and it dodges `g_pow43`/scalefactor-value
+      decode. Correctness gate met without minimp3: `bitsConsumed == part2_3_length`
+      exactly on ~46k long-block granules across all fixtures. Window-switching
+      (short/start/stop) blocks skipped (~8%). Silent granules (`part2_3_length == 0`)
+      -> valid zero spectrum.
+- [x] 6. `decodeChunkFrame` - cross-chunk assembly: `prevChunkMainData ++
+      chunkMainData` (headers stripped) so the reservoir back-pointer resolves.
+      Chunk-local-only assembly was tried first and is a bust (1-8% coverage).
+- [x] 7. `GranuleSpectrum.bandEnergy[12]` (L1-normalised) + L2 distance between
+      boundary granules.
+- [x] 8. Wired into `dfs()` candidate sort (`spectralJunctionCost`, memoised by
+      (predecessor, chunk); ranking only, never a reject). Auto-calibrated weight.
+- [x] 9. Validate: `sideinfo_probe` Measurement D. Decoder self-consistency 100%.
+      Signal: L2-distance AUC 0.77-0.83 on sample-3s/CBR/ci_sanity (> global_gain),
+      0.60-0.65 on the test7 family. `z(gg) + 0.5*z(spectralL2)` a strong net win in
+      the probe. (Cross-check against minimp3 not done - no vendored copy - but the
+      bit-exact `part2_3_length` match on 46k granules is a strong substitute.)
+- [x] 10. A/B: `sample-3s` 100% on all 7 seeds (was seed-dependent 76.5/100).
+      `test7_shorter` unchanged (still no complete ordering); per-edge decode +~10%
+      wall-clock via memoisation.
+- [x] 11. `CLAUDE.md` updated - item 7 2026-09-10, file table, env table.
 
 ---
 

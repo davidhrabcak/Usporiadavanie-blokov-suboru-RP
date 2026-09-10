@@ -16,7 +16,8 @@ Chunk 0 is always pinned (never shuffled); it serves as the anchor for stream pr
 | `frame_scanner.cpp / .hpp` | Scans a full MP3 file byte-by-byte, collecting frame positions and metadata. Also exposes `isValidHeader()` used everywhere. |
 | `chunk_meta.cpp / .hpp` | Core per-chunk analysis. `computeChunkMeta()` scans a 1024-byte chunk to find the best frame alignment and populate `ChunkMeta`. `deriveProfile()` extracts the stream's invariant parameters from the first valid frame. |
 | `adjacency.cpp / .hpp` | Builds the directed adjacency graph over chunks. `canFollow(a, b)` decides whether chunk b can legally follow chunk a. `buildAdjacency()` constructs the full graph using a `byFrameStart` index for O(n) Case-1 lookups. |
-| `huffman_tables.cpp / .hpp` | Static Layer III Huffman code tables (big_values tables 0-31 + count1 quad tables A/B), sourced verbatim from [minimp3](https://github.com/lieff/minimp3) (CC0) rather than hand-transcribed - see the header for the (non-obvious, compact self-describing VLC) leaf encoding these tables use. Data only so far - not yet wired into a decoder; see `PLAN_sideinfo_mainbits.md` Milestone 2. |
+| `huffman_tables.cpp / .hpp` | Static Layer III Huffman code tables (big_values tables 0-31 + count1 quad tables A/B), sourced verbatim from [minimp3](https://github.com/lieff/minimp3) (CC0) rather than hand-transcribed - see the header for the (non-obvious, compact self-describing VLC) leaf encoding these tables use. Consumed by `main_data_decoder`. |
+| `main_data_decoder.cpp / .hpp` | Milestone 2 partial Layer III main-data decode (MPEG1 only): MSB-first bit reader, big_values pair + count1 quad Huffman decode against `huffman_tables`, scalefactor-bit skipping, region0/1 boundary mapping, and a coarse 12-band per-granule occupancy/energy profile. No IMDCT / requantisation / synthesis. Window-switching (short/start/stop) blocks are out of scope. `decodeChunkFrame` does the cross-chunk main-data assembly the DFS needs. Validated bit-exact (`bitsConsumed == part2_3_length`) on ~46k long-block granules across all fixtures. |
 | `main.cpp` | Orchestrates the pipeline: load → profile → shuffle → per-chunk metadata → adjacency graph → supernode collapse → DFS reconstruction → write output. |
 
 ---
@@ -182,6 +183,10 @@ Wired into `dfs()` (`main.cpp`): a per-chunk `BoundaryGain` (leading/trailing gr
 
 **Decision this leaves open** (PLAN M1.5 step 7): near-exhaustive DFS over the current supernode graph is capped for large VBR *regardless of candidate ordering or beam width*. The two remaining directions, both non-trivial: (a) Milestone 2's partial spectral decode for a much stronger junction signal; (b) redesign the search as true beam/A* over *partial* orderings that emits the best partial path as `output.mp3` (the current beam-limited DFS still requires a *complete* 202/512/658-supernode ordering or it outputs nothing). A cheaper orthogonal experiment first: constraint propagation (AC-3) / stronger forced-chain collapse to shrink the ~120-330 branch points before any search. See the recommended order at the top of the TODO section.
 
+**2026-09-10 update - Milestone 2 (partial spectral decode) landed and it is the first fixture-level accuracy win from the ranking work.** `main_data_decoder.{hpp,cpp}`: an MPEG1 Layer III big_values + count1 Huffman decoder over `huffman_tables`, scalefactor-bit skipping, region0/1 mapping, and a 12-band per-granule occupancy/energy profile - no IMDCT/requantise/synthesis. Validated **bit-exact** (`bitsConsumed == part2_3_length`) on ~46k long-block granules across all 5 fixtures + ci_sanity (silent granules, `part2_3_length == 0`, handled as a valid zero spectrum); ~8% of blocks are window-switching and skipped. `sideinfo_probe` Measurement D: the 12-band-energy L2 distance at a junction has AUC 0.77-0.83 on sample-3s/CBR/ci_sanity (beating `global_gain`) but only 0.60-0.65 on the test7 family (one dense pop song). `z(global_gain) + 0.5*z(spectralL2)` is a strong net win in the probe.
+
+**Wired into `dfs()`**: candidate sort key gains `g_specScale * L2(trailingGranuleSpectrum(cur), leadingGranuleSpectrum(candidate))`, using `decodeChunkFrame` for the cross-chunk main-data assembly (chunk-local-only assembly is a bust - 1-8% coverage). Memoised by (predecessor, chunk), so total decodes ~= edge count and per-edge cost is ~10% wall-clock on `test7_shorter`. Auto-calibrated weight (median random-junction L2 -> ~3 contribution). **`sample-3s` now reconstructs byte-exact on all 7 seeds tried** (was 100/76.5/100/76.5/100/76.5/76.5 with `global_gain`+bv alone; A2 didn't move it). `ci_sanity` still 100%. The hard VBR fixtures still don't complete (spectral ~neutral there, per the probe) but calibrate and terminate cleanly. Caveat: the raw-L2 + raw-`junctionCost` mix has a sharp scale cliff (works ~8-15, catastrophic past ~18); auto-calibration keeps the shipped scale inside it, but a proper impl would z-score both terms.
+
 **2026-09-09 update - A3 (bitrate), A4 (arc-consistency), A2 (multi-feature score) landed; none crack this, A4 is the one structural win.** A3: VBR junction bitrate continuity is measured noise (AUC 0.55), not wired; CBR-only bitrate header filter removes ~0.3% of edges. A4 (`propagateArcConsistency`): `test7_shorter` 202→164 supernodes (−19%), `test7_short` 512→446 (−13%), safely gated on the pre-shuffle diagnostic - still no complete ordering (164 is still exponential) but composes with a future per-edge signal. A2 (`sideinfo_probe` Measurement C): full logistic fit over 11 junction features overfits (secondary weights sign-flip across fixtures); shipped only the robust part - `junctionCost` is now `|Δglobal_gain| + |Δbig_values|/32`, which lifts probe rank-1 ~1-3pp on every fixture but doesn't move DFS accuracy on the observable ones (sample-3s seeds still 76.5%/100%). **Per-edge signal work is now exhausted for the near term - the large-VBR case needs Milestone 2's spectral decode, or a different search (beam/A*/Hungarian), not another metadata feature.**
 
 **2026-09-07 update 2 - "best-of" search (keep exploring, minimise summed junction cost) tried; it is *worse*, and the reason is informative.** `main.cpp` `RP_BESTOF=1`: don't stop at the first complete ordering, keep the lowest-scoring one where score = summed `junctionCost` (= `|Δ global_gain|`, unknown junctions cost a flat 384) over every supernode boundary, with branch-and-bound on the partial score. Result on `sample-3s` (5 seeds): best-of converges to one score-194 ordering with **only 25% of chunks in place**, vs **76-100% for first-valid** (and 100% for seeds 1/3/777). The summed-junction-cost *global minimum is not the true order* - a real stream genuinely contains large `global_gain` steps at transients / section edges, so a "smoother than reality" reorder wins. **`global_gain` is a good local rank signal, not a good global objective.** first-valid + rank-ordered candidates stays the default; best-of stays behind the flag for trying a better objective (reservoir headroom, or a multi-feature score first *verified* to have the true order as its argmin - which needs a probe extension: "is `trueOrderScore < scoreOf(random valid orderings)` for objective X?").
@@ -222,10 +227,18 @@ is found at all. Cheapest, most-decisive levers first:
    fixtures, only +1-6pp). Shipped the robust distillation: `junctionCost` is now
    `|Δglobal_gain| + |Δbig_values|/32` - improves probe rank-1 ~1-3pp on every
    fixture but does not move DFS reconstruction accuracy on the observable ones.
-7. **Milestone 2 - partial spectral decode.** Strongest possible signal; **now the
-   top open item** for the large-VBR case. See `PLAN_sideinfo_mainbits.md`. If it
-   too doesn't get large-VBR files there, the search itself has to change (true
-   beam/A* over partial orderings, or Hungarian matching) - not the per-edge signal.
+7. **[done 2026-09-10] Milestone 2 - partial spectral decode.** Landed. First
+   fixture-level accuracy win: `sample-3s` now byte-exact on every seed. Decoder
+   is bit-exact on ~46k granules. But spectral is ~neutral on the test7 family
+   and the hard VBR fixtures still don't complete. See item 7's 2026-09-10 update.
+8. **The large-VBR case now needs the *search* to change, not the signal.** All
+   per-edge signals (global_gain, A2, A3, A4, reservoir model, M2 spectral) are
+   in. `test7_shorter`/`test7_short`/`CBR` still find no complete ordering.
+   Options: true beam/A* over *partial* orderings that emits a best partial path
+   (`rp` currently needs a complete ordering or outputs nothing); Hungarian /
+   min-cost perfect matching (sidesteps the exponential DFS entirely); or
+   requantised spectral energy + short-block support to strengthen M2 on dense
+   content.
 
 ### Consistency & verification (done 2026-09-07)
 
@@ -372,6 +385,8 @@ Output is written to `output.mp3` in the current directory. Chunk 0 of the input
 | `RP_RANK` | on | `RP_RANK=0` disables the `global_gain` continuity ranking of DFS candidates. |
 | `RP_CBR` | on | `RP_CBR=0` disables the constant-bitrate frame-header filter (A3a) even when the stream is detected as CBR. |
 | `RP_AC3` | auto | arc-consistency prune (A4). Auto = on when the pre-shuffle check found 0 breaks. `RP_AC3=1` forces on, `=0` off. |
+| `RP_SPEC` | on | Milestone 2 spectral-continuity term in the candidate ranking. `RP_SPEC=0` disables. |
+| `RP_SPEC_SCALE` | auto | overrides the per-file auto-calibrated spectral weight (calibration targets a gentle ~3 per median junction; safe window is roughly 8-15). |
 | `RP_BESTOF` | off | `RP_BESTOF=1` keeps searching past the first complete ordering for the min summed-junction-cost one. Measured *worse* - see Known Limitations item 7. |
 | `RP_BEAM` | unset | `RP_BEAM=K` caps each DFS node to its K best-ranked reservoir-valid candidates (single fixed-width attempt). |
 | `RP_BROADEN` | auto (>120 supernodes) | `=1`/`=0` force/disable iterative broadening over K ∈ {1,2,3,4,6,9,unlimited}. |
