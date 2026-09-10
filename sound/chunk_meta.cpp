@@ -141,7 +141,13 @@ static FrameSideInfo parseFrameSideInfo(const SideInfoBitSource& sideBuf, const 
 
     int bitPos = 0;
     out.mainDataBegin = static_cast<uint16_t>(readBitsMsb(sideBuf, bitPos, mdbBits));
-    bitPos += privBits + scfsiBits;
+    bitPos += privBits;
+    if (mpeg1) {
+        for (int c = 0; c < numChannels; ++c)
+            out.scfsi[c] = static_cast<uint8_t>(readBitsMsb(sideBuf, bitPos, 4));
+    } else {
+        bitPos += scfsiBits; // 0 for MPEG2/2.5
+    }
     out.numGranules = numGranules;
     out.numChannels = numChannels;
 

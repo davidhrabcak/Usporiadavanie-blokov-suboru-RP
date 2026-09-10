@@ -34,6 +34,7 @@
 #include "frame_scanner.hpp"
 #include "chunk_meta.hpp"
 #include "adjacency.hpp"
+#include "main_data_decoder.hpp"
 
 using namespace std;
 
@@ -429,6 +430,141 @@ int main(int argc, char** argv) {
         };
         evalScorer("FIXED gg+0.15bv", fixedScore(1.0, 0.15));
         evalScorer("FIXED gg+0.30bv", fixedScore(1.0, 0.30));
+    }
+
+    // ---- Measurement D: partial spectral decode (Milestone 2) --------------------------
+    // Byte-level reservoir over the true-order stream; decode every frame's granules; report
+    // (1) the decoder self-consistency rate (bitsConsumed vs part2_3_length) - the CORRECTNESS
+    // gate - and (2) whether a per-band spectral profile separates true junctions from random
+    // pairs - the SIGNAL gate. Only worth wiring into the DFS if BOTH pass.
+    {
+        using namespace Mp3MainData;
+        // Concatenated true-order stream (chunks already start at the first frame).
+        vector<uint8_t> stream;
+        for (const auto& c : chunks) stream.insert(stream.end(), c.begin(), c.end());
+
+        const auto& frames = scanner.getFrames();
+        const long base = static_cast<long>(frames.empty() ? 0 : frames[0].position);
+        const int nf = static_cast<int>(frames.size());
+
+        // file position -> frame index
+        vector<pair<long,int>> posIndex;
+        posIndex.reserve(nf);
+        for (int k = 0; k < nf; ++k) posIndex.push_back({static_cast<long>(frames[k].position), k});
+        sort(posIndex.begin(), posIndex.end());
+        auto frameAtFilePos = [&](long fp) -> int {
+            auto it = lower_bound(posIndex.begin(), posIndex.end(), make_pair(fp, -1));
+            return (it != posIndex.end() && it->first == fp) ? it->second : -1;
+        };
+
+        vector<GranuleSpectrum> frFirst(nf), frLast(nf);
+        vector<uint8_t> res;
+        long totalBlocks = 0, mismatch = 0, shortBlocks = 0, decoded = 0;
+
+        for (int k = 0; k < nf; ++k) {
+            const long soff = static_cast<long>(frames[k].position) - base;
+            if (soff < 0 || soff + 4 > (long)stream.size()) break;
+            bool ok; Header h(packHeaderBytes(&stream[soff]), ok);
+            if (!ok || !profile.matches(h)) { res.clear(); continue; }
+            const int sideSz = sideInfoSize(h.getVersionID(), h.isMono());
+            const long payStart = soff + 4 + sideSz;
+            const long payEnd = (k + 1 < nf)
+                ? (static_cast<long>(frames[k + 1].position) - base) : (long)stream.size();
+            if (payEnd <= payStart || payEnd > (long)stream.size()) { res.clear(); continue; }
+
+            const FrameSideInfo fsi = parseFrameSideInfoAt(stream, static_cast<int>(soff), mpeg1, mono);
+            if (fsi.valid && fsi.mainDataBegin <= res.size()) {
+                vector<uint8_t> asm_;
+                asm_.insert(asm_.end(), res.end() - fsi.mainDataBegin, res.end());
+                asm_.insert(asm_.end(), stream.begin() + payStart, stream.begin() + payEnd);
+                const FrameSpectra sp = decodeFrameSpectra(asm_, 0, fsi, profile.sampleRate);
+                for (int g = 0; g < fsi.numGranules; ++g)
+                    for (int c = 0; c < fsi.numChannels; ++c) {
+                        ++totalBlocks;
+                        const auto& gs = sp.gr[g][c];
+                        const auto& gi = fsi.gr[g][c];
+                        if (!gs.valid && gi.windowSwitching) ++shortBlocks;
+                        else if (!gs.valid) {
+                            ++mismatch;
+                            if (getenv("PROBE_DBG") && mismatch <= 8)
+                                fprintf(stderr, "  FAIL fr%d g%d c%d: p23=%d consumed=%d nz=%d bt=%d ws=%d "
+                                        "bigv=%d r0c=%d r1c=%d ts=[%d,%d,%d] mdb=%d\n",
+                                        k, g, c, gi.part23Length, gs.bitsConsumed, gs.nonzero, gi.blockType,
+                                        gi.windowSwitching, gi.bigValues, gi.region0Count, gi.region1Count,
+                                        gi.tableSelect[0], gi.tableSelect[1], gi.tableSelect[2], fsi.mainDataBegin);
+                        }
+                        else { ++decoded; if (std::abs(gs.bitsConsumed - gi.part23Length) > 8) ++mismatch; }
+                    }
+                frFirst[k] = sp.gr[0][0];
+                frLast[k]  = sp.gr[fsi.numGranules - 1][0];
+            }
+            res.insert(res.end(), stream.begin() + payStart, stream.begin() + payEnd);
+            if (res.size() > 2048) res.erase(res.begin(), res.end() - 2048);
+        }
+
+        printf("\n== Measurement D: partial spectral decode (Milestone 2) ==\n");
+        printf("  granule blocks: %ld total, %ld decoded, %ld short-block (skipped), %ld bit-mismatch"
+               "  -> %.1f%% clean of the non-short blocks\n",
+               totalBlocks, decoded, shortBlocks, mismatch,
+               (totalBlocks - shortBlocks) ? 100.0 * decoded / (totalBlocks - shortBlocks) : 0.0);
+
+        // Per-chunk boundary spectra, via the chunk's first/last complete frame.
+        auto specOf = [&](int chunk, bool firstFrame) -> const GranuleSpectrum* {
+            if (!metas[chunk].valid || metas[chunk].frames.empty()) return nullptr;
+            const int off = firstFrame ? metas[chunk].frames.front().offset : metas[chunk].frames.back().offset;
+            const long fp = base + (long)chunk * CHUNK_SIZE + off;
+            const int idx = frameAtFilePos(fp);
+            if (idx < 0) return nullptr;
+            const GranuleSpectrum& gs = firstFrame ? frFirst[idx] : frLast[idx];
+            return gs.valid ? &gs : nullptr;
+        };
+        auto l2 = [](const GranuleSpectrum& a, const GranuleSpectrum& b) {
+            double s = 0;
+            for (int q = 0; q < NBANDS; ++q) { const double d = a.bandEnergy[q] - b.bandEnergy[q]; s += d * d; }
+            return sqrt(s);
+        };
+
+        vector<double> trueDist, randDist;
+        for (int i = 0; i + 1 < n; ++i) {
+            const auto* A = specOf(i, false);
+            const auto* B = specOf(i + 1, true);
+            if (A && B) trueDist.push_back(l2(*A, *B));
+        }
+        mt19937 rD(4242);
+        for (int r = 0; r < numRandomPairs && randDist.size() < 60000; ++r) {
+            const int a = pick(rD), b = pick(rD);
+            if (a == b || b == a + 1) continue;
+            const auto* A = specOf(a, false);
+            const auto* B = specOf(b, true);
+            if (A && B) randDist.push_back(l2(*A, *B));
+        }
+        printf("  boundary spectra usable: %zu true junctions, %zu random pairs\n", trueDist.size(), randDist.size());
+        if (trueDist.size() >= 20 && randDist.size() >= 100) {
+            printf("  band-energy L2 distance:  med(true)=%.4f  med(rand)=%.4f  AUC=%.3f\n",
+                   median(trueDist), median(randDist), auc(trueDist, randDist));
+
+            // mean/std of the spectral L2 distance over random pairs, to z-score it.
+            double sm = 0, sm2 = 0;
+            for (double d : randDist) { sm += d; sm2 += d * d; }
+            const double specMean = sm / randDist.size();
+            const double specSd = sqrt(max(1e-9, sm2 / randDist.size() - specMean * specMean));
+
+            auto specZ = [&](int i, int j) -> double {
+                const auto* A = specOf(i, false);
+                const auto* B = specOf(j, true);
+                if (!A || !B) return 3.0; // missing spectrum: neutral-ish penalty (unknowns sort mid)
+                return (l2(*A, *B) - specMean) / specSd;
+            };
+            auto ggZ = [&](int i, int j) {
+                return (featDelta(kFeatures[0], si[i].last, si[j].first) - mean[0]) / sd[0];
+            };
+
+            evalScorer("SPECTRAL-L2", [&](int i, int j) { return specZ(i, j); });
+            evalScorer("gg + 0.5*spectral",  [&](int i, int j) { return ggZ(i, j) + 0.5 * specZ(i, j); });
+            evalScorer("gg + 1.0*spectral",  [&](int i, int j) { return ggZ(i, j) + 1.0 * specZ(i, j); });
+        } else {
+            printf("  (too few usable boundary spectra for a verdict)\n");
+        }
     }
 
     return 0;

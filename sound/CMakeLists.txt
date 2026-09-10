@@ -14,6 +14,8 @@ add_executable(rp
         adjacency.hpp
         huffman_tables.cpp
         huffman_tables.hpp
+        main_data_decoder.cpp
+        main_data_decoder.hpp
         main.cpp)
 
 add_executable(evaluate_order
@@ -35,6 +37,10 @@ add_executable(sideinfo_probe
         chunk_meta.cpp
         chunk_meta.hpp
         adjacency.cpp
-        adjacency.hpp)
+        adjacency.hpp
+        huffman_tables.cpp
+        huffman_tables.hpp
+        main_data_decoder.cpp
+        main_data_decoder.hpp)
 target_include_directories(sideinfo_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_features(sideinfo_probe PRIVATE cxx_std_17)

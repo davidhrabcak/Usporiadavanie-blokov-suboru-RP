@@ -68,6 +68,8 @@ struct FrameSideInfo {
     uint32_t part23BitsTotal = 0; // sum of part23Length over all granules/channels (== SideInfoResult.part23Bits)
     int      numGranules    = 0;  // 2 (MPEG1) / 1 (MPEG2/2.5)
     int      numChannels    = 0;  // 1 (mono) / 2
+    uint8_t  scfsi[2]       = {0,0}; // MPEG1 only: 4-bit scale-factor-selection-info per channel
+                                     // (bit 3 = sfb group 0). 0 for MPEG2/2.5.
     GranuleSideInfo gr[2][2];     // [granule][channel]
     bool     valid          = false;
 };
