@@ -80,6 +80,60 @@ It is memoised per triple in the DFS.
    `RP_PCM=0` vs `=1` A/B, and wall-clock (a slower per-edge cost may blow the 20 s regression
    budget: report signal and cost separately).
 
-## Outcome
+## Outcome (2026-10-08)
 
-(filled in below as steps land)
+**Step 1 - correctness gate: PASS.** With 2 warm-up chunks (`[i-2, i-1, i, i+1]`) the windowed
+decode is sample-exact against a full-file minimp3 decode on every compared frame of every
+fixture (test7: 13,403 frames, max |diff| = 0). With only 1 warm-up chunk, sample-3s drops
+to 78.5% exact on the pre side (the first decodable frame of P lacks synthesis/IMDCT
+history), so the DFS uses up to 3 path chunks plus the candidate.
+
+**Step 2 - signal gate: PASS, by a wide margin, but only for `flux`.** `pcm_probe`, true
+successor among the structural candidates `adj[i]` (deg >= 2, silent junctions excluded):
+
+| fixture | junctions | mean deg | flux AUC | flux rank-1 | flux mean rank (random) | M2-L2 rank-1 (same sets) |
+|---|---|---|---|---|---|---|
+| ci_sanity     | 14   | 2   | 1.000 | 100%  | 1.00 (1.50)  | 85.7% |
+| sample-3s     | 49   | 2.6 | 0.810 | 89.8% | 1.12 (1.82)  | 40.5% |
+| CBR           | 650  | 33  | 0.795 | 46.6% | 5.29 (16.98) | 11.1% |
+| test7_shorter | 184  | 2.4 | 0.868 | 91.8% | 1.08 (1.70)  | 51.1% |
+| test7_short   | 485  | 3   | 0.888 | 89.7% | 1.10 (1.99)  | 45.9% |
+| test7         | 3319 | 9.6 | 0.929 | 80.5% | 1.29 (5.30)  | 20.0% |
+
+`specDist` (envelope distance) is mediocre (AUC 0.56-0.68), and `rmsJump`/`hfBurst`/`peak`
+are noise (~0.5): a wrong splice is not louder or brighter. Its spectrum is just
+discontinuous relative to the local frame-to-frame variation. A z-summed combo of all five
+dilutes the AUC. **Not a hard filter**: true-junction flux has a long tail (CBR p99 7.1,
+test7_short max 28.9) that overlaps the wrong candidates at every threshold.
+
+**Step 3 - wired** (`main.cpp`, `pcmRaw`/`pcmJunctionCost`, `RP_PCM`, `RP_PCM_W`). log1p(flux)
+is scaled so its spread is W (= 2) times that of junctionCost + spectral (calibrated per file
+over ~600 random structural edges with a plausible path context), and is added to the
+candidate sort key. Costs are precomputed once per candidate list. Memoised per
+(PP, P, cur, cand).
+
+**Step 4 - test results.**
+- `test/ci_sanity.sh`: PASS (exact). `test/regression.sh`: PASS, no change on any fixture.
+- sample-3s, seeds 1-7: still 100% exact on every seed. The DFS explores **1.25M nodes vs
+  4.39M** without the PCM term (3.5x fewer), ~1.5 s vs ~3 s.
+- Hard fixtures (30 s budget): **still no complete ordering**, but the search gets
+  substantially further. Greedy (beam=1) depth before dead end: test7_shorter 38 -> 118/164,
+  test7_short 87 -> 179/446. Beam=2 plateau: 92 -> 111/164 and 230 -> 326/446. CBR beam=1
+  goes 115 -> 77 (worse). CBR's degree is ~33, so 47% rank-1 still leaves the greedy path
+  wrong about every other branch point.
+- The weight barely matters (W 0.5 to 100 gives the same greedy depth to within ~20%).
+- Cost: ~2 s of calibration + decodes on CBR, ~0.2-0.4 s on test7_*. Negligible next to the
+  search budget.
+
+**Why it still doesn't complete.** test7_shorter has ~120 branch points. At ~90% rank-1, a
+greedy pass is wrong somewhere with near certainty (0.9^120 ~ 3e-6), and chronological
+DFS backtracking only revisits the *deepest* choices, never the early wrong turn that caused
+the dead end. The per-edge signal is now strong. The bottleneck has moved to the search. The
+natural next steps, which this signal finally makes worth doing:
+1. Global assignment: min-cost successor matching (Hungarian) on the flux costs, then
+   repair. With 80-92% rank-1 on VBR, an assignment should get most edges right at once,
+   instead of compounding errors along a path.
+2. Beam search over partial orderings scored by *summed* flux (not first-valid DFS), with
+   an emit-best-partial output.
+3. Making the CBR case sharper. The window currently ends at the candidate's first chunk.
+   Including the candidate supernode's 2nd chunk would give more clean post-junction audio.

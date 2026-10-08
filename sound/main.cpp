@@ -15,6 +15,7 @@
 #include "chunk_meta.hpp"
 #include "adjacency.hpp"
 #include "main_data_decoder.hpp"
+#include "pcm_junction.hpp"
 
 #define CHUNK_SIZE 1024
 #define COUNTER_FREQUENCY 9999999
@@ -311,6 +312,44 @@ static double spectralJunctionCost(const vector<ChunkMeta>& metas, int curPrev, 
     return g_specScale * std::sqrt(s);
 }
 
+// --- Full PCM decode junction term (PLAN_full_pcm_decode.md). For a candidate edge, decode
+// the last (up to) 3 chunks of the current path followed by the candidate's first chunk all
+// the way to PCM with minimp3 (fresh decoder, the first 2 chunks are warm-up - with them the
+// window decode is sample-exact vs a full-file decode), and measure the spectral-flux spike
+// at the junction relative to the flux inside the already-placed audio. A wrong successor
+// produces a hybrid straddling frame + a jump to another moment of the song. pcm_probe:
+// ranks the true successor #1 in 47-92% of branch points (Milestone 2: 11-51%).
+// Memoised by the (PP, P, cur, cand) chunk tuple. Ranking only - never rejects an edge
+// (not a safe filter: some true junctions do spike). RP_PCM=0 disables; RP_PCM_W weights it
+// relative to the existing (global_gain + spectral) cost, see the calibration in main().
+static bool   g_pcmRank    = true;
+static double g_pcmScale   = 1.0;  // set by calibration
+static double g_pcmNeutral = 0.0;  // raw value used when a junction can't be measured
+static std::unordered_map<uint64_t, float> g_pcmMemo;
+
+// Raw log1p(flux) for path tail `left[0..nLeft)` (oldest first) followed by `cand`;
+// -1 when the window can't be measured (too little audio, silent pre side).
+static double pcmRaw(const vector<ChunkMeta>& metas, const int* left, int nLeft, int cand) {
+    while (nLeft > 1 && !metas[left[0]].valid) { ++left; --nLeft; }
+    uint64_t key = (uint64_t)(unsigned)cand;
+    for (int k = 0; k < 3; ++k)
+        key = (key << 16) | (k < nLeft ? (uint64_t)(unsigned)left[k] : 0xFFFFu);
+    auto it = g_pcmMemo.find(key);
+    if (it != g_pcmMemo.end()) return it->second;
+    vector<const vector<uint8_t>*> segs;
+    for (int k = 0; k < nLeft; ++k) segs.push_back(&chunks[left[k]]);
+    segs.push_back(&chunks[cand]);
+    const PcmJunction::Metrics m = PcmJunction::scoreJunction(segs, nLeft, metas[left[0]].headOffset);
+    const float v = (m.valid && !m.silent) ? (float)std::log1p(m.flux) : -1.0f;
+    g_pcmMemo.emplace(key, v);
+    return v;
+}
+
+static double pcmJunctionCost(const vector<ChunkMeta>& metas, const int* left, int nLeft, int cand) {
+    const double v = pcmRaw(metas, left, nLeft, cand);
+    return g_pcmScale * (v < 0 ? g_pcmNeutral : v);
+}
+
 // DFS instrumentation / bounding. `counter` = number of supernode placements tried.
 // RP_MAX_NODES caps it (0 = unlimited) so a bounded A/B run stops cleanly instead of being
 // SIGTERM'd (which loses buffered stdout); RP_PROGRESS overrides how often a progress line
@@ -414,15 +453,30 @@ bool dfs(DfsState& state,
     vector<int> candidates(superAdj[cur].begin(), superAdj[cur].end());
     if (rankByContinuity && candidates.size() > 1) {
         const bool useSpec = g_specRank && isLayerIII;
-        stable_sort(candidates.begin(), candidates.end(), [&](const int x, const int y) {
-            double cx = junctionCost(boundaryGain, curTailChunk, supernodes[x].chunks.front());
-            double cy = junctionCost(boundaryGain, curTailChunk, supernodes[y].chunks.front());
-            if (useSpec) {
-                cx += spectralJunctionCost(metas, curPrevChunk, curTailChunk, supernodes[x].chunks.front());
-                cy += spectralJunctionCost(metas, curPrevChunk, curTailChunk, supernodes[y].chunks.front());
+        const bool usePcm  = g_pcmRank;
+        // Last (up to) 3 chunks of the path, oldest first - the PCM window's left side.
+        int left[3], nLeft = 0;
+        if (usePcm) {
+            int tmp[3];
+            for (int oi = (int)state.order.size() - 1; oi >= 0 && nLeft < 3; --oi) {
+                const auto& ch = supernodes[state.order[oi]].chunks;
+                for (int k = (int)ch.size() - 1; k >= 0 && nLeft < 3; --k) tmp[nLeft++] = ch[k];
             }
-            return cx < cy;
-        });
+            for (int k = 0; k < nLeft; ++k) left[k] = tmp[nLeft - 1 - k];
+        }
+        // Each candidate's cost computed once (the PCM term is a full decode per edge).
+        vector<pair<double, int>> keyed;
+        keyed.reserve(candidates.size());
+        for (int x : candidates) {
+            const int head = supernodes[x].chunks.front();
+            double c = junctionCost(boundaryGain, curTailChunk, head);
+            if (useSpec) c += spectralJunctionCost(metas, curPrevChunk, curTailChunk, head);
+            if (usePcm && !state.used[x]) c += pcmJunctionCost(metas, left, nLeft, head);
+            keyed.push_back({c, x});
+        }
+        stable_sort(keyed.begin(), keyed.end(),
+                    [](const pair<double, int>& a, const pair<double, int>& b) { return a.first < b.first; });
+        for (size_t k = 0; k < keyed.size(); ++k) candidates[k] = keyed[k].second;
     }
 
     int recursed = 0; // reservoir-valid candidates descended into so far, for the RP_BEAM cap
@@ -826,10 +880,66 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Calibrate the PCM term against the existing ranking cost (z-score style): over a sample
+    // of real structural edges a->b with a plausible 2-chunk path context (pp->p->a, drawn from
+    // the graph's in-edges), scale log1p(flux) so its spread is RP_PCM_W times the spread of
+    // junctionCost + spectral. Unmeasurable junctions get the median (neutral) value.
+    if (const char* v = std::getenv("RP_PCM")) g_pcmRank = (v[0] != '0');
+    if (g_pcmRank && rankByContinuity) {
+        double weight = 2.0;
+        if (const char* v = std::getenv("RP_PCM_W")) weight = atof(v);
+        const int n = static_cast<int>(chunks.size());
+        vector<vector<int>> preds(n);
+        for (int a = 0; a < n; ++a) for (int b : adj[a]) preds[b].push_back(a);
+        std::mt19937 rc(777);
+        std::uniform_int_distribution<int> pa(0, n - 1);
+        vector<double> pv, ov;
+        for (int t = 0; t < 20000 && pv.size() < 600; ++t) {
+            const int a = pa(rc);
+            if (adj[a].size() < 2 || preds[a].empty()) continue;
+            const int p = preds[a][rc() % preds[a].size()];
+            if (p == a || preds[p].empty()) continue;
+            const int pp = preds[p][rc() % preds[p].size()];
+            if (pp == p || pp == a) continue;
+            const int b = adj[a][rc() % adj[a].size()];
+            if (b == a || b == p || b == pp) continue;
+            const int left[3] = {pp, p, a};
+            const double raw = pcmRaw(metas, left, 3, b);
+            if (raw < 0) continue;
+            double o = junctionCost(boundaryGain, a, b);
+            if (g_specRank && isLayerIII) o += spectralJunctionCost(metas, p, a, b);
+            pv.push_back(raw);
+            ov.push_back(o);
+        }
+        auto sdev = [](const vector<double>& v) {
+            double m = 0, s = 0;
+            for (double x : v) m += x;
+            m /= std::max<size_t>(1, v.size());
+            for (double x : v) s += (x - m) * (x - m);
+            return std::sqrt(s / std::max<size_t>(1, v.size()));
+        };
+        if (pv.size() >= 30) {
+            const double sp = sdev(pv), so = sdev(ov);
+            g_pcmScale = sp > 1e-9 ? weight * std::max(so, 1.0) / sp : 0.0;
+            vector<double> tmp = pv;
+            std::nth_element(tmp.begin(), tmp.begin() + tmp.size() / 2, tmp.end());
+            g_pcmNeutral = tmp[tmp.size() / 2];
+        } else {
+            g_pcmScale = weight * 10.0;   // too few samples: just make it dominant-ish
+            g_pcmNeutral = 0.7;
+        }
+        g_pcmMemo.clear();
+        cout << "PCM term: weight " << weight << ", scale = " << fixed << setprecision(2) << g_pcmScale
+             << ", neutral = " << g_pcmNeutral << " (" << pv.size() << " calibration edges)\n";
+    } else {
+        g_pcmRank = false;
+    }
+
     cout << "Starting search over " << supernodes.size() << " supernodes"
          << " (continuity ranking " << (rankByContinuity ? "ON" : "OFF")
          << ", " << (g_bestOf ? "best-of" : "first-valid")
-         << (g_specRank && isLayerIII ? ", +spectral" : "") << ")\n";
+         << (g_specRank && isLayerIII ? ", +spectral" : "")
+         << (g_pcmRank ? ", +pcm" : "") << ")\n";
 
     g_bestScore = LLONG_MAX;
     g_bestOrder.clear();
