@@ -88,17 +88,25 @@ fixture (test7: 13,403 frames, max |diff| = 0). With only 1 warm-up chunk, sampl
 to 78.5% exact on the pre side (the first decodable frame of P lacks synthesis/IMDCT
 history), so the DFS uses up to 3 path chunks plus the candidate.
 
-**Step 2 - signal gate: PASS, by a wide margin, but only for `flux`.** `pcm_probe`, true
-successor among the structural candidates `adj[i]` (deg >= 2, silent junctions excluded):
+**Step 2 - signal gate: PASS, by a wide margin, but only for `flux`.** `pcm_probe`, the rank of the
+true successor among chunk i's candidates (deg >= 2, silent junctions excluded). This is the
+**like-for-like** table. Candidates are restricted to those whose post side decodes without a
+reservoir underflow (`postFailed == 0`). The DFS reservoir check already rejects the rest,
+and their zero-filled gap would hand flux a free spike. Candidates must also be scorable
+by Milestone 2. Flux and M2 are ranked on exactly the same sets:
 
-| fixture | junctions | mean deg | flux AUC | flux rank-1 | flux mean rank (random) | M2-L2 rank-1 (same sets) |
-|---|---|---|---|---|---|---|
-| ci_sanity     | 14   | 2   | 1.000 | 100%  | 1.00 (1.50)  | 85.7% |
-| sample-3s     | 49   | 2.6 | 0.810 | 89.8% | 1.12 (1.82)  | 40.5% |
-| CBR           | 650  | 33  | 0.795 | 46.6% | 5.29 (16.98) | 11.1% |
-| test7_shorter | 184  | 2.4 | 0.868 | 91.8% | 1.08 (1.70)  | 51.1% |
-| test7_short   | 485  | 3   | 0.888 | 89.7% | 1.10 (1.99)  | 45.9% |
-| test7         | 3319 | 9.6 | 0.929 | 80.5% | 1.29 (5.30)  | 20.0% |
+| fixture | junctions | random mean rank | flux AUC | flux rank-1 | flux mean rank | M2 AUC | M2 rank-1 | M2 mean rank |
+|---|---|---|---|---|---|---|---|---|
+| ci_sanity     | 5    | 1.50 | 1.000 | 100%  | 1.00 | 0.840 | 80.0% | 1.20 |
+| sample-3s     | 32   | 1.67 | 0.770 | 87.5% | 1.12 | 0.454 | 37.5% | 1.69 |
+| CBR           | 364  | 8.19 | 0.820 | 67.6% | 2.81 | 0.599 | 16.5% | 7.63 |
+| test7_shorter | 72   | 1.62 | 0.896 | 95.8% | 1.03 | 0.565 | 51.4% | 1.60 |
+| test7_short   | 226  | 1.79 | 0.879 | 89.4% | 1.08 | 0.564 | 50.9% | 1.67 |
+| test7         | 2326 | 3.19 | 0.938 | 88.9% | 1.10 | 0.574 | 32.0% | 2.85 |
+
+(On all structural candidates `adj[i]`, unfiltered, flux rank-1 is 89.8 / 46.6 / 91.8 / 89.7
+/ 80.5% on sample-3s / CBR / test7_shorter / test7_short / test7. That set is less
+DFS-relevant: it includes reservoir-invalid candidates and is larger for CBR.)
 
 `specDist` (envelope distance) is mediocre (AUC 0.56-0.68), and `rmsJump`/`hfBurst`/`peak`
 are noise (~0.5): a wrong splice is not louder or brighter. Its spectrum is just
@@ -117,19 +125,33 @@ candidate sort key. Costs are precomputed once per candidate list. Memoised per
 - sample-3s, seeds 1-7: still 100% exact on every seed. The DFS explores **1.25M nodes vs
   4.39M** without the PCM term (3.5x fewer), ~1.5 s vs ~3 s.
 - Hard fixtures (30 s budget): **still no complete ordering**, but the search gets
-  substantially further. Greedy (beam=1) depth before dead end: test7_shorter 38 -> 118/164,
-  test7_short 87 -> 179/446. Beam=2 plateau: 92 -> 111/164 and 230 -> 326/446. CBR beam=1
-  goes 115 -> 77 (worse). CBR's degree is ~33, so 47% rank-1 still leaves the greedy path
-  wrong about every other branch point.
+  further *and* the partial path it builds is mostly correct. `rp` now prints the deepest
+  partial path's accuracy against the source order (chunk-level junctions whose successor is
+  the true next chunk):
+
+  | fixture | search | PCM off: depth, true junctions | PCM on: depth, true junctions |
+  |---|---|---|---|
+  | test7_shorter | greedy (beam 1) | 39/164 sn, 70/77 (91%)    | 119/164 sn, 229/234 (98%) |
+  | test7_shorter | broadening, 30 s | 137/164 sn, 249/264 (94%) | 147/164 sn, 279/286 (98%) |
+  | test7_short   | greedy (beam 1) | 88/446 sn, 92/114 (81%)   | 180/446 sn, 230/238 (97%) |
+  | test7_short   | broadening, 30 s | 264/446 sn, 307/367 (84%) | 377/446 sn, 486/506 (96%) |
+  | CBR           | greedy (beam 1) | 116/658 sn, 40/115 (35%)  | 78/658 sn, 49/77 (64%) |
+  | CBR           | broadening, 30 s | 278/658 sn, 89/277 (32%)  | 337/658 sn, 172/336 (51%) |
+
+  The first wrong junction still comes early (the correct prefix is 26 chunks on
+  test7_shorter / test7_short, 3 on CBR). Later junctions are overwhelmingly right, so the
+  path is a few wrong splices in a mostly correct sequence, and those few eventually
+  strand it.
 - The weight barely matters (W 0.5 to 100 gives the same greedy depth to within ~20%).
 - Cost: ~2 s of calibration + decodes on CBR, ~0.2-0.4 s on test7_*. Negligible next to the
   search budget.
 
-**Why it still doesn't complete.** test7_shorter has ~120 branch points. At ~90% rank-1, a
-greedy pass is wrong somewhere with near certainty (0.9^120 ~ 3e-6), and chronological
-DFS backtracking only revisits the *deepest* choices, never the early wrong turn that caused
-the dead end. The per-edge signal is now strong. The bottleneck has moved to the search. The
-natural next steps, which this signal finally makes worth doing:
+**Why it still doesn't complete.** test7_shorter has ~120 branch points. At ~90-96% rank-1,
+a greedy pass is wrong somewhere with near certainty, and the measurement above shows exactly
+that: the first wrong splice comes within the first ~26 chunks. Chronological DFS backtracking
+only revisits the *deepest* choices, never that early wrong turn. On the VBR fixtures, 96-98%
+of the junctions on the deepest path are correct, so the bottleneck has moved to the search.
+Next steps this signal makes worth doing:
 1. Global assignment: min-cost successor matching (Hungarian) on the flux costs, then
    repair. With 80-92% rank-1 on VBR, an assignment should get most edges right at once,
    instead of compounding errors along a path.

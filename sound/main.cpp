@@ -355,6 +355,7 @@ static double pcmJunctionCost(const vector<ChunkMeta>& metas, const int* left, i
 // SIGTERM'd (which loses buffered stdout); RP_PROGRESS overrides how often a progress line
 // is printed. g_aborted unwinds the whole recursion once the cap is hit.
 static uint64_t counter        = 0;
+static vector<int> g_deepestOrder;   // deepest partial ordering reached (diagnostic)
 static uint64_t g_maxNodes     = 0;
 static uint64_t g_progressEvery = COUNTER_FREQUENCY;
 static bool     g_aborted      = false;
@@ -418,6 +419,7 @@ bool dfs(DfsState& state,
          vector<int>& result) {
 
     if (g_aborted) return false;
+    if (state.order.size() > g_deepestOrder.size()) g_deepestOrder = state.order;
 
     if (state.order.size() == supernodes.size()) {
         // Reservoir validity has already been established incrementally for every chunk
@@ -1009,6 +1011,18 @@ int main(int argc, char* argv[]) {
     } else {
         cout << "Failed to reconstruct (no complete ordering found"
              << (g_aborted ? " within the search budget" : "") << ").\n";
+        // How right was the deepest partial path? Chunk-level junctions whose successor is the
+        // true next chunk, and where the first wrong one is.
+        vector<int> path;
+        for (int si : g_deepestOrder) for (int ci : supernodes[si].chunks) path.push_back(origIndexOf[ci]);
+        int good = 0, firstBad = -1;
+        for (size_t k = 1; k < path.size(); ++k) {
+            if (path[k] == path[k - 1] + 1) ++good;
+            else if (firstBad < 0) firstBad = static_cast<int>(k);
+        }
+        cout << "Deepest partial path: " << g_deepestOrder.size() << "/" << supernodes.size() << " supernodes, "
+             << path.size() << " chunks; true junctions " << good << "/" << (path.empty() ? 0 : path.size() - 1)
+             << "; correct prefix = " << (firstBad < 0 ? (int)path.size() : firstBad) << " chunks\n";
     }
 
     return 0;

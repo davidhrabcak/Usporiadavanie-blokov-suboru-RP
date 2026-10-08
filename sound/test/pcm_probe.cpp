@@ -150,7 +150,7 @@ int main(int argc, char** argv) {
     const int M2 = NM, COMBO = NM + 1, TOT = NM + 2; // extra columns: Milestone-2 L2, z-sum combo
 
     // Collect raw per-junction candidate scores first (combo needs global z-scoring).
-    struct Cand { int c; bool truth; double v[16]; bool m2ok; };
+    struct Cand { int c; bool truth; double v[16]; bool m2ok; int postFailed; };
     vector<vector<Cand>> junctions;
     int silentJ = 0, skippedJ = 0, considered = 0;
     long postFailTrue = 0, postFailWrong = 0, candTrue = 0, candWrong = 0;
@@ -169,7 +169,7 @@ int main(int argc, char** argv) {
             segs.push_back(&chunks[c]);
             const PcmJunction::Metrics m = PcmJunction::scoreJunction(segs, i - first + 1, metas[first].headOffset);
             if (!m.valid) continue;
-            Cand x; x.c = c; x.truth = (c == i + 1);
+            Cand x; x.c = c; x.truth = (c == i + 1); x.postFailed = m.postFailed;
             for (int k = 0; k < NM; ++k) x.v[k] = defs[k].f(m);
             const GranuleSpectrum B = m2head(i, c);
             x.m2ok = A.valid && B.valid;
@@ -233,6 +233,36 @@ int main(int argc, char** argv) {
         printf("  %-10s %7.3f %7.1f%% %9.2f %9.2f   %.3g / %.3g   (n=%ld)\n", name, auc(tv, wv),
                cnt ? 100.0 * r1 / cnt : 0.0, cnt ? rankSum / cnt : 0.0, cnt ? baseSum / cnt : 0.0,
                med(tv), med(wv), cnt);
+    }
+
+    // DFS-relevant, like-for-like comparison: only candidates whose post side decoded fully
+    // (postFailed == 0 - a reservoir underflow there is what the DFS reservoir check already
+    // rejects, and its zero-filled gap hands flux a free spike) AND that Milestone 2 could
+    // score; only junctions where the true successor qualifies and >= 1 wrong one remains.
+    // flux and M2 are ranked on exactly the same candidate sets.
+    {
+        vector<double> tf, wf, tm, wm;
+        long cnt = 0, r1f = 0, r1m = 0; double rf = 0, rm = 0, base = 0;
+        for (auto& cs : junctions) {
+            vector<const Cand*> keep; const Cand* tr = nullptr;
+            for (auto& x : cs) if (x.postFailed == 0 && x.m2ok) { keep.push_back(&x); if (x.truth) tr = &x; }
+            if (!tr || keep.size() < 2) continue;
+            ++cnt; base += (keep.size() + 1) / 2.0;
+            for (int col : {0, M2}) {
+                int less = 0, eq = 0;
+                for (auto* x : keep) if (x != tr) {
+                    if (x->v[col] < tr->v[col]) ++less; else if (x->v[col] == tr->v[col]) ++eq;
+                    (col == 0 ? wf : wm).push_back(x->v[col]);
+                }
+                (col == 0 ? tf : tm).push_back(tr->v[col]);
+                const double rank = 1 + less + 0.5 * eq;
+                if (col == 0) { rf += rank; if (!less && !eq) ++r1f; } else { rm += rank; if (!less && !eq) ++r1m; }
+            }
+        }
+        printf("\n  like-for-like (reservoir-decodable + M2-scorable candidates, same sets): %ld junctions, "
+               "random mean rank %.2f\n", cnt, cnt ? base / cnt : 0.0);
+        printf("    flux   AUC %.3f  rank-1 %5.1f%%  meanRank %.2f\n", auc(tf, wf), cnt ? 100.0 * r1f / cnt : 0.0, cnt ? rf / cnt : 0.0);
+        printf("    M2-L2  AUC %.3f  rank-1 %5.1f%%  meanRank %.2f\n", auc(tm, wm), cnt ? 100.0 * r1m / cnt : 0.0, cnt ? rm / cnt : 0.0);
     }
 
     // Could flux be a hard filter? Distribution of the TRUE junctions' flux vs wrong candidates.
