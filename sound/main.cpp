@@ -762,7 +762,12 @@ int main(int argc, char* argv[]) {
     // re-run arc consistency so the locks cascade. RP_LOCK=0 disables.
     {
         const char* e = std::getenv("RP_LOCK");
-        const bool on = !(e && e[0] == '0') && profile.isLayerIII();
+        // Same soundness gate as AC-3: with a real edge missing from the graph (pre-shuffle
+        // breaks) the predecessor-side margin can be won unopposed by a wrong edge.
+        const bool on = !(e && e[0] == '0') && profile.isLayerIII() &&
+                        (preShuffleBreaks == 0 || (e && e[0] == '1'));
+        if (!on && !(e && e[0] == '0') && profile.isLayerIII())
+            cout << "Edge locking: skipped (pre-shuffle found breaks; RP_LOCK=1 forces)\n";
         if (on) {
             double tau = 1.5;
             if (const char* t = std::getenv("RP_LOCK_TAU")) tau = atof(t);
@@ -1072,6 +1077,29 @@ int main(int argc, char* argv[]) {
              << "\n";
         cout << "Reconstruction junctions: " << trueJ << "/" << (reconOrig.empty() ? 0 : reconOrig.size() - 1)
              << " are true successor pairs\n";
+        // Diagnostic (RP_SCORE_ORDER=1): summed PCM flux of the found ordering vs the source
+        // order, each junction scored in its own exact (PP, P, cur) context. Tells whether a
+        // wrong-but-valid result is something a flux-minimising repair could fix.
+        if (std::getenv("RP_SCORE_ORDER") && !exactMatch) {
+            vector<int> found, truth(chunks.size());
+            for (int si : result) for (int ci : supernodes[si].chunks) found.push_back(ci);
+            for (size_t ci = 0; ci < chunks.size(); ++ci) truth[origIndexOf[ci]] = static_cast<int>(ci);
+            auto summed = [&](const vector<int>& ord, int& unmeasured) {
+                double sum = 0; unmeasured = 0;
+                for (size_t k = 1; k < ord.size(); ++k) {
+                    int left[3], nl = 0;
+                    for (int j = (int)k - 3; j < (int)k; ++j) if (j >= 0) left[nl++] = ord[j];
+                    const double v = pcmRaw(metas, left, nl, ord[k]);
+                    if (v < 0) ++unmeasured; else sum += v;
+                }
+                return sum;
+            };
+            int uf = 0, ut = 0;
+            const double sf = summed(found, uf), st = summed(truth, ut);
+            cout << "Summed log1p(flux): found " << fixed << setprecision(3) << sf << " (" << uf
+                 << " unmeasured), source " << st << " (" << ut << " unmeasured) -> "
+                 << (st < sf ? "source is cheaper" : "found is cheaper or equal") << "\n";
+        }
     } else {
         cout << "Failed to reconstruct (no complete ordering found"
              << (g_aborted ? " within the search budget" : "") << ").\n";

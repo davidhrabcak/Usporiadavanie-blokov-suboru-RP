@@ -159,3 +159,74 @@ Next steps this signal makes worth doing:
    an emit-best-partial output.
 3. Making the CBR case sharper. The window currently ends at the candidate's first chunk.
    Including the candidate supernode's 2nd chunk would give more clean post-junction audio.
+
+## Step 5 - confident-edge locking (2026-10-09)
+
+The search stalled because a few early wrong turns stranded it, even though 96-98% of the
+junctions on its deepest path were right. So: before the search, **force** the edges flux is
+very sure about. Then the DFS doesn't have to choose at those branch points at all.
+
+**Mechanism** (`edge_lock.{hpp,cpp}`). Flux depends on the path context, which isn't known
+pre-search. So each edge a->b is decoded as `[p, a, b]` for every structural predecessor p
+of a (an evenly spaced sample of 8 when there are more), and summarised by the median.
+a->b is locked when its median flux beats every other successor of a **and** every other
+predecessor of b by a factor >= tau. Locked edges are forced (competitors removed), AC-3
+re-runs, and the whole thing iterates on the pruned graph until no new lock appears
+(`RP_LOCK_ROUNDS`, default 8). It has the same soundness gate as AC-3 (only when the
+pre-shuffle check found 0 breaks). A decode-cost cap (`RP_LOCK_MAX_DECODES`, default 40k
+per round) skips dense graphs. CBR would cost ~170k decodes (~2 min) per round, for <5%
+coverage.
+
+**Objective alignment (2-opt swap test, pcm_probe).** For two true edges a->b, c->d whose
+crossed pair a->d, c->b is also structural, the true pair has the lower summed flux in
+100% (ci_sanity, sample-3s), 97.4% (CBR), 98.2% (test7_shorter), 99.0% (test7_short), and
+99.6% (test7) of swaps. Unlike `global_gain` (the failed best-of experiment), summed flux
+points at the true order, so global/objective searches on it are viable.
+
+**Lock precision on the true order** (pcm_probe, median mode; "wrong" = locks that are not a
+true successor pair; coverage = correct locks / true edges at a branch point; single round,
+no iteration):
+
+| tau | sample-3s | CBR | test7_shorter | test7_short | test7 |
+|---|---|---|---|---|---|
+| 1.00 | 1 wrong / 62% | 29 wrong / 9% | 5 wrong / 74% | 17 wrong / 66% | 202 wrong / 34% |
+| 1.10 | 1 wrong / 48% | 0 / 4.3% | 0 / 68% | 0 / 58% | 8 wrong / 16% |
+| 1.25 | 1 wrong / 36% | 0 / 2.1% | 0 / 59% | 0 / 49% | 2 wrong / 7% |
+| **1.50** | 0 / 22% | 0 / 0.8% | 0 / 47% | 0 / 33% | 1 wrong / 2.6% |
+| 2.00 | 0 / 10% | 0 / 0% | 0 / 28% | 0 / 19% | 0 / 0.7% |
+
+The robust mode (worst context must beat every competitor's best) is 100% precise at every
+tau, but it covers far less (test7_shorter 34%, test7_short 15%, 0 on CBR/test7). **Default
+tau = 1.5.** It is the lowest threshold with no wrong lock on any completable fixture.
+test7's single wrong lock at 1.5 is moot here (test7 is skipped by the gate and the cost
+cap), but it shows the margin isn't infinite: one wrong lock makes the true order
+unreachable.
+
+**Results in `rp`** (default tau 1.5, iterated; "locks correct" is checked against the source
+order and printed by `rp` as a diagnostic):
+
+| fixture | before (PCM ranking only) | with locking |
+|---|---|---|
+| ci_sanity | exact, 15 supernodes | exact, 13/13 locks correct, **1 supernode** |
+| sample-3s | exact on seeds 1-7, 1.25M DFS nodes | exact on seeds 1-7, 14/14 locks correct, 28 supernodes, **1,792 nodes (0.1 s)** |
+| test7_shorter | no complete ordering | **byte-exact on seeds 1-7**, 83/83 locks correct, 164 -> 49 supernodes, 55 DFS nodes (0.07 s) + ~1.7 s locking |
+| test7_short | no complete ordering, deepest 377/446 sn | still no complete ordering (seeds 1-3); 159/159 locks correct, 446 -> 230 supernodes, deepest path 594/598 true junctions |
+| CBR, test7 | - | unchanged (skipped: cost cap / pre-shuffle breaks) |
+
+Lock counts and outcomes are identical across seeds 1-7. `regression.sh` passes, and the
+baseline has been updated: test7_shorter goes from FAILED to 100.
+
+**Lower tau on test7_short.** At tau 1.1 (309/309 locks correct, 63 supernodes) the DFS
+*completes*, but on a wrong-but-valid ordering: 606/609 junctions are true, with one block
+of the song moved (A-C-B instead of A-B-C, 3 wrong junctions, so position accuracy reads
+0.5%). Its summed flux (`RP_SCORE_ORDER=1`) is 506.78 vs **503.40 for the true order**, so a
+block-move local search minimising summed flux (moves constrained by `canFollow` + the
+reservoir check) would repair it. Not built yet, and tau 1.1 is not the default (the true-order
+probe shows wrong locks at 1.1 on sample-3s and test7).
+
+**Next steps:**
+1. Block-move repair on summed flux for complete-but-wrong orderings.
+2. Use flux as a global objective (beam over partial orderings / min-cost matching). The
+   2-opt test says it is aligned.
+3. CBR: cheaper locking (e.g. only score chunks with few predecessors) and a sharper
+   window (more post-junction audio).
