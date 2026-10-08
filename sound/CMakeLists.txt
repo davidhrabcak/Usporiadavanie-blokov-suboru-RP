@@ -19,6 +19,8 @@ add_executable(rp
         pcm_junction.cpp
         pcm_junction.hpp
         pcm_decoder_impl.cpp
+        edge_lock.cpp
+        edge_lock.hpp
         main.cpp)
 
 add_executable(evaluate_order
@@ -58,6 +60,7 @@ add_executable(pcm_probe
         huffman_tables.cpp
         main_data_decoder.cpp
         pcm_junction.cpp
-        pcm_decoder_impl.cpp)
+        pcm_decoder_impl.cpp
+        edge_lock.cpp)
 target_include_directories(pcm_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_features(pcm_probe PRIVATE cxx_std_17)

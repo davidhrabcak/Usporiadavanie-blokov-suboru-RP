@@ -27,6 +27,7 @@
 #include "adjacency.hpp"
 #include "main_data_decoder.hpp"
 #include "pcm_junction.hpp"
+#include "edge_lock.hpp"
 
 using namespace std;
 
@@ -263,6 +264,74 @@ int main(int argc, char** argv) {
                "random mean rank %.2f\n", cnt, cnt ? base / cnt : 0.0);
         printf("    flux   AUC %.3f  rank-1 %5.1f%%  meanRank %.2f\n", auc(tf, wf), cnt ? 100.0 * r1f / cnt : 0.0, cnt ? rf / cnt : 0.0);
         printf("    M2-L2  AUC %.3f  rank-1 %5.1f%%  meanRank %.2f\n", auc(tm, wm), cnt ? 100.0 * r1m / cnt : 0.0, cnt ? rm / cnt : 0.0);
+    }
+
+    // ---- Objective alignment (2-opt swap test): for true edges a->b and c->d, where the
+    // crossed edges a->d and c->b are also structural, does the true pair have the lower
+    // summed flux? (Same true-context flux as above.) If the true order isn't (near) the
+    // argmin of summed flux, global objective searches (matching/beam) are a dead end.
+    {
+        map<pair<int,int>, double> fx; // (i, cand) -> flux, true context
+        int ji = 0;
+        for (int i = 1; i + 1 < n; ++i) (void)i;
+        for (auto& cs : junctions) {
+            int i = -1;
+            for (auto& x : cs) if (x.truth) i = x.c - 1;
+            for (auto& x : cs) fx[{i, x.c}] = x.v[0];
+            ++ji;
+        }
+        long swaps = 0, trueWins = 0, ties = 0;
+        for (auto& kv : fx) {
+            const int a = kv.first.first, d = kv.first.second;
+            if (d == a + 1) continue;
+            const int b = a + 1, c = d - 1;
+            if (c < 0 || c == a) continue;
+            auto ab = fx.find({a, b}), cd = fx.find({c, d}), cb = fx.find({c, b});
+            if (ab == fx.end() || cd == fx.end() || cb == fx.end()) continue;
+            const double tr = ab->second + cd->second, sw = kv.second + cb->second;
+            ++swaps;
+            if (tr < sw) ++trueWins; else if (tr == sw) ++ties;
+        }
+        printf("\n  2-opt swap test: %ld structural swaps, true pair cheaper in %ld (%.1f%%), ties %ld\n",
+               swaps, trueWins, swaps ? 100.0 * trueWins / swaps : 0.0, ties);
+    }
+
+    // ---- Confident-edge locking (edge_lock, exactly what rp would apply). Precision is the
+    // gate: a wrong lock makes the true order unreachable.
+    {
+        int maxCtx = getenv("PROBE_MAXCTX") ? atoi(getenv("PROBE_MAXCTX")) : 8;
+        vector<vector<int>> preds(n);
+        for (int a = 0; a < n; ++a) for (int b : adj[a]) preds[b].push_back(a);
+        long branchTrue = 0, branchOut = 0;
+        for (int i = 0; i + 1 < n; ++i) {
+            if (find(adj[i].begin(), adj[i].end(), i + 1) == adj[i].end()) continue;
+            if (adj[i].size() >= 2 || preds[i + 1].size() >= 2) ++branchTrue;
+        }
+        for (int i = 0; i < n; ++i) if (adj[i].size() >= 2) ++branchOut;
+        for (auto mode : {EdgeLock::Mode::Robust, EdgeLock::Mode::Median}) {
+            long dec = 0;
+            const auto all = EdgeLock::findConfidentEdges(chunks, metas, adj, 0, 1.0, maxCtx, mode, &dec);
+            printf("\n== Confident-edge locking, %s mode (maxCtx=%d, %ld window decodes) ==\n",
+                   mode == EdgeLock::Mode::Robust ? "robust" : "median", maxCtx, dec);
+            printf("  true edges at a branch point (out- or in-degree >= 2): %ld; chunks with out-degree >= 2: %ld\n",
+                   branchTrue, branchOut);
+            printf("  %6s %7s %8s %9s %10s %16s\n", "tau", "locks", "wrong", "precision", "coverage", "outdeg>=2 after");
+            for (double tau : {1.0, 1.1, 1.25, 1.5, 2.0, 3.0, 4.0}) {
+                vector<EdgeLock::LockedEdge> L;
+                for (auto& e : all) if (e.margin >= tau) L.push_back(e);
+                long wrong = 0;
+                for (auto& e : L) if (e.b != e.a + 1) ++wrong;
+                auto adj2 = adj;
+                EdgeLock::applyLocks(adj2, L);
+                long after = 0;
+                for (int i = 0; i < n; ++i) if (adj2[i].size() >= 2) ++after;
+                printf("  %6.2f %7zu %8ld %8.2f%% %9.1f%% %16ld\n", tau, L.size(), wrong,
+                       L.empty() ? 100.0 : 100.0 * (L.size() - wrong) / L.size(),
+                       branchTrue ? 100.0 * (L.size() - wrong) / branchTrue : 0.0, after);
+                if (wrong && getenv("PROBE_DBG"))
+                    for (auto& e : L) if (e.b != e.a + 1) printf("      wrong lock %d->%d margin %.2f\n", e.a, e.b, e.margin);
+            }
+        }
     }
 
     // Could flux be a hard filter? Distribution of the TRUE junctions' flux vs wrong candidates.

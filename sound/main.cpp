@@ -16,6 +16,7 @@
 #include "adjacency.hpp"
 #include "main_data_decoder.hpp"
 #include "pcm_junction.hpp"
+#include "edge_lock.hpp"
 
 #define CHUNK_SIZE 1024
 #define COUNTER_FREQUENCY 9999999
@@ -754,6 +755,65 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Confident-edge locking (PLAN_full_pcm_decode.md step 5): force edges whose full-PCM
+    // junction flux beats every competitor - on both the successor and predecessor side - by
+    // a factor >= RP_LOCK_TAU (median over the predecessor contexts). A wrong lock makes the
+    // true order unreachable, so the threshold comes from pcm_probe's precision table. Then
+    // re-run arc consistency so the locks cascade. RP_LOCK=0 disables.
+    {
+        const char* e = std::getenv("RP_LOCK");
+        const bool on = !(e && e[0] == '0') && profile.isLayerIII();
+        if (on) {
+            double tau = 1.5;
+            if (const char* t = std::getenv("RP_LOCK_TAU")) tau = atof(t);
+            int rounds = 8;  // re-lock on the pruned graph until nothing new locks
+            if (const char* r = std::getenv("RP_LOCK_ROUNDS")) rounds = std::max(1, atoi(r));
+            const char* a = std::getenv("RP_AC3");
+            const bool acOk = !(a && a[0] == '0') && (preShuffleBreaks == 0 || (a && a[0] == '1'));
+            // Cost cap: one round is ~sum_a min(|preds(a)|, 8) * |succ(a)| window decodes
+            // (~0.25-0.5 ms each). Dense graphs (CBR: ~170k/round, ~2 min) gain almost no locks
+            // (pcm_probe: <5% coverage on CBR), so skip them unless RP_LOCK=1 forces.
+            long estimate = 0;
+            {
+                vector<int> indegTmp(chunks.size(), 0);
+                for (const auto& v : adj) for (int b : v) ++indegTmp[b];
+                for (size_t x = 0; x < adj.size(); ++x)
+                    estimate += (long)std::min(indegTmp[x], 8) * (long)adj[x].size();
+            }
+            long cap = 40000;
+            if (const char* c = std::getenv("RP_LOCK_MAX_DECODES")) cap = atol(c);
+            const bool forced = e && e[0] == '1';
+            if (estimate > cap && !forced) {
+                cout << "Edge locking: skipped (~" << estimate << " decodes/round > " << cap
+                     << "; RP_LOCK=1 forces, RP_LOCK_MAX_DECODES raises the cap)\n";
+                rounds = 0;
+            }
+            const auto t0 = chrono::steady_clock::now();
+            long totalLocks = 0, totalTrue = 0, totalDec = 0;
+            for (int round = 1; round <= rounds; ++round) {
+                long dec = 0;
+                const auto locks = EdgeLock::findConfidentEdges(chunks, metas, adj, 0, tau, 8,
+                                                                EdgeLock::Mode::Median, &dec);
+                totalDec += dec;
+                if (locks.empty()) break;
+                const long removed = EdgeLock::applyLocks(adj, locks);
+                int lockTrue = 0; // diagnostic only: checked against the source order
+                for (const auto& l : locks) if (origIndexOf[l.b] == origIndexOf[l.a] + 1) ++lockTrue;
+                totalLocks += (long)locks.size();
+                totalTrue += lockTrue;
+                long acRemoved = 0;
+                if (acOk) acRemoved = propagateArcConsistency(adj, static_cast<int>(chunks.size()), 0);
+                cout << "Edge locking round " << round << " (tau " << tau << "): " << locks.size()
+                     << " locked, " << removed << " competing edges removed, AC-3 removed "
+                     << acRemoved << " [vs source: " << lockTrue << "/" << locks.size() << " correct]\n";
+                if (acRemoved < 0) break;
+            }
+            const double secs = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
+            if (rounds > 0) cout << "Edge locking total: " << totalLocks << " edges (" << totalDec << " decodes, " << fixed
+                 << setprecision(2) << secs << "s) [vs source: " << totalTrue << "/" << totalLocks << " correct]\n";
+        }
+    }
+
     auto indeg  = computeInDegree(adj, static_cast<int>(chunks.size()));
     auto outdeg = computeOutDegree(adj, static_cast<int>(chunks.size()));
 
@@ -1001,6 +1061,8 @@ int main(int argc, char* argv[]) {
         int exactPos = 0;
         for (size_t i = 0; i < reconOrig.size(); ++i)
             if (reconOrig[i] == static_cast<int>(i)) ++exactPos;
+        int trueJ = 0; // chunk-level junctions whose successor is the true next chunk
+        for (size_t i = 1; i < reconOrig.size(); ++i) if (reconOrig[i] == reconOrig[i - 1] + 1) ++trueJ;
         const bool exactMatch = (reconOrig.size() == chunks.size()) &&
                                 std::is_sorted(reconOrig.begin(), reconOrig.end());
         cout << "Reconstruction vs source: " << exactPos << "/" << reconOrig.size()
@@ -1008,6 +1070,8 @@ int main(int argc, char* argv[]) {
              << fixed << setprecision(1) << (100.0 * exactPos / std::max<size_t>(1, reconOrig.size())) << "%)"
              << (exactMatch ? "  --  EXACT (output.mp3 is byte-identical to the source stream)" : "")
              << "\n";
+        cout << "Reconstruction junctions: " << trueJ << "/" << (reconOrig.empty() ? 0 : reconOrig.size() - 1)
+             << " are true successor pairs\n";
     } else {
         cout << "Failed to reconstruct (no complete ordering found"
              << (g_aborted ? " within the search budget" : "") << ").\n";
