@@ -230,3 +230,61 @@ probe shows wrong locks at 1.1 on sample-3s and test7).
    2-opt test says it is aligned.
 3. CBR: cheaper locking (e.g. only score chunks with few predecessors) and a sharper
    window (more post-junction audio).
+
+## Step 6 - block-move repair + lock-threshold fallback (2026-10-09)
+
+**Repair** (`repairOrdering` in `main.cpp`, `RP_REPAIR`, `RP_REPAIR_PASSES`). After the DFS
+returns a complete ordering, it runs a best-improvement local search over two move types:
+- **block move**: take seq[i..j] out and reinsert it after position k (3 new junctions);
+- **block swap**: exchange two disjoint blocks (4 new junctions).
+
+A move is only considered when every new junction is an edge of the **full** structural
+graph (taken before AC-3 and locking, so a wrong lock can be undone), the whole ordering
+passes the bit-reservoir check, and the cost strictly drops. Chunk 0 stays pinned. Moves are
+enumerated through structural predecessor/successor lists, ~30k valid candidates per pass on
+test7_short, ~4 s.
+
+Two things the first version got wrong, found on the test7_short tau-1.1 near-miss:
+1. **Block moves alone can't fix it.** The wrong ordering was A-X-Y-B where the truth is
+   A-B-Y-X. Every single block move along the way is structurally invalid or not
+   improving. A single block swap (X <-> B) fixes it, so block swaps were added.
+2. **The cost could be gamed.** With unmeasurable junctions scored at a neutral value, the
+   search took a move (-0.086) that made two high-flux junctions unmeasurable, away from the
+   truth it had just reached. The cost is now lexicographic: (number of unmeasurable
+   junctions, summed log1p(flux) over the rest).
+
+Note: on the true test7_short order, 60 moves would lower summed flux *further* but fail the
+reservoir check. So the true order is not the pure flux minimum. It's flux **plus** the
+reservoir constraint that pins it down.
+
+**Lock-threshold fallback** (`RP_LOCK_TAU` is now a schedule, default `1.5,1.25,1.1`). If no
+complete ordering is found at one tau, locking + search is redone from the unlocked graph at
+the next one. Every attempt except the last gets a search budget (`RP_TIME_BUDGET`, else
+45 s broadening / 30 s), so a mid-size graph can't run an unbounded exhaustive DFS. A
+too-low tau risks a wrong lock; when the DFS still completes, the repair can undo it.
+
+**Results (default settings):**
+
+| fixture | before step 6 | now |
+|---|---|---|
+| ci_sanity | exact | exact (seeds 1-3) |
+| sample-3s | exact, seeds 1-7 | exact, seeds 1-7, repair 0 moves, ~1.6 s |
+| test7_shorter | exact, seeds 1-7 | exact, seeds 1-7, repair 0 moves, ~3 s |
+| **test7_short** | no complete ordering | **byte-exact on seeds 1-7**, every lock correct. Seeds 3/5/6/7 finish at tau 1.25 (~61 s). Seeds 1/2/4 reach tau 1.1, which yields the A-X-Y-B ordering (606/609 true junctions), and **one repair swap makes it exact** (~99 s) |
+| CBR, test7 | not completed | unchanged (locking skipped: cost cap / pre-shuffle breaks; DFS never completes, so the repair never runs) |
+
+`regression.sh` passes, and the baseline has been updated: test7_short goes from FAILED to
+100.0 (supernodes 63). regression.sh now reads the last lock attempt's supernode count.
+`ci_sanity.sh` passes.
+
+**Stress test, tau forced to 1.0** (the probe shows wrong locks there), seeds 1-3:
+- sample-3s seed 3: 2 wrong locks. The DFS still completes on a wrong ordering, and the
+  repair fixes it in 1 move, giving byte-exact output.
+- test7_shorter / test7_short: 4-25 wrong locks. The graph has no complete ordering left,
+  so the repair never gets to run.
+
+The repair only rescues orderings the search completes, which is why the schedule starts
+strict.
+
+**Cost:** the wall-clock is dominated by the budgets of failed lock attempts (45 s + 30 s
+before the tau-1.1 attempt on test7_short). The repair itself is ~4 s.
