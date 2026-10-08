@@ -1171,11 +1171,14 @@ int main(int argc, char* argv[]) {
             g_deadline = chrono::steady_clock::now() +
                          chrono::duration_cast<chrono::steady_clock::duration>(chrono::duration<double>(atof(t)));
             g_haveDeadline = true;
-        } else if (g_maxNodes == 0 && lockAttempt + 1 < lockTaus.size()) {
-            // A lock attempt that still has a lower-tau fallback must not run an unbounded
-            // exhaustive DFS (test7_short at tau 1.25: 108 supernodes, never terminates).
+        } else if (g_maxNodes == 0 && lockTaus.size() > 1) {
+            // With a lock schedule, no attempt may run an unbounded exhaustive DFS: locking can
+            // shrink a large graph below the broadening threshold (test7_short at tau 1.25:
+            // 108 supernodes, ran >500 s), which would drop rp's "always terminates" guarantee.
+            // 30 s per attempt with a fallback left, 45 s for the last one.
+            const double budget = (lockAttempt + 1 < lockTaus.size()) ? 30.0 : 45.0;
             g_deadline = chrono::steady_clock::now() +
-                         chrono::duration_cast<chrono::steady_clock::duration>(chrono::duration<double>(30.0));
+                         chrono::duration_cast<chrono::steady_clock::duration>(chrono::duration<double>(budget));
             g_haveDeadline = true;
         }
 

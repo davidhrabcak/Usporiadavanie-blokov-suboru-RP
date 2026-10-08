@@ -286,5 +286,21 @@ too-low tau risks a wrong lock; when the DFS still completes, the repair can und
 The repair only rescues orderings the search completes, which is why the schedule starts
 strict.
 
+**Termination:** with a lock schedule every attempt is time-budgeted, including the last
+(30 s with a fallback left, 45 s for the last), so `rp` still always terminates even when
+locking shrinks a large graph below the 120-supernode broadening threshold. A single-tau
+run (`RP_LOCK_TAU=1.5`) keeps the old rule.
+
+**Risk trade-off of the fallback:** the default can now reach tau 1.1, where the true-order
+probe recorded wrong locks (1 on sample-3s, 8 on test7). Before the fallback, a file that
+failed at 1.5 honestly reported "no complete ordering". Now it may emit a complete but
+wrong ordering, and the repair only sometimes rescues that (stress test above). Real use has
+no `[vs source]` line to catch it. `RP_LOCK_TAU=1.5` restores the old conservative
+behaviour.
+
+**Repair cost on large inputs:** block-swap enumeration grows roughly as n^2 x degree^2.
+That's ~4 s/pass at n=610, but it could be very slow at test7's 3,351 chunks if that file
+ever completes (with up to 50 passes). Not an issue on any fixture today.
+
 **Cost:** the wall-clock is dominated by the budgets of failed lock attempts (45 s + 30 s
 before the tau-1.1 attempt on test7_short). The repair itself is ~4 s.
