@@ -1125,10 +1125,25 @@ int main(int argc, char* argv[]) {
     vector<int> result;
     bool found = false;
     size_t foundAttempt = 0;   // which lock attempt produced the ordering (repair policy below)
+    // Deepest partial path over ALL lock attempts, in chunks (each attempt has its own
+    // supernode numbering): a late attempt that dead-ends at once mustn't hide an earlier
+    // attempt's long partial path in the failure report.
+    vector<int> bestPartial;   // chunk indices
+    size_t bestPartialSupers = 0, bestPartialOf = 0;
+    auto keepDeepest = [&]() {
+        vector<int> p;
+        for (int si : g_deepestOrder) for (int ci : supernodes[si].chunks) p.push_back(ci);
+        if (p.size() > bestPartial.size()) {
+            bestPartial = std::move(p);
+            bestPartialSupers = g_deepestOrder.size();
+            bestPartialOf = supernodes.size();
+        }
+    };
     for (size_t lockAttempt = 0; lockAttempt < lockTaus.size() && !found; ++lockAttempt) {
         foundAttempt = lockAttempt;
         const double tau = lockTaus[lockAttempt];
         adj = adjBase;
+        if (lockAttempt > 0) keepDeepest();
         g_deepestOrder.clear();
         g_haveDeadline = false;   // each lock attempt gets its own search budget
         if (lockTaus.size() > 1)
@@ -1199,13 +1214,26 @@ int main(int argc, char* argv[]) {
         primed.reservoirLevel = 0;
         if (isLayerIII) {
             const ChunkMeta* prev = nullptr; // chunk 0 is always first placed - no predecessor
+            bool startOk = true;
             for (int ci : supernodes[startSuper].chunks) {
                 if (!advanceReservoirChunk(primed.reservoirLevel, prev, metas[ci], chunks[ci], sideInfo, maxReservoir)) {
-                    cerr << "Reservoir check failed on the pinned starting chunk - "
-                            "mainDataBegin metadata is likely wrong for chunk 0\n";
-                    return 1;
+                    startOk = false;
+                    break;
                 }
                 prev = &metas[ci];
+            }
+            if (!startOk && tau > 0) {
+                // A wrong lock chained an impossible successor onto chunk 0's supernode: this
+                // attempt can't succeed, the next (from the unlocked graph) still can.
+                cout << "Pinned start supernode fails the reservoir check (a wrong lock merged into it)"
+                     << " - abandoning this lock attempt\n";
+                g_deepestOrder.assign(1, startSuper);
+                continue;
+            }
+            if (!startOk) {
+                cerr << "Reservoir check failed on the pinned starting chunk - "
+                        "mainDataBegin metadata is likely wrong for chunk 0\n";
+                return 1;
             }
         }
 
@@ -1376,14 +1404,15 @@ int main(int argc, char* argv[]) {
              << (g_aborted ? " within the search budget" : "") << ").\n";
         // How right was the deepest partial path? Chunk-level junctions whose successor is the
         // true next chunk, and where the first wrong one is.
+        keepDeepest();
         vector<int> path;
-        for (int si : g_deepestOrder) for (int ci : supernodes[si].chunks) path.push_back(origIndexOf[ci]);
+        for (int ci : bestPartial) path.push_back(origIndexOf[ci]);
         int good = 0, firstBad = -1;
         for (size_t k = 1; k < path.size(); ++k) {
             if (path[k] == path[k - 1] + 1) ++good;
             else if (firstBad < 0) firstBad = static_cast<int>(k);
         }
-        cout << "Deepest partial path: " << g_deepestOrder.size() << "/" << supernodes.size() << " supernodes, "
+        cout << "Deepest partial path: " << bestPartialSupers << "/" << bestPartialOf << " supernodes, "
              << path.size() << " chunks; true junctions " << good << "/" << (path.empty() ? 0 : path.size() - 1)
              << "; correct prefix = " << (firstBad < 0 ? (int)path.size() : firstBad) << " chunks\n";
     }
