@@ -464,6 +464,18 @@ static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
             if (from <= to) t.insert(t.end(), seq.begin() + from, seq.begin() + to + 1);
         };
 
+        // Phase 0 evaluates only moves that cut a suspect junction; if none of them is an
+        // improving reservoir-valid move, phase 1 scans every move (within the time budget).
+        // Wrong junctions are usually but not always high-flux: cbr320_10s at 4 KB needs a
+        // swap whose four cut junctions are all outside the top 16.
+        bool moved = false;
+        int resvRejected = 0;
+        for (int phase = suspects > 0 ? 0 : 1; phase < 2 && !moved && !outOfTime; ++phase) {
+        if (phase == 1) std::fill(bad.begin(), bad.end(), 1);
+        moves.clear();
+        candidates = 0;
+        resvRejected = 0;
+
         // block moves
         for (int i = 1; i < n; ++i)
             for (int p : preds[seq[i]]) {
@@ -507,11 +519,9 @@ static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
             }
 
         std::sort(moves.begin(), moves.end(), [](const Move& x, const Move& y) { return x.cost < y.cost; });
-        bool moved = false;
-        int resvRejected = 0;
         for (Move& m : moves) {
             if (isLayerIII && !reservoirValid(metas, m.t, sideInfo, maxReservoir)) { ++resvRejected; continue; }
-            cout << "  repair pass " << pass + 1 << ": " << m.what << ", cost (unmeasured, summed flux) ("
+            cout << "  repair pass " << pass + 1 << (phase == 0 ? " (suspects)" : " (full scan)") << ": " << m.what << ", cost (unmeasured, summed flux) ("
                  << cur.unmeasured << ", " << fixed << setprecision(3) << cur.sum << ") -> ("
                  << m.cost.unmeasured << ", " << m.cost.sum << ") (" << candidates
                  << " valid moves scanned, " << moves.size() << " improving, " << resvRejected
@@ -522,6 +532,7 @@ static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
             moved = true;
             break;
         }
+        } // phase
         if (!moved) {
             cout << "  repair pass " << pass + 1 << ": no improving valid move (" << candidates
                  << " valid moves scanned, " << moves.size() << " improving but reservoir-invalid)\n";
@@ -1113,7 +1124,9 @@ int main(int argc, char* argv[]) {
     vector<Supernode> supernodes;
     vector<int> result;
     bool found = false;
+    size_t foundAttempt = 0;   // which lock attempt produced the ordering (repair policy below)
     for (size_t lockAttempt = 0; lockAttempt < lockTaus.size() && !found; ++lockAttempt) {
+        foundAttempt = lockAttempt;
         const double tau = lockTaus[lockAttempt];
         adj = adjBase;
         g_deepestOrder.clear();
@@ -1286,8 +1299,18 @@ int main(int argc, char* argv[]) {
         vector<int> seq; // reconstructed chunk order
         for (int si : result) for (int ci : supernodes[si].chunks) seq.push_back(ci);
 
+        // Repair policy: with a tau schedule, an ordering found by the FIRST (strictest)
+        // attempt is left alone. The benchmark (BENCHMARK_pcm_vs_main.md) found the repair
+        // only helped orderings from a fallback tau (wrong locks / wrong block), and on one
+        // first-attempt success (cbr32_10s, 1 KB) it moved the exact order to a lower-flux
+        // wrong one - the true order is not always the flux minimum. RP_REPAIR=1 forces it,
+        // =0 disables; a single-tau run keeps the old always-on behaviour.
         const char* rp = std::getenv("RP_REPAIR");
-        if (g_pcmRank && !(rp && rp[0] == '0')) {
+        const bool repairForced = rp && rp[0] == '1';
+        const bool firstOfSchedule = lockTaus.size() > 1 && foundAttempt == 0;
+        if (g_pcmRank && !(rp && rp[0] == '0') && firstOfSchedule && !repairForced)
+            cout << "Block-move repair: skipped (found by the strictest lock attempt; RP_REPAIR=1 forces)\n";
+        else if (g_pcmRank && !(rp && rp[0] == '0')) {
             int passes = 50;
             if (const char* v = std::getenv("RP_REPAIR_PASSES")) passes = std::max(1, atoi(v));
             const auto t0 = chrono::steady_clock::now();

@@ -405,7 +405,11 @@ Output is written to `output.mp3` in the current directory. Chunk 0 of the input
 | `RP_REPAIR` | on | block-move/block-swap repair of the found ordering on summed PCM flux (needs RP_PCM). `=0` off. |
 | `RP_REPAIR_PASSES` | 50 | max repair moves applied. |
 | `RP_LOCK_ROUNDS` | 8 | max lock/AC-3 iterations on the pruned graph. |
-| `RP_LOCK_MAX_DECODES` | 40000 | skip locking when one round would need more window decodes than this (CBR ~170k). |
+| `RP_LOCK_MAX_DECODES` | 40000 x threads | skip locking when one round would need more window decodes than this. Window fluxes are memoised across rounds and tau attempts. |
+| `RP_THREADS` | all cores | threads for edge-lock scoring (results identical to 1 thread); also scales the default lock cap. |
+| `RP_REPAIR_SUSPECTS` | max(16, n/20) | repair only evaluates moves that cut one of the K worst-flux junctions. `0` = no filter (slow on dense CBR graphs). |
+| `RP_REPAIR_BUDGET` | 60 | repair wall-clock budget (s). When spent, the best move found so far is still applied. |
+| `RP_CHUNK_SIZE` | 1024 | chunk size in bytes (rp and pcm_probe). The PCM junction window is byte-capped, so the signal doesn't depend on it. |
 | `RP_SCORE_ORDER` | off | diagnostic: when the found ordering isn't exact, print its summed PCM flux vs the source order's. |
 | `RP_BESTOF` | off | `RP_BESTOF=1` keeps searching past the first complete ordering for the min summed-junction-cost one. Measured *worse* - see Known Limitations item 7. |
 | `RP_BEAM` | unset | `RP_BEAM=K` caps each DFS node to its K best-ranked reservoir-valid candidates (single fixed-width attempt). |
