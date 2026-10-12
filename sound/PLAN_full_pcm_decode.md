@@ -304,3 +304,17 @@ ever completes (with up to 50 passes). Not an issue on any fixture today.
 
 **Cost:** the wall-clock is dominated by the budgets of failed lock attempts (45 s + 30 s
 before the tau-1.1 attempt on test7_short). The repair itself is ~4 s.
+
+## Step 7 - bitrate / chunk-size benchmark and hardening (2026-10-12)
+
+Full write-up: `BENCHMARK_pcm_vs_main.md` (+ `.xlsx`). New fixtures from
+`test/make_bitrate_variants.sh` (CBR 32-320 kbps, VBR q2/q5, 10/30 s), a 6-min 32 kbps CBR and a
+6-min VBR file, chunk sizes 1-8 KB (`RP_CHUNK_SIZE`), seeds 1-3. Fixes found along the way: the
+header-less final fragment (shared code), a byte-capped PCM window, deadline polling, threaded +
+memoised locking with a fixed cap, a bounded two-phase repair that is skipped after a strict-tau
+success, and the wrong-lock-on-chunk-0 crash.
+
+Result: 103/192 runs exact against 65/192 for main (with the shared fix), 0 complete-but-wrong runs,
+and no cell where main is exact and this branch isn't. Held-out segment: 33/56 against 25/56. Main
+with a 5x budget gains 1 of 20 cells. The remaining failures (long CBR at 1-2 KB, the 6-min files
+below 8 KB) are search-limited: the next step is a global search on summed flux.
