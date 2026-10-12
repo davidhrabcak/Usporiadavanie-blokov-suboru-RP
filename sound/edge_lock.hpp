@@ -2,6 +2,7 @@
 #define RP_EDGE_LOCK_HPP
 
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 #include "chunk_meta.hpp"
 
@@ -32,12 +33,22 @@ struct LockedEdge {
 //           are scored on an evenly spaced sample of maxCtx of them.
 enum class Mode { Robust, Median };
 
-// `start` is the pinned first chunk (scored with no context).
+// Flux of window [p, a, b] (p = -1: none), keyed by packKey. A window's flux depends only on
+// those three chunks, so one memo can be shared across lock rounds and tau attempts.
+using FluxMemo = std::unordered_map<uint64_t, float>;
+inline uint64_t packKey(int p, int a, int b) {
+    return ((uint64_t)(unsigned)(p + 1) << 42) | ((uint64_t)(unsigned)a << 21) | (uint64_t)(unsigned)b;
+}
+
+// `start` is the pinned first chunk (scored with no context). `memo` (optional) is read and
+// extended; `decodes` counts real decodes (memo misses). `threads` > 1 scores chunks in
+// parallel (the result is identical to a serial run).
 std::vector<LockedEdge> findConfidentEdges(const std::vector<std::vector<uint8_t>>& chunks,
                                            const std::vector<ChunkMeta>& metas,
                                            const std::vector<std::vector<int>>& adj,
                                            int start, double tau, int maxCtx,
-                                           Mode mode = Mode::Robust, long* decodes = nullptr);
+                                           Mode mode = Mode::Robust, long* decodes = nullptr,
+                                           FluxMemo* memo = nullptr, int threads = 1);
 
 // Forces every locked edge into `adj`: a's only successor becomes b, and b is removed from
 // every other chunk's successor list. Returns the number of edges removed.

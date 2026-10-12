@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 project(rp)
 
 set(CMAKE_CXX_STANDARD 14)
+find_package(Threads REQUIRED)
 
 add_executable(rp
         frame_scanner.cpp
@@ -64,3 +65,6 @@ add_executable(pcm_probe
         edge_lock.cpp)
 target_include_directories(pcm_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_features(pcm_probe PRIVATE cxx_std_17)
+
+target_link_libraries(rp PRIVATE Threads::Threads)
+target_link_libraries(pcm_probe PRIVATE Threads::Threads)

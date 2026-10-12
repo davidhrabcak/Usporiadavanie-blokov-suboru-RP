@@ -1,6 +1,9 @@
 #include "edge_lock.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <thread>
 #include <limits>
 #include <unordered_map>
 
@@ -15,7 +18,7 @@ std::vector<LockedEdge> findConfidentEdges(const std::vector<std::vector<uint8_t
                                            const std::vector<ChunkMeta>& metas,
                                            const std::vector<std::vector<int>>& adj,
                                            int start, double tau, int maxCtx, Mode mode,
-                                           long* decodes) {
+                                           long* decodes, FluxMemo* memo, int threads) {
     const int n = static_cast<int>(chunks.size());
     std::vector<std::vector<int>> preds(n);
     for (int a = 0; a < n; ++a) for (int b : adj[a]) preds[b].push_back(a);
@@ -24,37 +27,49 @@ std::vector<LockedEdge> findConfidentEdges(const std::vector<std::vector<uint8_t
     // hi = INF when any context couldn't be measured (then a->b can never be locked).
     // lo = INF when no context could be measured (then a->b can't be safely out-competed).
     std::vector<std::unordered_map<int, std::pair<double, double>>> score(n);
-    std::vector<bool> scored(n, false);
-    long nDecodes = 0;
+    std::vector<char> scored(n, 0);
+    // Per-chunk new memo entries (merged after the parallel section; NaN = unmeasurable).
+    std::vector<std::vector<std::pair<uint64_t, float>>> fresh(n);
+    std::vector<long> nDec(n, 0);
 
-    for (int a = 0; a < n; ++a) {
-        if (!metas[a].valid || adj[a].empty()) continue;
+    auto scoreChunk = [&](int a) {
+        if (!metas[a].valid || adj[a].empty()) return;
         std::vector<int> ctx;
         if (a == start) ctx.push_back(-1);
         else {
-            if (preds[a].empty()) continue;
+            if (preds[a].empty()) return;
             if ((int)preds[a].size() <= maxCtx) ctx = preds[a];
-            else if (mode == Mode::Robust) continue;
+            else if (mode == Mode::Robust) return;
             else for (int k = 0; k < maxCtx; ++k)   // evenly spaced sample
                 ctx.push_back(preds[a][(size_t)k * preds[a].size() / maxCtx]);
         }
-        scored[a] = true;
+        scored[a] = 1;
         for (int b : adj[a]) {
             double lo = INF, hi = -INF;
             bool anyBad = false;
             std::vector<double> vals;
             for (int p : ctx) {
                 if (p == b) { continue; } // a 2-cycle context can't be a real path
-                std::vector<const std::vector<uint8_t>*> segs;
-                int first = a;
-                if (p >= 0 && metas[p].valid) { segs.push_back(&chunks[p]); first = p; }
-                segs.push_back(&chunks[a]);
-                segs.push_back(&chunks[b]);
-                const PcmJunction::Metrics m =
-                    PcmJunction::scoreJunction(segs, (int)segs.size() - 1, metas[first].headOffset);
-                ++nDecodes;
-                if (!m.valid || m.silent) { anyBad = true; continue; }
-                const double f = m.flux + FLOOR;
+                const int pp = (p >= 0 && metas[p].valid) ? p : -1;
+                const uint64_t key = packKey(pp, a, b);
+                float fx;
+                auto it = memo ? memo->find(key) : FluxMemo::iterator();
+                if (memo && it != memo->end()) {
+                    fx = it->second;
+                } else {
+                    std::vector<const std::vector<uint8_t>*> segs;
+                    int first = a;
+                    if (pp >= 0) { segs.push_back(&chunks[pp]); first = pp; }
+                    segs.push_back(&chunks[a]);
+                    segs.push_back(&chunks[b]);
+                    const PcmJunction::Metrics m =
+                        PcmJunction::scoreJunction(segs, (int)segs.size() - 1, metas[first].headOffset);
+                    ++nDec[a];
+                    fx = (!m.valid || m.silent) ? std::numeric_limits<float>::quiet_NaN() : (float)m.flux;
+                    if (memo) fresh[a].push_back({key, fx});
+                }
+                if (std::isnan(fx)) { anyBad = true; continue; }
+                const double f = fx + FLOOR;
                 lo = std::min(lo, f);
                 hi = std::max(hi, f);
                 vals.push_back(f);
@@ -71,8 +86,26 @@ std::vector<LockedEdge> findConfidentEdges(const std::vector<std::vector<uint8_t
             if (anyBad || hi < 0) hi = INF;
             score[a][b] = {lo, hi};
         }
+    };
+
+    // Each chunk writes only its own slots (score[a], scored[a], fresh[a], nDec[a]) and the
+    // memo is read-only until the merge below, so the parallel run is race-free.
+    threads = std::max(1, std::min(threads, n));
+    if (threads == 1) {
+        for (int a = 0; a < n; ++a) scoreChunk(a);
+    } else {
+        std::atomic<int> next(0);
+        std::vector<std::thread> pool;
+        for (int t = 0; t < threads; ++t)
+            pool.emplace_back([&] { for (int a; (a = next.fetch_add(1)) < n;) scoreChunk(a); });
+        for (auto& th : pool) th.join();
     }
-    if (decodes) *decodes = nDecodes;
+    long total = 0;
+    for (int a = 0; a < n; ++a) {
+        total += nDec[a];
+        if (memo) for (const auto& kv : fresh[a]) memo->emplace(kv.first, kv.second);
+    }
+    if (decodes) *decodes = total;
 
     std::vector<LockedEdge> out;
     for (int a = 0; a < n; ++a) {

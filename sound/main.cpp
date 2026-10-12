@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <csetjmp>
 #include <chrono>
+#include <thread>
 #include <string>
 #include <cstdint>
 #include <iostream>
@@ -414,15 +415,46 @@ static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
         return true;
     };
 
+    // Suspect filter: a move can only fix the ordering by cutting a wrong junction, and wrong
+    // splices are high-flux (pcm_probe: true median ~1.05, wrong ~3). So only moves that cut at
+    // least one of the K worst junctions of the current sequence are evaluated (unmeasurable
+    // junctions count as worst). Without it, each pass on a dense CBR graph enumerates millions
+    // of candidates, each a full summed-flux evaluation with fresh decodes (bohemoan 8 KB: > 10 min).
+    // RP_REPAIR_SUSPECTS=K overrides (0 = no filter); RP_REPAIR_BUDGET (s, default 60) bounds
+    // the whole repair - when spent, the best move found so far is still applied, then it stops.
+    int suspects = std::max(16, n / 20);
+    if (const char* v = std::getenv("RP_REPAIR_SUSPECTS")) suspects = atoi(v);
+    double budget = 60;
+    if (const char* v = std::getenv("RP_REPAIR_BUDGET")) budget = atof(v);
+    const auto deadline = chrono::steady_clock::now() +
+        chrono::duration_cast<chrono::steady_clock::duration>(chrono::duration<double>(budget));
+    bool outOfTime = false;
+
     OrderCost cur = summedFlux(metas, seq);
     int applied = 0;
-    for (int pass = 0; pass < maxPasses; ++pass) {
+    for (int pass = 0; pass < maxPasses && !outOfTime; ++pass) {
         vector<int> pos(chunks.size(), -1);
         for (int k = 0; k < n; ++k) pos[seq[k]] = k;
+        // bad[k]: junction seq[k-1] -> seq[k] is a suspect
+        vector<char> bad(n + 1, suspects <= 0 ? 1 : 0);
+        if (suspects > 0) {
+            vector<pair<double, int>> jv;
+            for (int k = 1; k < n; ++k) {
+                int left[3], nl = 0;
+                for (int j = k - 3; j < k; ++j) if (j >= 0) left[nl++] = seq[j];
+                const double v = pcmRaw(metas, left, nl, seq[k]);
+                jv.push_back({v < 0 ? 1e9 : v, k});
+            }
+            std::sort(jv.begin(), jv.end(), [](const pair<double, int>& x, const pair<double, int>& y) { return x.first > y.first; });
+            for (int q = 0; q < (int)jv.size() && q < suspects; ++q) bad[jv[q].second] = 1;
+        }
+        auto cut = [&](int k) { return k < n && bad[k]; }; // removing junction seq[k-1] -> seq[k]
         struct Move { OrderCost cost; vector<int> t; string what; };
         vector<Move> moves;
         long candidates = 0;
         auto consider = [&](vector<int>&& t, string what) {
+            if (outOfTime) return;
+            if ((candidates & 0xFF) == 0 && chrono::steady_clock::now() >= deadline) { outOfTime = true; return; }
             if (!allEdges(t)) return;
             ++candidates;
             const OrderCost c = summedFlux(metas, t);
@@ -437,8 +469,10 @@ static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
             for (int p : preds[seq[i]]) {
                 const int k = pos[p];
                 if (k < 0 || k == i - 1) continue;
-                for (int j = i; j < n; ++j) {
+                const bool outerCut = cut(i) || cut(k + 1);
+                for (int j = i; j < n && !outOfTime; ++j) {
                     if (k >= i && k <= j) break;
+                    if (!outerCut && !cut(j + 1)) continue;
                     if (j + 1 < n && !isEdge(seq[i - 1], seq[j + 1])) continue;
                     if (k + 1 < n && !isEdge(seq[j], seq[k + 1])) continue;
                     vector<int> t; t.reserve(n);
@@ -457,10 +491,12 @@ static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
                 const int i2 = pos[s2];
                 if (i2 < 0 || i2 <= i1 + 1) continue;
                 if (!isEdge(seq[i2 - 1], seq[i1])) continue;
-                for (int j1 = i1; j1 + 1 < i2; ++j1)
+                const bool outerCut = cut(i1) || cut(i2);
+                for (int j1 = i1; j1 + 1 < i2 && !outOfTime; ++j1)
                     for (int p : preds[seq[j1 + 1]]) {
                         const int j2 = pos[p];
                         if (j2 < i2) continue;
+                        if (!outerCut && !cut(j1 + 1) && !cut(j2 + 1)) continue;
                         if (j2 + 1 < n && !isEdge(seq[j1], seq[j2 + 1])) continue;
                         vector<int> t; t.reserve(n);
                         range(t, 0, i1 - 1); range(t, i2, j2); range(t, j1 + 1, i2 - 1);
@@ -491,6 +527,7 @@ static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
                  << " valid moves scanned, " << moves.size() << " improving but reservoir-invalid)\n";
             break;
         }
+        if (outOfTime) cout << "  repair: time budget (" << budget << " s) spent - stopping\n";
     }
     return applied;
 }
@@ -1027,14 +1064,17 @@ int main(int argc, char* argv[]) {
         cout << "Edge locking: skipped (pre-shuffle found breaks; RP_LOCK=1 forces)\n";
     if (lockOn) {
         // Cost cap: one round is ~sum_a min(|preds(a)|, 8) * |succ(a)| window decodes
-        // (~0.25-0.5 ms each). Dense graphs (CBR: ~170k/round, ~2 min) gain almost no locks
-        // (pcm_probe: <5% coverage on CBR), so skip them unless RP_LOCK=1 forces.
+        // (~0.3-0.8 ms each, chunk-size independent since the window is byte-capped), spread
+        // over RP_THREADS threads, and later rounds/attempts mostly hit the memo. The default
+        // cap is 40k decodes per thread (~25 s for the first round); RP_LOCK=1 forces past it.
         long estimate = 0;
         vector<int> indegTmp(chunks.size(), 0);
         for (const auto& v : adj) for (int b : v) ++indegTmp[b];
         for (size_t x = 0; x < adj.size(); ++x)
             estimate += (long)std::min(indegTmp[x], 8) * (long)adj[x].size();
-        long cap = 40000;
+        int capThreads = std::max(1u, std::thread::hardware_concurrency());
+        if (const char* t = std::getenv("RP_THREADS")) capThreads = std::max(1, atoi(t));
+        long cap = 40000L * capThreads;
         if (const char* c = std::getenv("RP_LOCK_MAX_DECODES")) cap = atol(c);
         if (estimate > cap && !(lockEnv && lockEnv[0] == '1')) {
             cout << "Edge locking: skipped (~" << estimate << " decodes/round > " << cap
@@ -1062,6 +1102,12 @@ int main(int argc, char* argv[]) {
     const char* acEnv = std::getenv("RP_AC3");
     const bool acOk = !(acEnv && acEnv[0] == '0') && (preShuffleBreaks == 0 || (acEnv && acEnv[0] == '1'));
 
+    // Window fluxes are shared across lock rounds and tau attempts (a window's flux depends only
+    // on its three chunks), and scored on RP_THREADS threads (default: all cores).
+    EdgeLock::FluxMemo lockMemo;
+    int lockThreads = std::max(1u, std::thread::hardware_concurrency());
+    if (const char* t = std::getenv("RP_THREADS")) lockThreads = std::max(1, atoi(t));
+
     const auto adjBase = adj;
     vector<vector<int>> superAdj;
     vector<Supernode> supernodes;
@@ -1080,7 +1126,8 @@ int main(int argc, char* argv[]) {
             for (int round = 1; round <= lockRounds; ++round) {
                 long dec = 0;
                 const auto locks = EdgeLock::findConfidentEdges(chunks, metas, adj, 0, tau, 8,
-                                                                EdgeLock::Mode::Median, &dec);
+                                                                EdgeLock::Mode::Median, &dec,
+                                                                &lockMemo, lockThreads);
                 totalDec += dec;
                 if (locks.empty()) break;
                 const long removed = EdgeLock::applyLocks(adj, locks);
