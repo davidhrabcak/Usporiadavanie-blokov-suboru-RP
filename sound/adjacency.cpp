@@ -49,7 +49,7 @@ static int reconstructTailHeaderOffset(const uint8_t* tailHead, const int tov,
  * @return True if b is a valid continuation of chunk a.
  */
 bool canFollow(const ChunkMeta& a, const ChunkMeta& b) {
-    if (!a.valid || !b.valid) return false;
+    if (!a.valid || !b.valid || a.finalFragment) return false;
 
     const int rem = tailRemaining(a);
 
@@ -111,6 +111,7 @@ vector<vector<int>> buildAdjacency(const vector<ChunkMeta>& metas) {
     }
 
     for (int i = 0; i < n; ++i) {
+        if (metas[i].finalFragment) continue; // end of stream - nothing follows
         int rem = tailRemaining(metas[i]);
         if (rem >= 0) {
             auto it = byFrameStart.find(rem);

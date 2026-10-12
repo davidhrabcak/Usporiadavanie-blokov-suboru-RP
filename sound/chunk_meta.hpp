@@ -93,6 +93,10 @@ struct ChunkMeta {
     int                   tailPartialLen;  // total length of tail partial frame (0 = no tail, -1 = unknown)
     std::vector<FrameSlice> frames;        // complete frames fully within chunk
     bool                  valid;
+    // The file's last, short chunk when it holds nothing but the remainder of the final frame
+    // (no frame header inside). It is then valid with headOffset = frameStarts[0] = its size
+    // (the "next frame" would start right after its last byte) and has no successors.
+    bool                  finalFragment = false;
     StreamProfile         profile;
 
     // All byte offsets within this chunk where a valid, profile-matching frame header starts.
@@ -127,9 +131,12 @@ static constexpr int MAX_FRAME_LENGTH = 1441;
 // Layer III side-info block size in bytes: MPEG1 32 (stereo) / 17 (mono), MPEG2/2.5 17 (stereo) / 9 (mono).
 int sideInfoSize(int versionID, bool isMono);
 
+// `shortChunk`: this chunk is shorter than the others, i.e. the file's last chunk. Only then can
+// a chunk without any frame header be accepted (as a finalFragment).
 ChunkMeta computeChunkMeta(int chunkIndex,
                            const std::vector<uint8_t>& chunk,
-                           const StreamProfile& expected);
+                           const StreamProfile& expected,
+                           bool shortChunk = false);
 
 // Derive a StreamProfile from the very first valid frame in a chunk.
 // Returns false if no valid header found.

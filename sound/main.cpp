@@ -733,7 +733,7 @@ int main(int argc, char* argv[]) {
             vector<ChunkMeta> origMetas;
             origMetas.reserve(chunks.size());
             for (int i = 0; i < static_cast<int>(chunks.size()); ++i)
-                origMetas.push_back(computeChunkMeta(i, chunks[i], prof0));
+                origMetas.push_back(computeChunkMeta(i, chunks[i], prof0, chunks[i].size() < chunks[0].size()));
 
             auto origAdj = buildAdjacency(origMetas);
             int broken = 0;
@@ -821,7 +821,7 @@ int main(int argc, char* argv[]) {
     metas.reserve(chunks.size());
     int invalidCount = 0;
     for (int i = 0; i < static_cast<int>(chunks.size()); ++i) {
-        metas.push_back(computeChunkMeta(i, chunks[i], profile));
+        metas.push_back(computeChunkMeta(i, chunks[i], profile, chunks[i].size() < chunks[0].size()));
         if (!metas.back().valid) {
             cerr << "  Chunk " << i << ": INVALID (no consistent frame run found)\n";
             ++invalidCount;
