@@ -1077,15 +1077,15 @@ int main(int argc, char* argv[]) {
         // Cost cap: one round is ~sum_a min(|preds(a)|, 8) * |succ(a)| window decodes
         // (~0.3-0.8 ms each, chunk-size independent since the window is byte-capped), spread
         // over RP_THREADS threads, and later rounds/attempts mostly hit the memo. The default
-        // cap is 40k decodes per thread (~25 s for the first round); RP_LOCK=1 forces past it.
+        // cap is a fixed 640k decodes (~25 s for the first round on 16 threads, a few minutes on
+        // one) so that WHETHER locking runs - and so the result - doesn't depend on the core
+        // count. RP_LOCK=1 forces past it; RP_LOCK_MAX_DECODES changes it.
         long estimate = 0;
         vector<int> indegTmp(chunks.size(), 0);
         for (const auto& v : adj) for (int b : v) ++indegTmp[b];
         for (size_t x = 0; x < adj.size(); ++x)
             estimate += (long)std::min(indegTmp[x], 8) * (long)adj[x].size();
-        int capThreads = std::max(1u, std::thread::hardware_concurrency());
-        if (const char* t = std::getenv("RP_THREADS")) capThreads = std::max(1, atoi(t));
-        long cap = 40000L * capThreads;
+        long cap = 640000;
         if (const char* c = std::getenv("RP_LOCK_MAX_DECODES")) cap = atol(c);
         if (estimate > cap && !(lockEnv && lockEnv[0] == '1')) {
             cout << "Edge locking: skipped (~" << estimate << " decodes/round > " << cap

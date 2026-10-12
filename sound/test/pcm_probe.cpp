@@ -90,6 +90,7 @@ int main(int argc, char** argv) {
 
         long cmpFrames = 0, exactFrames = 0, noOutput = 0;
         long cmpCur = 0, exactCur = 0;   // frames that start inside chunk i (the "pre" side)
+        long cmpNear = 0, exactNear = 0; // the last 3 pre-junction frames + every post frame
         double maxDiff = 0;
         for (int i = 1; i + 1 < n; ++i) {
             const int first = max(0, i - ctx);
@@ -99,7 +100,9 @@ int main(int argc, char** argv) {
             const int curSeg = i - first;
             const PcmJunction::Window w = PcmJunction::decodeWindow(segs, curSeg + 1, metas[first].headOffset);
             const long base = (long)first * CHUNK_SIZE;
-            for (const auto& fr : w.frames) {
+            for (size_t fk = 0; fk < w.frames.size(); ++fk) {
+                const auto& fr = w.frames[fk];
+                const bool near = w.junctionFrame >= 0 && (long)fk >= (long)w.junctionFrame - 3;
                 if (fr.byteStart < (long)curSeg * CHUNK_SIZE) continue; // warm-up chunks
                 auto it = fullByByte.find(base + fr.byteStart);
                 if (it == fullByByte.end()) continue;
@@ -107,6 +110,7 @@ int main(int argc, char** argv) {
                 ++cmpFrames;
                 const bool inCur = fr.byteStart < (long)(curSeg + 1) * CHUNK_SIZE;
                 if (inCur) ++cmpCur;
+                if (near) ++cmpNear;
                 if (fr.samples == 0 || ff.samples == 0) { ++noOutput; continue; }
                 const int ch = w.channels;
                 double d = 0;
@@ -114,13 +118,17 @@ int main(int argc, char** argv) {
                     d = max(d, (double)fabs(w.interleaved[(size_t)fr.sampleStart * ch + s] -
                                             full.interleaved[(size_t)ff.sampleStart * ch + s]));
                 maxDiff = max(maxDiff, d);
-                if (d == 0) { ++exactFrames; if (inCur) ++exactCur; }
+                if (d == 0) { ++exactFrames; if (inCur) ++exactCur; if (near) ++exactNear; }
             }
         }
         printf("  frames compared: %ld, sample-exact: %ld (%.2f%%), no output: %ld, max |diff| = %.3g\n",
                cmpFrames, exactFrames, cmpFrames ? 100.0 * exactFrames / cmpFrames : 0.0, noOutput, maxDiff);
         printf("  of which in chunk i (pre side): %ld, sample-exact: %ld (%.2f%%)\n",
                cmpCur, exactCur, cmpCur ? 100.0 * exactCur / cmpCur : 0.0);
+        // The window is byte-capped (PcmJunction::PRE_BYTES), so at 4-8 KB chunks its first
+        // frames are warm-up and can't be exact; what the junction score sees is this subset.
+        printf("  near the junction (last 3 pre frames + post): %ld, sample-exact: %ld (%.2f%%)\n",
+               cmpNear, exactNear, cmpNear ? 100.0 * exactNear / cmpNear : 0.0);
     }
 
     // ---- Gate 2: signal on structural candidate sets ------------------------------------
