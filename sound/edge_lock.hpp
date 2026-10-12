@@ -1,6 +1,7 @@
 #ifndef RP_EDGE_LOCK_HPP
 #define RP_EDGE_LOCK_HPP
 
+#include <array>
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
@@ -49,6 +50,14 @@ std::vector<LockedEdge> findConfidentEdges(const std::vector<std::vector<uint8_t
                                            int start, double tau, int maxCtx,
                                            Mode mode = Mode::Robust, long* decodes = nullptr,
                                            FluxMemo* memo = nullptr, int threads = 1);
+
+// Scores every window [p, a, b] in `windows` (p = -1: none) that isn't in `memo` yet, on
+// `threads` threads, and adds the results to `memo` (NaN = unmeasurable). Returns the number
+// of decodes. Used by the global successor matching (main.cpp) for its edge costs.
+long scoreWindows(const std::vector<std::vector<uint8_t>>& chunks,
+                  const std::vector<ChunkMeta>& metas,
+                  const std::vector<std::array<int, 3>>& windows,
+                  FluxMemo& memo, int threads);
 
 // Forces every locked edge into `adj`: a's only successor becomes b, and b is removed from
 // every other chunk's successor list. Returns the number of edges removed.

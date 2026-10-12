@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <csetjmp>
 #include <chrono>
+#include <array>
+#include <queue>
 #include <thread>
 #include <string>
 #include <cstdint>
@@ -325,6 +327,7 @@ static double spectralJunctionCost(const vector<ChunkMeta>& metas, int curPrev, 
 // Memoised by the (PP, P, cur, cand) chunk tuple. Ranking only - never rejects an edge
 // (not a safe filter: some true junctions do spike). RP_PCM=0 disables; RP_PCM_W weights it
 // relative to the existing (global_gain + spectral) cost, see the calibration in main().
+static vector<int> g_matchSucc;   // global matching: successor per supernode (DFS hint), -1 none
 static bool   g_pcmRank    = true;
 static double g_pcmScale   = 1.0;  // set by calibration
 static double g_pcmNeutral = 0.0;  // raw value used when a junction can't be measured
@@ -365,9 +368,11 @@ static double pcmJunctionCost(const vector<ChunkMeta>& metas, const int* left, i
 // over the rest). Unmeasurable first, so a move can't "win" by turning a high-flux junction
 // into an unscorable one (seen on test7_short when unmeasurable junctions used a neutral value).
 struct OrderCost {
+    int breaks = 0;      // reservoir-check failures (only tracked when repairing an invalid order)
     int unmeasured = 0;
     double sum = 0;
     bool operator<(const OrderCost& o) const {
+        if (breaks != o.breaks) return breaks < o.breaks;
         return unmeasured != o.unmeasured ? unmeasured < o.unmeasured : sum < o.sum - 1e-9;
     }
 };
@@ -393,6 +398,24 @@ static bool reservoirValid(const vector<ChunkMeta>& metas, const vector<int>& se
     return true;
 }
 
+// Number of chunks at which the reservoir check fails, continuing after each failure with a
+// full reservoir (so later failures are counted independently). `where` gets their positions.
+static int reservoirBreaks(const vector<ChunkMeta>& metas, const vector<int>& seq,
+                           const int sideInfo, const int maxReservoir, vector<int>* where = nullptr) {
+    int level = 0, breaks = 0;
+    const ChunkMeta* prev = nullptr;
+    for (size_t k = 0; k < seq.size(); ++k) {
+        const int ci = seq[k];
+        if (!advanceReservoirChunk(level, prev, metas[ci], chunks[ci], sideInfo, maxReservoir)) {
+            ++breaks;
+            if (where) where->push_back((int)k);
+            level = maxReservoir * 8;
+        }
+        prev = &metas[ci];
+    }
+    return breaks;
+}
+
 // Two move types, each enumerated only where every new junction is a structural edge:
 //   block move: take seq[i..j] out and reinsert it after position k (3 new junctions);
 //   block swap: exchange two disjoint blocks seq[i1..j1] and seq[i2..j2] (4 new junctions) -
@@ -408,20 +431,13 @@ static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
     for (size_t a = 0; a < adjFull.size(); ++a)
         for (int b : adjFull[a]) { edge.insert(((uint64_t)a << 32) | (unsigned)b); preds[b].push_back((int)a); }
     auto isEdge = [&](int a, int b) { return edge.count(((uint64_t)(unsigned)a << 32) | (unsigned)b) > 0; };
-    // every adjacent pair of a candidate sequence must be an edge (cheap full check, used on
-    // the few candidates that pass the local junction filters)
-    auto allEdges = [&](const vector<int>& t) {
-        for (size_t k = 1; k < t.size(); ++k) if (!isEdge(t[k - 1], t[k])) return false;
-        return true;
-    };
 
     // Suspect filter: a move can only fix the ordering by cutting a wrong junction, and wrong
-    // splices are high-flux (pcm_probe: true median ~1.05, wrong ~3). So only moves that cut at
-    // least one of the K worst junctions of the current sequence are evaluated (unmeasurable
-    // junctions count as worst). Without it, each pass on a dense CBR graph enumerates millions
-    // of candidates, each a full summed-flux evaluation with fresh decodes (bohemoan 8 KB: > 10 min).
-    // RP_REPAIR_SUSPECTS=K overrides (0 = no filter); RP_REPAIR_BUDGET (s, default 60) bounds
-    // the whole repair - when spent, the best move found so far is still applied, then it stops.
+    // splices are usually high-flux (pcm_probe: true median ~1.05, wrong ~3). Phase 0 of each
+    // pass only evaluates moves that cut one of the K worst junctions (plus, for an invalid
+    // order, the junctions just before each reservoir break); phase 1 scans every move if phase
+    // 0 found nothing. RP_REPAIR_SUSPECTS=K overrides (0 = no filter); RP_REPAIR_BUDGET (s,
+    // default 60) bounds the whole repair - when spent, the best move found so far is applied.
     int suspects = std::max(16, n / 20);
     if (const char* v = std::getenv("RP_REPAIR_SUSPECTS")) suspects = atoi(v);
     double budget = 60;
@@ -430,112 +446,197 @@ static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
         chrono::duration_cast<chrono::steady_clock::duration>(chrono::duration<double>(budget));
     bool outOfTime = false;
 
-    OrderCost cur = summedFlux(metas, seq);
-    int applied = 0;
-    for (int pass = 0; pass < maxPasses && !outOfTime; ++pass) {
-        vector<int> pos(chunks.size(), -1);
-        for (int k = 0; k < n; ++k) pos[seq[k]] = k;
-        // bad[k]: junction seq[k-1] -> seq[k] is a suspect
-        vector<char> bad(n + 1, suspects <= 0 ? 1 : 0);
-        if (suspects > 0) {
-            vector<pair<double, int>> jv;
-            for (int k = 1; k < n; ++k) {
+    // A candidate is a list of [from, to] segments of the current `seq`. It is evaluated
+    // incrementally: a junction's flux depends on its 4-chunk window, so only the first 3
+    // positions of each segment need a pcmRaw lookup (the rest come from prefix sums of the
+    // current order), and the reservoir state re-synchronises with the current order's within
+    // a frame or two, after which the segment's remaining breaks come from prefix sums too.
+    using Seg = pair<int, int>;
+    vector<double> jv(n, 0);       // junction value at k (k >= 1), -1 = unmeasured
+    vector<double> PS(n + 1, 0);   // prefix sums of measured jv
+    vector<int> PU(n + 1, 0);      // prefix counts of unmeasured
+    vector<int> lvlAfter(n, 0);    // reservoir level after chunk k (break -> reset to full)
+    vector<int> PB(n + 1, 0);      // prefix reservoir-break counts
+    auto prepare = [&]() {
+        for (int k = 0; k < n; ++k) {
+            double v = 0;
+            if (k >= 1) {
                 int left[3], nl = 0;
                 for (int j = k - 3; j < k; ++j) if (j >= 0) left[nl++] = seq[j];
-                const double v = pcmRaw(metas, left, nl, seq[k]);
-                jv.push_back({v < 0 ? 1e9 : v, k});
+                v = pcmRaw(metas, left, nl, seq[k]);
             }
-            std::sort(jv.begin(), jv.end(), [](const pair<double, int>& x, const pair<double, int>& y) { return x.first > y.first; });
-            for (int q = 0; q < (int)jv.size() && q < suspects; ++q) bad[jv[q].second] = 1;
+            jv[k] = v;
+            PS[k + 1] = PS[k] + ((k >= 1 && v >= 0) ? v : 0);
+            PU[k + 1] = PU[k] + ((k >= 1 && v < 0) ? 1 : 0);
         }
-        auto cut = [&](int k) { return k < n && bad[k]; }; // removing junction seq[k-1] -> seq[k]
-        struct Move { OrderCost cost; vector<int> t; string what; };
+        int level = 0;
+        const ChunkMeta* prev = nullptr;
+        for (int k = 0; k < n; ++k) {
+            bool br = false;
+            if (isLayerIII && !advanceReservoirChunk(level, prev, metas[seq[k]], chunks[seq[k]], sideInfo, maxReservoir)) {
+                br = true;
+                level = maxReservoir * 8;
+            }
+            lvlAfter[k] = level;
+            PB[k + 1] = PB[k] + (br ? 1 : 0);
+            prev = &metas[seq[k]];
+        }
+    };
+    auto evalBreaks = [&](const vector<Seg>& segs) {
+        if (!isLayerIII) return 0;
+        int level = 0, breaks = 0;
+        const ChunkMeta* prev = nullptr;
+        for (const Seg& sg : segs) {
+            for (int k = sg.first; k <= sg.second; ++k) {
+                if (k > sg.first && level == lvlAfter[k - 1]) {   // in sync with the current order
+                    breaks += PB[sg.second + 1] - PB[k];
+                    level = lvlAfter[sg.second];
+                    break;
+                }
+                if (!advanceReservoirChunk(level, prev, metas[seq[k]], chunks[seq[k]], sideInfo, maxReservoir)) {
+                    ++breaks;
+                    level = maxReservoir * 8;
+                }
+                prev = &metas[seq[k]];
+            }
+            prev = &metas[seq[sg.second]];
+        }
+        return breaks;
+    };
+    auto evalFlux = [&](const vector<Seg>& segs, OrderCost& c) {
+        int g = 0;              // position in the candidate
+        int last[3], nl = 0;    // last (up to) 3 chunks placed, oldest first
+        for (const Seg& sg : segs) {
+            for (int k = sg.first; k <= sg.second; ++k, ++g) {
+                if (g >= 1) {
+                    if (k - sg.first >= 3 || sg.first == 0) {   // same window as the current order
+                        c.sum += PS[sg.second + 1] - PS[k];
+                        c.unmeasured += PU[sg.second + 1] - PU[k];
+                        g += sg.second - k;
+                        k = sg.second;
+                        nl = 0;
+                        for (int j = std::max(sg.first, sg.second - 2); j <= sg.second; ++j) last[nl++] = seq[j];
+                        if (nl < 3 && sg.second - sg.first < 2) {
+                            // segment shorter than 3 and fully skipped can't happen here
+                        }
+                        goto nextSeg;
+                    }
+                    const double v = pcmRaw(metas, last, nl, seq[k]);
+                    if (v < 0) ++c.unmeasured; else c.sum += v;
+                }
+                if (nl < 3) last[nl++] = seq[k];
+                else { last[0] = last[1]; last[1] = last[2]; last[2] = seq[k]; }
+            }
+            nextSeg:;
+        }
+    };
+    auto build = [&](const vector<Seg>& segs) {
+        vector<int> t; t.reserve(n);
+        for (const Seg& sg : segs) t.insert(t.end(), seq.begin() + sg.first, seq.begin() + sg.second + 1);
+        return t;
+    };
+
+    prepare();
+    OrderCost cur;
+    cur.sum = PS[n]; cur.unmeasured = PU[n];
+    // An invalid starting order (from the global matching) is repaired towards validity first:
+    // the cost then leads with the number of reservoir breaks.
+    const bool trackBreaks = isLayerIII && PB[n] > 0;
+    if (trackBreaks) cur.breaks = PB[n];
+    int applied = 0;
+    for (int pass = 0; pass < maxPasses && !outOfTime; ++pass) {
+        if (pass > 0) prepare();
+        vector<int> pos(chunks.size(), -1);
+        for (int k = 0; k < n; ++k) pos[seq[k]] = k;
+        vector<char> bad(n + 1, suspects <= 0 ? 1 : 0);   // bad[k]: junction seq[k-1] -> seq[k]
+        if (suspects > 0) {
+            vector<pair<double, int>> js;
+            for (int k = 1; k < n; ++k) js.push_back({jv[k] < 0 ? 1e9 : jv[k], k});
+            std::sort(js.begin(), js.end(), [](const pair<double, int>& x, const pair<double, int>& y) { return x.first > y.first; });
+            for (int q = 0; q < (int)js.size() && q < suspects; ++q) bad[js[q].second] = 1;
+        }
+        if (cur.breaks > 0)
+            for (int k = 0; k < n; ++k)
+                if (PB[k + 1] > PB[k]) for (int d = 0; d <= 8; ++d) if (k - d >= 1) bad[k - d] = 1;
+        auto cut = [&](int k) { return k < n && bad[k]; };
+        struct Move { OrderCost cost; vector<Seg> segs; string what; };
         vector<Move> moves;
         long candidates = 0;
-        auto consider = [&](vector<int>&& t, string what) {
+        auto consider = [&](vector<Seg>&& segs, string&& what) {
             if (outOfTime) return;
             if ((candidates & 0xFF) == 0 && chrono::steady_clock::now() >= deadline) { outOfTime = true; return; }
-            if (!allEdges(t)) return;
             ++candidates;
-            const OrderCost c = summedFlux(metas, t);
-            if (c < cur) moves.push_back({c, std::move(t), std::move(what)});
+            OrderCost c;
+            c.breaks = evalBreaks(segs);
+            // valid order: stay valid; invalid order: a move must reduce the breaks
+            if (cur.breaks > 0 ? c.breaks >= cur.breaks : c.breaks > 0) return;
+            if (!trackBreaks) c.breaks = 0;
+            evalFlux(segs, c);
+            if (c < cur) moves.push_back({c, std::move(segs), std::move(what)});
         };
-        auto range = [&](vector<int>& t, int from, int to) { // append seq[from..to]
-            if (from <= to) t.insert(t.end(), seq.begin() + from, seq.begin() + to + 1);
-        };
+        auto push = [](vector<Seg>& v, int a, int b) { if (a <= b) v.push_back({a, b}); };
 
-        // Phase 0 evaluates only moves that cut a suspect junction; if none of them is an
-        // improving reservoir-valid move, phase 1 scans every move (within the time budget).
-        // Wrong junctions are usually but not always high-flux: cbr320_10s at 4 KB needs a
-        // swap whose four cut junctions are all outside the top 16.
         bool moved = false;
-        int resvRejected = 0;
         for (int phase = suspects > 0 ? 0 : 1; phase < 2 && !moved && !outOfTime; ++phase) {
-        if (phase == 1) std::fill(bad.begin(), bad.end(), 1);
-        moves.clear();
-        candidates = 0;
-        resvRejected = 0;
+            if (phase == 1) std::fill(bad.begin(), bad.end(), 1);
+            moves.clear();
+            candidates = 0;
 
-        // block moves
-        for (int i = 1; i < n; ++i)
-            for (int p : preds[seq[i]]) {
-                const int k = pos[p];
-                if (k < 0 || k == i - 1) continue;
-                const bool outerCut = cut(i) || cut(k + 1);
-                for (int j = i; j < n && !outOfTime; ++j) {
-                    if (k >= i && k <= j) break;
-                    if (!outerCut && !cut(j + 1)) continue;
-                    if (j + 1 < n && !isEdge(seq[i - 1], seq[j + 1])) continue;
-                    if (k + 1 < n && !isEdge(seq[j], seq[k + 1])) continue;
-                    vector<int> t; t.reserve(n);
-                    if (k < i) { range(t, 0, k); range(t, i, j); range(t, k + 1, i - 1); range(t, j + 1, n - 1); }
-                    else       { range(t, 0, i - 1); range(t, j + 1, k); range(t, i, j); range(t, k + 1, n - 1); }
-                    consider(std::move(t), "move [" + std::to_string(i) + ".." + std::to_string(j) +
-                                           "] after " + std::to_string(k));
-                }
-            }
-
-        // block swaps: seq[i1..j1] <-> seq[i2..j2], j1 < i2 - 1 (a non-empty middle; an empty
-        // middle is an adjacent swap, already a block move). New junctions:
-        // seq[i1-1]->seq[i2], seq[j2]->seq[j1+1], seq[i2-1]->seq[i1], seq[j1]->seq[j2+1].
-        for (int i1 = 1; i1 < n; ++i1)
-            for (int s2 : adjFull[seq[i1 - 1]]) {
-                const int i2 = pos[s2];
-                if (i2 < 0 || i2 <= i1 + 1) continue;
-                if (!isEdge(seq[i2 - 1], seq[i1])) continue;
-                const bool outerCut = cut(i1) || cut(i2);
-                for (int j1 = i1; j1 + 1 < i2 && !outOfTime; ++j1)
-                    for (int p : preds[seq[j1 + 1]]) {
-                        const int j2 = pos[p];
-                        if (j2 < i2) continue;
-                        if (!outerCut && !cut(j1 + 1) && !cut(j2 + 1)) continue;
-                        if (j2 + 1 < n && !isEdge(seq[j1], seq[j2 + 1])) continue;
-                        vector<int> t; t.reserve(n);
-                        range(t, 0, i1 - 1); range(t, i2, j2); range(t, j1 + 1, i2 - 1);
-                        range(t, i1, j1); range(t, j2 + 1, n - 1);
-                        consider(std::move(t), "swap [" + std::to_string(i1) + ".." + std::to_string(j1) +
-                                               "] <-> [" + std::to_string(i2) + ".." + std::to_string(j2) + "]");
+            // block moves: take seq[i..j] out and reinsert it after position k
+            for (int i = 1; i < n && !outOfTime; ++i)
+                for (int p : preds[seq[i]]) {
+                    const int k = pos[p];
+                    if (k < 0 || k == i - 1) continue;
+                    const bool outerCut = cut(i) || cut(k + 1);
+                    for (int j = i; j < n && !outOfTime; ++j) {
+                        if (k >= i && k <= j) break;
+                        if (!outerCut && !cut(j + 1)) continue;
+                        if (j + 1 < n && !isEdge(seq[i - 1], seq[j + 1])) continue;
+                        if (k + 1 < n && !isEdge(seq[j], seq[k + 1])) continue;
+                        vector<Seg> sg;
+                        if (k < i) { push(sg, 0, k); push(sg, i, j); push(sg, k + 1, i - 1); push(sg, j + 1, n - 1); }
+                        else       { push(sg, 0, i - 1); push(sg, j + 1, k); push(sg, i, j); push(sg, k + 1, n - 1); }
+                        consider(std::move(sg), "move [" + std::to_string(i) + ".." + std::to_string(j) +
+                                                "] after " + std::to_string(k));
                     }
-            }
+                }
+            // block swaps: seq[i1..j1] <-> seq[i2..j2] with a non-empty middle
+            for (int i1 = 1; i1 < n && !outOfTime; ++i1)
+                for (int s2 : adjFull[seq[i1 - 1]]) {
+                    const int i2 = pos[s2];
+                    if (i2 < 0 || i2 <= i1 + 1) continue;
+                    if (!isEdge(seq[i2 - 1], seq[i1])) continue;
+                    const bool outerCut = cut(i1) || cut(i2);
+                    for (int j1 = i1; j1 + 1 < i2 && !outOfTime; ++j1)
+                        for (int p : preds[seq[j1 + 1]]) {
+                            const int j2 = pos[p];
+                            if (j2 < i2) continue;
+                            if (!outerCut && !cut(j1 + 1) && !cut(j2 + 1)) continue;
+                            if (j2 + 1 < n && !isEdge(seq[j1], seq[j2 + 1])) continue;
+                            vector<Seg> sg;
+                            push(sg, 0, i1 - 1); push(sg, i2, j2); push(sg, j1 + 1, i2 - 1);
+                            push(sg, i1, j1); push(sg, j2 + 1, n - 1);
+                            consider(std::move(sg), "swap [" + std::to_string(i1) + ".." + std::to_string(j1) +
+                                                    "] <-> [" + std::to_string(i2) + ".." + std::to_string(j2) + "]");
+                        }
+                }
 
-        std::sort(moves.begin(), moves.end(), [](const Move& x, const Move& y) { return x.cost < y.cost; });
-        for (Move& m : moves) {
-            if (isLayerIII && !reservoirValid(metas, m.t, sideInfo, maxReservoir)) { ++resvRejected; continue; }
-            cout << "  repair pass " << pass + 1 << (phase == 0 ? " (suspects)" : " (full scan)") << ": " << m.what << ", cost (unmeasured, summed flux) ("
-                 << cur.unmeasured << ", " << fixed << setprecision(3) << cur.sum << ") -> ("
-                 << m.cost.unmeasured << ", " << m.cost.sum << ") (" << candidates
-                 << " valid moves scanned, " << moves.size() << " improving, " << resvRejected
-                 << " of those reservoir-invalid)\n";
-            seq = std::move(m.t);
+            if (moves.empty()) continue;
+            const Move& m = *std::min_element(moves.begin(), moves.end(),
+                                              [](const Move& x, const Move& y) { return x.cost < y.cost; });
+            cout << "  repair pass " << pass + 1 << (phase == 0 ? " (suspects)" : " (full scan)") << ": " << m.what
+                 << ", cost (" << (trackBreaks ? "resv breaks, " : "") << "unmeasured, summed flux) ("
+                 << (trackBreaks ? std::to_string(cur.breaks) + ", " : string()) << cur.unmeasured << ", "
+                 << fixed << setprecision(3) << cur.sum << ") -> ("
+                 << (trackBreaks ? std::to_string(m.cost.breaks) + ", " : string()) << m.cost.unmeasured << ", "
+                 << m.cost.sum << ") (" << candidates << " valid moves scanned, " << moves.size() << " improving)\n";
+            seq = build(m.segs);
             cur = m.cost;
             ++applied;
             moved = true;
-            break;
         }
-        } // phase
         if (!moved) {
-            cout << "  repair pass " << pass + 1 << ": no improving valid move (" << candidates
-                 << " valid moves scanned, " << moves.size() << " improving but reservoir-invalid)\n";
+            cout << "  repair pass " << pass + 1 << ": no improving valid move\n";
             break;
         }
         if (outOfTime) cout << "  repair: time budget (" << budget << " s) spent - stopping\n";
@@ -667,6 +768,7 @@ bool dfs(DfsState& state,
             double c = junctionCost(boundaryGain, curTailChunk, head);
             if (useSpec) c += spectralJunctionCost(metas, curPrevChunk, curTailChunk, head);
             if (usePcm && !state.used[x]) c += pcmJunctionCost(metas, left, nLeft, head);
+            if (!g_matchSucc.empty() && g_matchSucc[cur] == x) c -= 1e9;   // global matching hint
             keyed.push_back({c, x});
         }
         stable_sort(keyed.begin(), keyed.end(),
@@ -733,6 +835,204 @@ bool dfs(DfsState& state,
         if (g_beamK && ++recursed >= g_beamK) break;
     }
     return false;
+}
+
+// --- Global min-cost successor matching (method 1 of "global search on summed flux"). ---
+// The DFS uses flux locally: one wrong early pick strands it. Instead, give EVERY supernode
+// exactly one successor and one predecessor so that the summed edge cost (log1p of the median
+// junction flux) is minimal - an assignment problem, solved exactly by successive shortest
+// paths on the sparse bipartite graph. The start supernode has no predecessor; a virtual END
+// takes the last one (only the final-fragment chunk's supernode if there is one). The result
+// is a path from the start plus possibly some cycles; each cycle is cut at its best edge and
+// spliced into the path where both new junctions are structural edges, at minimal added cost.
+// The caller then checks the bit reservoir and runs the repair. Edge context: a supernode of
+// >= 2 chunks gives its own second-to-last chunk as the window's warm-up chunk; a single-chunk
+// one uses the median over (up to 8 sampled) structural predecessors, as in edge locking.
+
+struct MatchResult {
+    vector<int> order;            // supernode order (start first), empty on failure
+    vector<int> succ;             // matched successor per supernode (-1 = END)
+    int cycles = 0, spliced = 0;
+    double cost = 0;
+    long decodes = 0;
+    string failure;
+};
+
+static MatchResult globalMatch(const vector<Supernode>& sn, const vector<vector<int>>& superAdj,
+                               int startSuper, const vector<vector<int>>& chunkAdj,
+                               const vector<ChunkMeta>& metas, EdgeLock::FluxMemo& memo, int threads) {
+    MatchResult res;
+    const int N = static_cast<int>(sn.size());
+    // chunk-level predecessors in the current (locked) graph, for single-chunk contexts
+    vector<vector<int>> preds(chunkAdj.size());
+    for (size_t a = 0; a < chunkAdj.size(); ++a) for (int b : chunkAdj[a]) preds[b].push_back((int)a);
+    auto contexts = [&](int s) {
+        const auto& ch = sn[s].chunks;
+        vector<int> ctx;
+        if (ch.size() >= 2) ctx.push_back(ch[ch.size() - 2]);
+        else if (s == startSuper) ctx.push_back(-1);
+        else {
+            const auto& pr = preds[ch.back()];
+            if (pr.size() <= 8) ctx = pr;
+            else for (int k = 0; k < 8; ++k) ctx.push_back(pr[(size_t)k * pr.size() / 8]);
+            if (ctx.empty()) ctx.push_back(-1);
+        }
+        return ctx;
+    };
+    vector<vector<int>> ctxOf(N);
+    vector<std::array<int, 3>> windows;
+    for (int s = 0; s < N; ++s) {
+        ctxOf[s] = contexts(s);
+        const int a = sn[s].chunks.back();
+        for (int t : superAdj[s]) {
+            const int b = sn[t].chunks.front();
+            for (int p : ctxOf[s]) if (p != b) windows.push_back({p, a, b});
+        }
+    }
+    res.decodes = EdgeLock::scoreWindows(chunks, metas, windows, memo, threads);
+
+    // edge costs
+    std::unordered_map<uint64_t, double> cost;
+    vector<double> finite;
+    auto ekey = [N](int s, int t) { return (uint64_t)s * (uint64_t)(N + 1) + (uint64_t)t; };
+    for (int s = 0; s < N; ++s) {
+        const int a = sn[s].chunks.back();
+        for (int t : superAdj[s]) {
+            const int b = sn[t].chunks.front();
+            vector<double> v;
+            for (int p : ctxOf[s]) {
+                if (p == b) continue;
+                const int pp = (p >= 0 && metas[p].valid) ? p : -1;
+                auto it = memo.find(EdgeLock::packKey(pp, a, b));
+                if (it != memo.end() && !std::isnan(it->second)) v.push_back(it->second);
+            }
+            double c = std::numeric_limits<double>::quiet_NaN();
+            if (!v.empty()) {
+                std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+                c = std::log1p(v[v.size() / 2]);
+                finite.push_back(c);
+            }
+            cost[ekey(s, t)] = c;
+        }
+    }
+    double neutral = 1.0;
+    if (!finite.empty()) {
+        std::nth_element(finite.begin(), finite.begin() + finite.size() / 2, finite.end());
+        neutral = finite[finite.size() / 2];
+    }
+    for (auto& kv : cost) if (std::isnan(kv.second)) kv.second = neutral;
+    auto c = [&](int s, int t) -> double {   // t == -1: END
+        if (t < 0) return neutral;
+        auto it = cost.find(ekey(s, t));
+        return it == cost.end() ? std::numeric_limits<double>::infinity() : it->second;
+    };
+    int fragSuper = -1;
+    for (int s = 0; s < N; ++s) if (metas[sn[s].chunks.back()].finalFragment) fragSuper = s;
+    auto mayEnd = [&](int s) { return fragSuper < 0 || s == fragSuper; };
+
+    // Min-cost perfect matching, left = supernodes as predecessors, right = supernodes as
+    // successors, with right slot `startSuper` standing for END. SSP + Dijkstra + potentials.
+    const int S = 2 * N, T = 2 * N + 1, V = 2 * N + 2;
+    struct E { int to, cap; long long w; };
+    vector<E> e;
+    vector<vector<int>> g(V);
+    auto add = [&](int u, int v, long long w) {
+        g[u].push_back((int)e.size()); e.push_back({v, 1, w});
+        g[v].push_back((int)e.size()); e.push_back({u, 0, -w});
+    };
+    const double SCALE = 1e4;
+    for (int s = 0; s < N; ++s) {
+        add(S, s, 0);
+        add(N + s, T, 0);
+        for (int t : superAdj[s]) if (t != startSuper) add(s, N + t, std::llround(c(s, t) * SCALE));
+        if (mayEnd(s)) add(s, N + startSuper, std::llround(neutral * SCALE));
+    }
+    const long long INF = std::numeric_limits<long long>::max() / 4;
+    vector<long long> h(V, 0), dist(V);
+    vector<int> pe(V);
+    int flow = 0;
+    while (flow < N) {
+        std::fill(dist.begin(), dist.end(), INF);
+        dist[S] = 0;
+        std::priority_queue<pair<long long, int>, vector<pair<long long, int>>, std::greater<>> pq;
+        pq.push({0, S});
+        while (!pq.empty()) {
+            const long long d = pq.top().first; const int u = pq.top().second; pq.pop();
+            if (d > dist[u]) continue;
+            for (int id : g[u]) {
+                const E& ed = e[id];
+                if (!ed.cap) continue;
+                const long long nd = d + ed.w + h[u] - h[ed.to];
+                if (nd < dist[ed.to]) { dist[ed.to] = nd; pe[ed.to] = id; pq.push({nd, ed.to}); }
+            }
+        }
+        if (dist[T] >= INF) break;
+        for (int v = 0; v < V; ++v) if (dist[v] < INF) h[v] += dist[v];
+        for (int v = T; v != S; v = e[pe[v] ^ 1].to) { e[pe[v]].cap -= 1; e[pe[v] ^ 1].cap += 1; }
+        ++flow;
+    }
+    if (flow < N) { res.failure = "no perfect successor matching"; return res; }
+    res.succ.assign(N, -1);
+    for (int s = 0; s < N; ++s)
+        for (int id : g[s]) {
+            const E& ed = e[id];
+            if (ed.to >= N && ed.to < 2 * N && ed.cap == 0 && (id % 2 == 0)) {
+                const int t = ed.to - N;
+                res.succ[s] = (t == startSuper) ? -1 : t;
+                res.cost += (t == startSuper) ? neutral : c(s, t);
+            }
+        }
+
+    // path from the start, then cycles
+    vector<char> seen(N, 0);
+    vector<int> path;
+    for (int s = startSuper; s >= 0 && !seen[s]; s = res.succ[s]) { seen[s] = 1; path.push_back(s); }
+    vector<vector<int>> cyc;
+    for (int s = 0; s < N; ++s) {
+        if (seen[s]) continue;
+        vector<int> cy;
+        for (int x = s; !seen[x]; x = res.succ[x]) { seen[x] = 1; cy.push_back(x); }
+        cyc.push_back(cy);
+    }
+    res.cycles = (int)cyc.size();
+    std::unordered_set<uint64_t> isEdge;
+    vector<vector<int>> spred(N);
+    for (int s = 0; s < N; ++s) for (int t : superAdj[s]) { isEdge.insert(ekey(s, t)); spred[t].push_back(s); }
+    auto edge = [&](int s, int t) { return t < 0 ? mayEnd(s) : isEdge.count(ekey(s, t)) > 0; };
+    // splice cycles, cheapest first, until none is left (or none fits)
+    while (!cyc.empty()) {
+        vector<int> pos(N, -1);
+        for (int i = 0; i < (int)path.size(); ++i) pos[path[i]] = i;
+        double best = std::numeric_limits<double>::infinity();
+        int bc = -1, bk = -1, bi = -1;
+        for (int ci = 0; ci < (int)cyc.size(); ++ci) {
+            const auto& cy = cyc[ci];
+            const int m = (int)cy.size();
+            for (int k = 0; k < m; ++k) {        // cut edge cy[k] -> cy[k+1]: chain cy[k+1] .. cy[k]
+                const int u = cy[k], v = cy[(k + 1) % m];
+                for (int x : spred[v]) {
+                    const int i = pos[x];
+                    if (i < 0) continue;
+                    const int y = (i + 1 < (int)path.size()) ? path[i + 1] : -1;
+                    if (!edge(u, y)) continue;
+                    const double d = c(x, v) + c(u, y) - c(x, y) - c(u, v);
+                    if (d < best) { best = d; bc = ci; bk = k; bi = i; }
+                }
+            }
+        }
+        if (bc < 0) break;
+        const auto cy = cyc[bc];
+        const int m = (int)cy.size();
+        vector<int> chain;
+        for (int j = 1; j <= m; ++j) chain.push_back(cy[(bk + j) % m]);
+        path.insert(path.begin() + bi + 1, chain.begin(), chain.end());
+        res.cost += best;
+        cyc.erase(cyc.begin() + bc);
+        ++res.spliced;
+    }
+    if (!cyc.empty()) { res.failure = std::to_string(cyc.size()) + " cycle(s) could not be spliced in"; return res; }
+    res.order = path;
+    return res;
 }
 
 int main(int argc, char* argv[]) {
@@ -1125,6 +1425,8 @@ int main(int argc, char* argv[]) {
     vector<int> result;
     bool found = false;
     size_t foundAttempt = 0;   // which lock attempt produced the ordering (repair policy below)
+    bool foundByMatch = false;  // ordering came from the global matching (repair always runs)
+    vector<int> matchSeq;       // its chunk sequence (possibly already repaired)
     // Deepest partial path over ALL lock attempts, in chunks (each attempt has its own
     // supernode numbering): a late attempt that dead-ends at once mustn't hide an earlier
     // attempt's long partial path in the failure report.
@@ -1252,71 +1554,126 @@ int main(int argc, char* argv[]) {
             beamSchedule = broaden ? vector<int>{1, 2, 3, 4, 6, 9, 0} : vector<int>{0};
         }
 
-        // Wall-clock budget for the whole search. Needed whenever the search is not a plain
-        // first-valid exhaustive DFS: broadening's wider attempts and best-of both keep going
-        // past the first complete ordering and would otherwise not terminate on large graphs.
-        // RP_TIME_BUDGET (seconds) overrides; RP_MAX_NODES (node cap) also bounds it.
-        if (g_maxNodes == 0 && (broaden || g_bestOf)) {
-            double budget = broaden ? 45.0 : 30.0;
-            if (const char* t = std::getenv("RP_TIME_BUDGET")) budget = atof(t);
-            g_deadline = chrono::steady_clock::now() +
-                         chrono::duration_cast<chrono::steady_clock::duration>(chrono::duration<double>(budget));
-            g_haveDeadline = true;
-        } else if (const char* t = std::getenv("RP_TIME_BUDGET")) {
-            g_deadline = chrono::steady_clock::now() +
-                         chrono::duration_cast<chrono::steady_clock::duration>(chrono::duration<double>(atof(t)));
-            g_haveDeadline = true;
-        } else if (g_maxNodes == 0 && lockTaus.size() > 1) {
-            // With a lock schedule, no attempt may run an unbounded exhaustive DFS: locking can
-            // shrink a large graph below the broadening threshold (test7_short at tau 1.25:
-            // 108 supernodes, ran >500 s), which would drop rp's "always terminates" guarantee.
-            // 30 s per attempt with a fallback left, 45 s for the last one.
-            const double budget = (lockAttempt + 1 < lockTaus.size()) ? 30.0 : 45.0;
-            g_deadline = chrono::steady_clock::now() +
-                         chrono::duration_cast<chrono::steady_clock::duration>(chrono::duration<double>(budget));
-            g_haveDeadline = true;
-        }
-
-        cout << "Starting search over " << supernodes.size() << " supernodes"
-             << " (continuity ranking " << (rankByContinuity ? "ON" : "OFF")
-             << ", " << (g_bestOf ? "best-of" : "first-valid")
-             << (g_specRank && isLayerIII ? ", +spectral" : "")
-             << (g_pcmRank ? ", +pcm" : "") << ")\n";
-
-        g_bestScore = LLONG_MAX;
-        g_bestOrder.clear();
-        for (size_t attempt = 0; attempt < beamSchedule.size(); ++attempt) {
-            if (g_haveDeadline && chrono::steady_clock::now() >= g_deadline) {
-                cout << "  (time budget spent - skipping remaining beam widths)\n";
-                break;
+        auto search = [&]() {
+            // Wall-clock budget for the whole search. Needed whenever the search is not a plain
+            // first-valid exhaustive DFS: broadening's wider attempts and best-of both keep going
+            // past the first complete ordering and would otherwise not terminate on large graphs.
+            // RP_TIME_BUDGET (seconds) overrides; RP_MAX_NODES (node cap) also bounds it.
+            if (g_maxNodes == 0 && (broaden || g_bestOf)) {
+                double budget = broaden ? 45.0 : 30.0;
+                if (const char* t = std::getenv("RP_TIME_BUDGET")) budget = atof(t);
+                g_deadline = chrono::steady_clock::now() +
+                             chrono::duration_cast<chrono::steady_clock::duration>(chrono::duration<double>(budget));
+                g_haveDeadline = true;
+            } else if (const char* t = std::getenv("RP_TIME_BUDGET")) {
+                g_deadline = chrono::steady_clock::now() +
+                             chrono::duration_cast<chrono::steady_clock::duration>(chrono::duration<double>(atof(t)));
+                g_haveDeadline = true;
+            } else if (g_maxNodes == 0 && lockTaus.size() > 1) {
+                // With a lock schedule, no attempt may run an unbounded exhaustive DFS: locking can
+                // shrink a large graph below the broadening threshold (test7_short at tau 1.25:
+                // 108 supernodes, ran >500 s), which would drop rp's "always terminates" guarantee.
+                // 30 s per attempt with a fallback left, 45 s for the last one.
+                const double budget = (lockAttempt + 1 < lockTaus.size()) ? 30.0 : 45.0;
+                g_deadline = chrono::steady_clock::now() +
+                             chrono::duration_cast<chrono::steady_clock::duration>(chrono::duration<double>(budget));
+                g_haveDeadline = true;
             }
-            g_beamK   = beamSchedule[attempt];
-            counter   = 0;
-            g_aborted = false;
-            DfsState state = primed;
-            vector<int> res;
-            g_dfsStart = chrono::steady_clock::now();
 
-            cout << "  beam=" << (g_beamK ? std::to_string(g_beamK) : string("unlimited")) << " ... " << flush;
-            const bool hit = dfs(state, supernodes, superAdj, metas, boundaryGain, rankByContinuity,
-                                 sideInfo, maxReservoir, isLayerIII, res);
+            cout << "Starting search over " << supernodes.size() << " supernodes"
+                 << " (continuity ranking " << (rankByContinuity ? "ON" : "OFF")
+                 << ", " << (g_bestOf ? "best-of" : "first-valid")
+                 << (g_specRank && isLayerIII ? ", +spectral" : "")
+                 << (g_pcmRank ? ", +pcm" : "") << ")\n";
 
-            if (g_bestOf) {
-                found = !g_bestOrder.empty();
-                cout << counter << " nodes, " << fixed << setprecision(2) << dfsElapsedSec() << "s";
-                if (found) cout << ", best score=" << g_bestScore;
-                else       cout << (g_aborted ? " (stopped: budget)" : " (exhausted, no ordering)");
-                cout << "\n" << flush;
-                if (found && g_bestScore == 0) break;       // perfect continuity - cannot improve
-            } else {
-                if (hit) { result = res; found = true; }
-                cout << counter << " nodes, " << fixed << setprecision(2) << dfsElapsedSec() << "s"
-                     << (found ? " -> FOUND" : (g_aborted ? " (stopped: budget)" : " (exhausted, no ordering)"))
-                     << "\n" << flush;
-                if (found) break;
+            g_bestScore = LLONG_MAX;
+            g_bestOrder.clear();
+            for (size_t attempt = 0; attempt < beamSchedule.size(); ++attempt) {
+                if (g_haveDeadline && chrono::steady_clock::now() >= g_deadline) {
+                    cout << "  (time budget spent - skipping remaining beam widths)\n";
+                    break;
+                }
+                g_beamK   = beamSchedule[attempt];
+                counter   = 0;
+                g_aborted = false;
+                DfsState state = primed;
+                vector<int> res;
+                g_dfsStart = chrono::steady_clock::now();
+
+                cout << "  beam=" << (g_beamK ? std::to_string(g_beamK) : string("unlimited")) << " ... " << flush;
+                const bool hit = dfs(state, supernodes, superAdj, metas, boundaryGain, rankByContinuity,
+                                     sideInfo, maxReservoir, isLayerIII, res);
+
+                if (g_bestOf) {
+                    found = !g_bestOrder.empty();
+                    cout << counter << " nodes, " << fixed << setprecision(2) << dfsElapsedSec() << "s";
+                    if (found) cout << ", best score=" << g_bestScore;
+                    else       cout << (g_aborted ? " (stopped: budget)" : " (exhausted, no ordering)");
+                    cout << "\n" << flush;
+                    if (found && g_bestScore == 0) break;       // perfect continuity - cannot improve
+                } else {
+                    if (hit) { result = res; found = true; }
+                    cout << counter << " nodes, " << fixed << setprecision(2) << dfsElapsedSec() << "s"
+                         << (found ? " -> FOUND" : (g_aborted ? " (stopped: budget)" : " (exhausted, no ordering)"))
+                         << "\n" << flush;
+                    if (found) break;
+                }
             }
-        }
-        if (g_bestOf && found) result = g_bestOrder;
+            if (g_bestOf && found) result = g_bestOrder;
+        };
+
+        // Global successor matching (RP_MATCH): 1 (default) = when this attempt's DFS fails,
+        // 2 = before the DFS, 0 = off. Its ordering is used if it passes the reservoir check;
+        // otherwise the DFS is rerun (fresh budget) with each matched successor ranked first.
+        auto tryMatch = [&]() -> bool {
+            const auto t0 = chrono::steady_clock::now();
+            MatchResult mr = globalMatch(supernodes, superAdj, startSuper, adj, metas, lockMemo, lockThreads);
+            const double secs = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
+            cout << "Global matching: " << supernodes.size() << " supernodes, " << mr.decodes << " decodes, "
+                 << mr.cycles << " cycle(s), " << mr.spliced << " spliced, cost " << fixed << setprecision(3)
+                 << mr.cost << ", " << setprecision(2) << secs << "s";
+            if (mr.order.empty()) { cout << " - " << mr.failure << "\n"; }
+            else {
+                vector<int> seqm;
+                for (int si : mr.order) for (int ci : supernodes[si].chunks) seqm.push_back(ci);
+                int tj = 0;
+                for (size_t k = 1; k < seqm.size(); ++k) if (origIndexOf[seqm[k]] == origIndexOf[seqm[k - 1]] + 1) ++tj;
+                const bool ok = !isLayerIII || reservoirValid(metas, seqm, sideInfo, maxReservoir);
+                cout << (ok ? " - reservoir OK" : " - reservoir check FAILED")
+                     << " [vs source: " << tj << "/" << (seqm.size() - 1) << " true junctions]\n";
+                // Repair (moves on the full structural graph). If the order is reservoir-invalid
+                // - usual, it is nearly right but a few wrong junctions break the reservoir -
+                // the cost is led by the number of reservoir breaks.
+                if (!(std::getenv("RP_REPAIR") && std::getenv("RP_REPAIR")[0] == '0')) {
+                    int passes = 50;
+                    if (const char* v = std::getenv("RP_REPAIR_PASSES")) passes = std::max(1, atoi(v));
+                    const auto r0 = chrono::steady_clock::now();
+                    const int mv = repairOrdering(seqm, metas, adjFull, isLayerIII, sideInfo, maxReservoir, passes);
+                    const bool ok2 = reservoirValid(metas, seqm, sideInfo, maxReservoir);
+                    int tj2 = 0;
+                    for (size_t k = 1; k < seqm.size(); ++k) if (origIndexOf[seqm[k]] == origIndexOf[seqm[k - 1]] + 1) ++tj2;
+ (void)ok;
+                    cout << "Matching repair: " << mv << " move(s), " << fixed << setprecision(2)
+                         << chrono::duration<double>(chrono::steady_clock::now() - r0).count() << "s - "
+                         << (ok2 ? "reservoir OK" : "still invalid") << " [vs source: " << tj2 << "/"
+                         << (seqm.size() - 1) << " true junctions]\n";
+                    if (ok2) { result = mr.order; matchSeq = seqm; return true; }
+                } else if (ok) { result = mr.order; matchSeq = seqm; return true; }
+            }
+            if (mr.succ.empty()) return false;
+            g_matchSucc = mr.succ;
+            g_haveDeadline = false;
+            cout << "Search with the matching as ranking hint:\n";
+            search();
+            g_matchSucc.clear();
+            return found;
+        };
+        int matchMode = 1;
+        if (const char* m = std::getenv("RP_MATCH")) matchMode = atoi(m);
+        if (!g_pcmRank) matchMode = 0;
+        if (matchMode == 2 && tryMatch()) { found = true; foundByMatch = true; continue; }
+        search();
+        if (!found && matchMode == 1 && tryMatch()) { found = true; foundByMatch = true; }
     } // lock attempts
 
     if (found) {
@@ -1325,7 +1682,8 @@ int main(int argc, char* argv[]) {
         if (!out) { cerr << "Cannot open output.mp3\n"; return 1; }
 
         vector<int> seq; // reconstructed chunk order
-        for (int si : result) for (int ci : supernodes[si].chunks) seq.push_back(ci);
+        if (foundByMatch && !matchSeq.empty()) seq = matchSeq;
+        else for (int si : result) for (int ci : supernodes[si].chunks) seq.push_back(ci);
 
         // Repair policy: with a tau schedule, an ordering found by the FIRST (strictest)
         // attempt is left alone. The benchmark (BENCHMARK_pcm_vs_main.md) found the repair
@@ -1335,8 +1693,10 @@ int main(int argc, char* argv[]) {
         // =0 disables; a single-tau run keeps the old always-on behaviour.
         const char* rp = std::getenv("RP_REPAIR");
         const bool repairForced = rp && rp[0] == '1';
-        const bool firstOfSchedule = lockTaus.size() > 1 && foundAttempt == 0;
-        if (g_pcmRank && !(rp && rp[0] == '0') && firstOfSchedule && !repairForced)
+        const bool firstOfSchedule = lockTaus.size() > 1 && foundAttempt == 0 && !foundByMatch;
+        if (foundByMatch && !repairForced)
+            cout << "Block-move repair: skipped (the matching's ordering was already repaired)\n";
+        else if (g_pcmRank && !(rp && rp[0] == '0') && firstOfSchedule && !repairForced)
             cout << "Block-move repair: skipped (found by the strictest lock attempt; RP_REPAIR=1 forces)\n";
         else if (g_pcmRank && !(rp && rp[0] == '0')) {
             int passes = 50;

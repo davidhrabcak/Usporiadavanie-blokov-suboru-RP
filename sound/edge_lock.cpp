@@ -135,6 +135,48 @@ std::vector<LockedEdge> findConfidentEdges(const std::vector<std::vector<uint8_t
     return out;
 }
 
+long scoreWindows(const std::vector<std::vector<uint8_t>>& chunks,
+                  const std::vector<ChunkMeta>& metas,
+                  const std::vector<std::array<int, 3>>& windows,
+                  FluxMemo& memo, int threads) {
+    std::vector<std::array<int, 3>> todo;
+    std::vector<uint64_t> keys;
+    for (const auto& w : windows) {
+        const int p = (w[0] >= 0 && metas[w[0]].valid) ? w[0] : -1;
+        const uint64_t k = packKey(p, w[1], w[2]);
+        if (memo.count(k)) continue;
+        todo.push_back({p, w[1], w[2]});
+        keys.push_back(k);
+    }
+    std::sort(keys.begin(), keys.end());
+    std::vector<std::array<int, 3>> uniq;
+    { std::unordered_map<uint64_t, char> seen;
+      for (const auto& w : todo) if (seen.emplace(packKey(w[0], w[1], w[2]), 1).second) uniq.push_back(w); }
+    std::vector<float> out(uniq.size());
+    auto one = [&](size_t i) {
+        const auto& w = uniq[i];
+        std::vector<const std::vector<uint8_t>*> segs;
+        int first = w[1];
+        if (w[0] >= 0) { segs.push_back(&chunks[w[0]]); first = w[0]; }
+        segs.push_back(&chunks[w[1]]);
+        segs.push_back(&chunks[w[2]]);
+        const PcmJunction::Metrics m =
+            PcmJunction::scoreJunction(segs, (int)segs.size() - 1, metas[first].headOffset);
+        out[i] = (!m.valid || m.silent) ? std::numeric_limits<float>::quiet_NaN() : (float)m.flux;
+    };
+    threads = std::max(1, std::min<int>(threads, (int)uniq.size()));
+    if (threads <= 1) { for (size_t i = 0; i < uniq.size(); ++i) one(i); }
+    else {
+        std::atomic<size_t> next(0);
+        std::vector<std::thread> pool;
+        for (int t = 0; t < threads; ++t)
+            pool.emplace_back([&] { for (size_t i; (i = next.fetch_add(1)) < uniq.size();) one(i); });
+        for (auto& th : pool) th.join();
+    }
+    for (size_t i = 0; i < uniq.size(); ++i) memo.emplace(packKey(uniq[i][0], uniq[i][1], uniq[i][2]), out[i]);
+    return (long)uniq.size();
+}
+
 long applyLocks(std::vector<std::vector<int>>& adj, const std::vector<LockedEdge>& locks) {
     const int n = static_cast<int>(adj.size());
     std::vector<int> lockedPred(n, -1);
