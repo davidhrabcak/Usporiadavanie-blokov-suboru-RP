@@ -1,7 +1,9 @@
 # Benchmark: `full-pcm-decode` vs `sideinfo-mainbits` (2026-10-12)
 
-Spreadsheet with every run: [`BENCHMARK_pcm_vs_main.xlsx`](BENCHMARK_pcm_vs_main.xlsx). The Notes sheet
-has the method details, and the summary sheets are formulas over the Runs sheet.
+Spreadsheet: [`BENCHMARK_pcm_vs_main.xlsx`](BENCHMARK_pcm_vs_main.xlsx). Start with its **Read me**
+sheet (plain-language explanation, headline numbers, sheet guide). Overview, By chunk size, By bitrate,
+Per file, Components, Held-out, Equal time and Signal quality are all formulas over **All runs**
+(one row per run; hover a column header for its definition).
 Tooling: `test/bench/` and `test/make_bitrate_variants.sh`.
 
 ## TL;DR
