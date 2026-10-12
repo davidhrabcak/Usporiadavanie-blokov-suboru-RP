@@ -666,8 +666,10 @@ bool dfs(DfsState& state,
                  << fixed << setprecision(1) << dfsElapsedSec() << "s]\n" << flush;
         }
         if (g_maxNodes && counter >= g_maxNodes) g_aborted = true;
-        // Wall-clock stop, sampled sparsely (steady_clock::now is a syscall).
-        if (g_haveDeadline && (counter & 0x3FFFF) == 0 && chrono::steady_clock::now() >= g_deadline)
+        // Wall-clock stop. Sampled every 64 placements: with the PCM term a single placement can
+        // cost tens of ms (a decode per candidate), so the old every-2^18 sampling overshot a
+        // 45 s budget by minutes on dense graphs. steady_clock::now is a vDSO call (~20 ns).
+        if (g_haveDeadline && (counter & 0x3F) == 0 && chrono::steady_clock::now() >= g_deadline)
             g_aborted = true;
 
         const bool hit = !g_aborted &&
@@ -699,8 +701,13 @@ int main(int argc, char* argv[]) {
     file.seekg(offset, ios::beg);
 
 
-    vector<uint8_t> buf(CHUNK_SIZE);
-    while (file.read(reinterpret_cast<char*>(buf.data()), CHUNK_SIZE) || file.gcount() > 0) {
+    // RP_CHUNK_SIZE overrides the default chunk size (bytes). Must be >= the largest frame so a
+    // frame never spans more than one chunk boundary.
+    long chunkSize = CHUNK_SIZE;
+    if (const char* s = std::getenv("RP_CHUNK_SIZE")) chunkSize = std::max(1024L, std::strtol(s, nullptr, 10));
+    if (chunkSize != CHUNK_SIZE) cout << "Chunk size: " << chunkSize << " bytes\n";
+    vector<uint8_t> buf(chunkSize);
+    while (file.read(reinterpret_cast<char*>(buf.data()), chunkSize) || file.gcount() > 0) {
         size_t n = file.gcount();
         chunks.emplace_back(buf.begin(), buf.begin() + static_cast<long>(n));
     }

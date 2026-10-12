@@ -35,6 +35,19 @@ struct Window {
     int   postFailed = 0;            // junction-or-later frames that produced no output
 };
 
+// Window extent, independent of the chunk size. Decoding starts at the latest frame that leaves
+// >= PRE_BYTES and >= PRE_FRAMES whole frames before the boundary (warm-up for the reservoir,
+// IMDCT overlap and synthesis filterbank, plus the pre-side flux baseline), and stops once the
+// decoded frames reach >= POST_BYTES past the boundary and >= POST_FRAMES junction-or-later
+// frames. At 1 KB chunks (3 left chunks + 1 candidate) this is exactly the whole window, i.e.
+// the configuration the correctness gate validated. Without the cap, large chunks (4-8 KB)
+// made every decode several times dearer and let the post-side max-flux run over seconds of
+// natural music transients, diluting the junction spike.
+constexpr long PRE_BYTES   = 3072;
+constexpr int  PRE_FRAMES  = 8;
+constexpr long POST_BYTES  = 1024;
+constexpr int  POST_FRAMES = 4;
+
 // Decodes `segs` (chunk byte arrays, in placement order) as one continuous byte stream,
 // starting at the frame header at `startOffset` in segs[0], with a fresh decoder. The first
 // `boundarySeg` segments are the left side (already-placed path) and the rest the right side

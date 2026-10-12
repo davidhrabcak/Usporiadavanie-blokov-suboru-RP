@@ -31,7 +31,7 @@
 
 using namespace std;
 
-static constexpr int CHUNK_SIZE = 1024;
+static int CHUNK_SIZE = 1024; // RP_CHUNK_SIZE overrides (as in rp)
 
 static double auc(vector<double> trueD, vector<double> wrongD) {
     if (trueD.empty() || wrongD.empty()) return 0.5;
@@ -53,6 +53,7 @@ int main(int argc, char** argv) {
     const int maxJ = argc > 2 ? atoi(argv[2]) : 1 << 30;
     // Number of warm-up chunks before chunk i (PROBE_CTX, default 2: i-2 and i-1).
     const int ctx = getenv("PROBE_CTX") ? max(1, atoi(getenv("PROBE_CTX"))) : 2;
+    if (const char* cs = getenv("RP_CHUNK_SIZE")) CHUNK_SIZE = max(1024, atoi(cs));
 
     Mp3FrameScanner scanner(filename);
     if (scanner.getFrameCount() == 0) { fprintf(stderr, "No frames found\n"); return 1; }
@@ -73,7 +74,7 @@ int main(int argc, char** argv) {
            filename.c_str(), n, int(mpeg1), int(profile.isMono()), profile.sampleRate);
 
     vector<ChunkMeta> metas;
-    for (int i = 0; i < n; ++i) metas.push_back(computeChunkMeta(i, chunks[i], profile));
+    for (int i = 0; i < n; ++i) metas.push_back(computeChunkMeta(i, chunks[i], profile, chunks[i].size() < chunks[0].size()));
     const auto adj = buildAdjacency(metas);
 
     // ---- Gate 1: windowed decode == full decode ---------------------------------------

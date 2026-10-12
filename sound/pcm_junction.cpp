@@ -23,13 +23,10 @@ Window decodeWindow(const std::vector<const std::vector<uint8_t>*>& segs, int bo
     }
     if (boundarySeg >= (int)segs.size()) w.boundaryByte = (long)buf.size();
 
-    mp3dec_t dec;
-    mp3dec_init(&dec);
-    std::vector<float> pcm(MINIMP3_MAX_SAMPLES_PER_FRAME);
-
-    long pos = startOffset;
-    bool started = false; // first frame with output seen - the timeline starts there
-    while (pos + 4 <= (long)buf.size()) {
+    // Header walk first (cheap), so the decode can be limited to a fixed byte/frame budget
+    // around the boundary instead of whole chunks - see PRE_BYTES/POST_BYTES in the header.
+    std::vector<std::pair<long, int>> walk; // (frame start, frame length)
+    for (long pos = startOffset; pos + 4 <= (long)buf.size();) {
         const uint32_t raw = packHeaderBytes(&buf[pos]);
         if (!Mp3FrameScanner::isValidHeader(raw)) break; // (Header's ctor would log to stderr)
         bool ok = false;
@@ -37,6 +34,34 @@ Window decodeWindow(const std::vector<const std::vector<uint8_t>*>& segs, int bo
         if (!ok) break;
         const int len = h.getFrameLength();
         if (len <= 4 || pos + len > (long)buf.size()) break;
+        walk.push_back({pos, len});
+        pos += len;
+    }
+    size_t first = 0, last = walk.size(); // decode walk[first, last)
+    if (boundarySeg < (int)segs.size()) { // a real junction (not a whole-stream reference decode)
+        size_t jf = 0; // first frame ending past the boundary
+        while (jf < walk.size() && walk[jf].first + walk[jf].second <= w.boundaryByte) ++jf;
+        // Latest start with >= PRE_BYTES and >= PRE_FRAMES whole frames before the boundary.
+        for (size_t i = jf; i-- > 0;) {
+            if (w.boundaryByte - walk[i].first >= PRE_BYTES && jf - i >= (size_t)PRE_FRAMES) { first = i; break; }
+        }
+        // Stop once >= POST_BYTES past the boundary and >= POST_FRAMES junction-or-later frames.
+        for (size_t i = jf; i < walk.size(); ++i) {
+            if (walk[i].first + walk[i].second - w.boundaryByte >= POST_BYTES &&
+                i - jf + 1 >= (size_t)POST_FRAMES) { last = i + 1; break; }
+        }
+    }
+
+    mp3dec_t dec;
+    mp3dec_init(&dec);
+    std::vector<float> pcm(MINIMP3_MAX_SAMPLES_PER_FRAME);
+
+    bool started = false; // first frame with output seen - the timeline starts there
+    for (size_t wi = first; wi < last; ++wi) {
+        const long pos = walk[wi].first;
+        const int  len = walk[wi].second;
+        bool ok = false;
+        Header h(packHeaderBytes(&buf[pos]), ok);
 
         // Feed exactly one frame: minimp3's `frame_size == mp3_bytes` path, so it never has to
         // resync on the following header (which would reset the reservoir/overlap state).
@@ -72,7 +97,6 @@ Window decodeWindow(const std::vector<const std::vector<uint8_t>*>& segs, int bo
         }
         if (w.junctionFrame == (int)w.frames.size()) w.junctionSample = fr.sampleStart;
         w.frames.push_back(fr);
-        pos += len;
     }
     w.valid = started && w.junctionSample > 0;
     return w;
