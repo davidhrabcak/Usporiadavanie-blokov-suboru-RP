@@ -342,7 +342,8 @@ static int tailQuality(const int tailOverflow, const int tailPartialLen) {
  */
 ChunkMeta computeChunkMeta(const int chunkIndex,
                            const vector<uint8_t>& chunk,
-                           const StreamProfile& expected) {
+                           const StreamProfile& expected,
+                           const bool shortChunk) {
     ChunkMeta meta;
     meta.chunkIndex     = chunkIndex;
     meta.headOffset     = 0;
@@ -398,6 +399,15 @@ ChunkMeta computeChunkMeta(const int chunkIndex,
         meta.tailOverflow   = bestTail;
         meta.tailPartialLen = bestTailLen;
         meta.frames         = bestFrames;
+        meta.profile        = expected;
+    } else if (shortChunk && !chunk.empty() && static_cast<int>(chunk.size()) < MAX_FRAME_LENGTH) {
+        // The tail of the final frame and nothing else (routine whenever the file's length mod
+        // chunk size is shorter than the last frame). Without this the true order has a break
+        // at the very end, which also disables AC-3 and edge locking for the whole file.
+        meta.valid          = true;
+        meta.finalFragment  = true;
+        meta.headOffset     = static_cast<int>(chunk.size());
+        meta.frameStarts    = {static_cast<int>(chunk.size())};
         meta.profile        = expected;
     }
 
