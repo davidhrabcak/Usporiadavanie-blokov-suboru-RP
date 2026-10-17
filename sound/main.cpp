@@ -1567,6 +1567,7 @@ int main(int argc, char* argv[]) {
     bool foundByHint = false;   // ordering came from the DFS rerun with the matching as ranking hint
     vector<int> matchSeq;       // its chunk sequence (possibly already repaired)
     double resultGap = std::numeric_limits<double>::quiet_NaN();   // repair's stability margin
+    int resultRepairMoves = 0;   // repair moves applied to the reported order (matching or DFS repair)
     // Deepest partial path over ALL lock attempts, in chunks (each attempt has its own
     // supernode numbering): a late attempt that dead-ends at once mustn't hide an earlier
     // attempt's long partial path in the failure report.
@@ -1842,7 +1843,7 @@ int main(int argc, char* argv[]) {
                          << chrono::duration<double>(chrono::steady_clock::now() - r0).count() << "s - "
                          << (ok2 ? "reservoir OK" : "still invalid") << " [vs source: " << tj2 << "/"
                          << (seqm.size() - 1) << " true junctions]\n";
-                    if (ok2) { result = mr.order; matchSeq = seqm; resultGap = gap; foundByMatch = true; return true; }
+                    if (ok2) { result = mr.order; matchSeq = seqm; resultGap = gap; resultRepairMoves = mv; foundByMatch = true; return true; }
                 } else if (ok) { result = mr.order; matchSeq = seqm; foundByMatch = true; return true; }
             }
             if (mr.succ.empty()) return false;
@@ -1891,6 +1892,7 @@ int main(int argc, char* argv[]) {
             const auto t0 = chrono::steady_clock::now();
             const int moves = repairOrdering(seq, metas, adjFull, isLayerIII, sideInfo, maxReservoir, passes, &resultGap,
                                              repairMinGain());
+            resultRepairMoves += moves;
             cout << "Block-move repair: " << moves << " move(s), " << fixed << setprecision(2)
                  << chrono::duration<double>(chrono::steady_clock::now() - t0).count() << "s\n";
         }
@@ -1910,8 +1912,12 @@ int main(int argc, char* argv[]) {
         // valid, but nothing proves it is the original order, and on some files a wrong order is
         // cheaper than the true one (Queen 4 KB, cbr192_10s 2 KB). The gap is the summed-flux
         // margin to the nearest valid ordering one repair move away (small = ambiguous).
+        // "+ N repair move(s)": the order was changed by flux-driven repair moves after it was
+        // found. Neither label means "verified": in the 2026-10-18 benchmark 5 wrong outputs
+        // came from the DFS (2 of them repaired, 3 wrong as found) and 11 from the matching.
         cout << "Result provenance: " << (foundByMatch ? "best-effort (global matching + repair)"
                                           : foundByHint ? "DFS search (matching-ranked)" : "DFS search");
+        if (resultRepairMoves > 0) cout << " + " << resultRepairMoves << " repair move(s)";
         if (!std::isnan(resultGap)) {
             if (std::isfinite(resultGap)) cout << ", stability gap " << fixed << setprecision(3) << resultGap;
             else cout << ", stability gap inf";

@@ -214,16 +214,18 @@ Benchmark on 64 main + 56 held-out cells (seed 1; `sound/tmp/bench/runs.csv`, co
 
 | set | config | exact | wrong | failed | junctions recovered | total wall |
 |---|---|---|---|---|---|---|
-| main | PCM final | 35 | 0 | 29 | 80.3% | 245 min |
-| main | global matching v2 | 42 | 8 | 14 | 89.7% | 423 min |
+| main | PCM final | 35 | 0 | 29 | 80.3% | 60 min |
+| main | global matching v2 | 42 | 8 | 14 | 89.7% | 80 min |
 | main | **current** | **49** | 8 | **7** | **93.9%** | **27 min** |
-| held-out | PCM final | 33 | 0 | 23 | 82.5% | 149 min |
+| held-out | PCM final | 33 | 0 | 23 | 82.7% | 37 min |
 | held-out | global matching v2 | 41 | 9 | 6 | 91.9% | 42 min |
 | held-out | **current** | **44** | 8 | **4** | **94.3%** | **16 min** |
 
-What did it: the reservoir arc filter (graphs 5-20x smaller), `PcmJunction::LeftContext` (left side decoded once per context, bit-identical, 1.5-2.9x cheaper scoring), and `RP_REPAIR_MIN_GAIN=1.0` (flux-only repair moves on a valid order need a summed-log1p-flux gain >= 1; the move study `tmp/bench/move_study.txt` found moves below 0.25 harmful 30:4, and 1.0 beat 0.25 on both sets). Iterated matching (`RP_MATCH_ITERS`) changed no outcome and stays off.
+Speed: 2.2-3x less total time; the paired per-cell median ratio is 4-5x (quartiles 1x-30x). Median run 0.2-0.3 s vs 6.5-32 s. 8 earlier runs (6 PCM final, 2 global matching v2) had wall times inflated by machine suspends (up to 20 858 s under a 900 s timeout); they were rerun, which is marked in the table's `note` column, and these totals use the reruns.
 
-**Still open - the wrong outputs.** PCM final never outputs a wrong order; the current pipeline does (16 of 120 cells, labelled `best-effort` or `DFS search`). 9 of them are search failures (the true order is cheaper but more than one repair move away, or behind the min-gain threshold), 7 are objective failures (the wrong order is cheaper: Queen 2/4 KB, bohemoan 2/4 KB, gen2 cbr32_30s 1 KB, cbr192_30s 2 KB, cbr320_30s 2 KB). The objective failures need a better per-junction signal - see `PLAN_probabilistic_hamiltonian_path.md`.
+What did it: the reservoir arc filter (graphs 5-20x smaller), `PcmJunction::LeftContext` (left side decoded once per context, bit-identical, 1.5-2.9x cheaper scoring), and `RP_REPAIR_MIN_GAIN=1.0` (flux-only repair moves on a valid order need a summed-log1p-flux gain >= 1; the move study `tmp/bench/move_study.txt` found moves below 0.25 harmful 30:4). 1.0 was the provisional default before the comparison. Against 0.25 it scored 49 vs 48 exact on main (noise) and 44 vs 41 on held-out, so **the held-out set took part in choosing this threshold**: gen2 is no longer untouched for `RP_REPAIR_MIN_GAIN`. Iterated matching (`RP_MATCH_ITERS`) changed no outcome and stays off.
+
+**Still open - the wrong outputs.** PCM final never outputs a wrong order; the current pipeline does (16 of 120 cells). 11 are labelled `best-effort (global matching + repair)`, but 5 are labelled `DFS search`: on the much smaller filtered graph the DFS's first valid order can itself be wrong (3 cases), or the min-gain repair moved it (2 cases). So the provenance label no longer separates safe outputs from risky ones. It now also prints `+ N repair move(s)`. 9 of them are search failures (the true order is cheaper but more than one repair move away, or behind the min-gain threshold), 7 are objective failures (the wrong order is cheaper: Queen 2/4 KB, bohemoan 2/4 KB, gen2 cbr32_30s 1 KB, cbr192_30s 2 KB, cbr320_30s 2 KB). The objective failures need a better per-junction signal - see `PLAN_probabilistic_hamiltonian_path.md`.
 
 ## TODO / Future Improvements
 
