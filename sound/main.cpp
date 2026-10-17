@@ -1474,7 +1474,8 @@ int main(int argc, char* argv[]) {
     vector<int> result;
     bool found = false;
     size_t foundAttempt = 0;   // which lock attempt produced the ordering (repair policy below)
-    bool foundByMatch = false;  // ordering came from the global matching (repair always runs)
+    bool foundByMatch = false;  // ordering came from the global matching (already repaired)
+    bool foundByHint = false;   // ordering came from the DFS rerun with the matching as ranking hint
     vector<int> matchSeq;       // its chunk sequence (possibly already repaired)
     double resultGap = std::numeric_limits<double>::quiet_NaN();   // repair's stability margin
     // Deepest partial path over ALL lock attempts, in chunks (each attempt has its own
@@ -1709,8 +1710,8 @@ int main(int argc, char* argv[]) {
                          << chrono::duration<double>(chrono::steady_clock::now() - r0).count() << "s - "
                          << (ok2 ? "reservoir OK" : "still invalid") << " [vs source: " << tj2 << "/"
                          << (seqm.size() - 1) << " true junctions]\n";
-                    if (ok2) { result = mr.order; matchSeq = seqm; resultGap = gap; return true; }
-                } else if (ok) { result = mr.order; matchSeq = seqm; return true; }
+                    if (ok2) { result = mr.order; matchSeq = seqm; resultGap = gap; foundByMatch = true; return true; }
+                } else if (ok) { result = mr.order; matchSeq = seqm; foundByMatch = true; return true; }
             }
             if (mr.succ.empty()) return false;
             g_matchSucc = mr.succ;
@@ -1718,14 +1719,15 @@ int main(int argc, char* argv[]) {
             cout << "Search with the matching as ranking hint:\n";
             search();
             g_matchSucc.clear();
+            if (found) foundByHint = true;   // a DFS result: normal repair policy, own label
             return found;
         };
         int matchMode = 1;
         if (const char* m = std::getenv("RP_MATCH")) matchMode = atoi(m);
         if (!g_pcmRank) matchMode = 0;
-        if (matchMode == 2 && tryMatch()) { found = true; foundByMatch = true; continue; }
+        if (matchMode == 2 && tryMatch()) { found = true; continue; }
         search();
-        if (!found && matchMode == 1 && tryMatch()) { found = true; foundByMatch = true; }
+        if (!found && matchMode == 1 && tryMatch()) found = true;
     } // lock attempts
 
     if (found) {
@@ -1774,7 +1776,8 @@ int main(int argc, char* argv[]) {
         // valid, but nothing proves it is the original order, and on some files a wrong order is
         // cheaper than the true one (Queen 4 KB, cbr192_10s 2 KB). The gap is the summed-flux
         // margin to the nearest valid ordering one repair move away (small = ambiguous).
-        cout << "Result provenance: " << (foundByMatch ? "best-effort (global matching + repair)" : "DFS search");
+        cout << "Result provenance: " << (foundByMatch ? "best-effort (global matching + repair)"
+                                          : foundByHint ? "DFS search (matching-ranked)" : "DFS search");
         if (!std::isnan(resultGap)) {
             if (std::isfinite(resultGap)) cout << ", stability gap " << fixed << setprecision(3) << resultGap;
             else cout << ", stability gap inf";
