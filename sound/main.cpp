@@ -421,10 +421,14 @@ static int reservoirBreaks(const vector<ChunkMeta>& metas, const vector<int>& se
 //   block swap: exchange two disjoint blocks seq[i1..j1] and seq[i2..j2] (4 new junctions) -
 //               needed for the A-X-Y-B -> A-B-Y-X shape, where every single block move on the
 //               way is structurally invalid.
-// Returns the number of moves applied; `seq` is updated in place.
+// Returns the number of moves applied; `seq` is updated in place. `gap` (optional) gets the
+// stability margin of the final order: how much the summed flux would rise under the cheapest
+// valid move the last (full-scan) pass rejected - NaN when no full scan completed. A small gap
+// means a nearby, almost equally cheap ordering exists (the wrong-output risk).
 static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
                           const vector<vector<int>>& adjFull, const bool isLayerIII,
-                          const int sideInfo, const int maxReservoir, const int maxPasses) {
+                          const int sideInfo, const int maxReservoir, const int maxPasses,
+                          double* gap = nullptr) {
     const int n = static_cast<int>(seq.size());
     std::unordered_set<uint64_t> edge;
     vector<vector<int>> preds(adjFull.size());
@@ -445,6 +449,9 @@ static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
     const auto deadline = chrono::steady_clock::now() +
         chrono::duration_cast<chrono::steady_clock::duration>(chrono::duration<double>(budget));
     bool outOfTime = false;
+    if (gap) *gap = std::numeric_limits<double>::quiet_NaN();
+    double nearest = std::numeric_limits<double>::infinity();   // cheapest rejected move (sum delta)
+    string nearestWhat;
 
     // A candidate is a list of [from, to] segments of the current `seq`. It is evaluated
     // incrementally: a junction's flux depends on its 4-chunk window, so only the first 3
@@ -573,6 +580,10 @@ static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
             if (!trackBreaks) c.breaks = 0;
             evalFlux(segs, c);
             if (c < cur) moves.push_back({c, std::move(segs), std::move(what)});
+            else if (c.breaks == cur.breaks && c.unmeasured == cur.unmeasured && c.sum - cur.sum < nearest) {
+                nearest = c.sum - cur.sum;
+                nearestWhat = what;
+            }
         };
         auto push = [](vector<Seg>& v, int a, int b) { if (a <= b) v.push_back({a, b}); };
 
@@ -581,6 +592,7 @@ static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
             if (phase == 1) std::fill(bad.begin(), bad.end(), 1);
             moves.clear();
             candidates = 0;
+            nearest = std::numeric_limits<double>::infinity();
 
             // block moves: take seq[i..j] out and reinsert it after position k
             for (int i = 1; i < n && !outOfTime; ++i)
@@ -636,7 +648,15 @@ static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
             moved = true;
         }
         if (!moved) {
-            cout << "  repair pass " << pass + 1 << ": no improving valid move\n";
+            cout << "  repair pass " << pass + 1 << ": no improving valid move";
+            if (!outOfTime) {
+                if (gap) *gap = nearest;
+                if (std::isfinite(nearest))
+                    cout << " (nearest valid alternative: +" << fixed << setprecision(3) << nearest
+                         << " summed flux, " << nearestWhat << ")";
+                else cout << " (no other valid ordering within one move)";
+            }
+            cout << "\n";
             break;
         }
         if (outOfTime) cout << "  repair: time budget (" << budget << " s) spent - stopping\n";
@@ -855,6 +875,7 @@ struct MatchResult {
     int cycles = 0, spliced = 0;
     double cost = 0;
     long decodes = 0;
+    int contexts = 8;             // predecessor contexts per single-chunk supernode (decode cap)
     string failure;
 };
 
@@ -866,27 +887,55 @@ static MatchResult globalMatch(const vector<Supernode>& sn, const vector<vector<
     // chunk-level predecessors in the current (locked) graph, for single-chunk contexts
     vector<vector<int>> preds(chunkAdj.size());
     for (size_t a = 0; a < chunkAdj.size(); ++a) for (int b : chunkAdj[a]) preds[b].push_back((int)a);
-    auto contexts = [&](int s) {
+    auto contexts = [&](int s, int maxCtx) {
         const auto& ch = sn[s].chunks;
         vector<int> ctx;
         if (ch.size() >= 2) ctx.push_back(ch[ch.size() - 2]);
         else if (s == startSuper) ctx.push_back(-1);
         else {
             const auto& pr = preds[ch.back()];
-            if (pr.size() <= 8) ctx = pr;
-            else for (int k = 0; k < 8; ++k) ctx.push_back(pr[(size_t)k * pr.size() / 8]);
+            if ((int)pr.size() <= maxCtx) ctx = pr;
+            else for (int k = 0; k < maxCtx; ++k) ctx.push_back(pr[(size_t)k * pr.size() / maxCtx]);
             if (ctx.empty()) ctx.push_back(-1);
         }
         return ctx;
     };
+    // Decode cap: dense low-bitrate graphs (bohemoan 32 kbps at 1-2 KB: ~700 supernodes x ~140
+    // successors x 8 contexts) took > 15 min just to score. Halve the number of predecessor
+    // contexts per single-chunk supernode until the windows not yet in the memo fit under
+    // RP_MATCH_MAX_DECODES; skip the matching if even one context doesn't fit. Count-based (not
+    // time-based) so whether and how the matching runs doesn't depend on the core count.
+    long cap = 100000;
+    if (const char* v = std::getenv("RP_MATCH_MAX_DECODES")) cap = atol(v);
     vector<vector<int>> ctxOf(N);
     vector<std::array<int, 3>> windows;
-    for (int s = 0; s < N; ++s) {
-        ctxOf[s] = contexts(s);
-        const int a = sn[s].chunks.back();
-        for (int t : superAdj[s]) {
-            const int b = sn[t].chunks.front();
-            for (int p : ctxOf[s]) if (p != b) windows.push_back({p, a, b});
+    for (int maxCtx = 8; ; maxCtx /= 2) {
+        windows.clear();
+        for (int s = 0; s < N; ++s) {
+            ctxOf[s] = contexts(s, maxCtx);
+            const int a = sn[s].chunks.back();
+            for (int t : superAdj[s]) {
+                const int b = sn[t].chunks.front();
+                for (int p : ctxOf[s]) if (p != b) windows.push_back({p, a, b});
+            }
+        }
+        long todo = 0;
+        { std::unordered_set<uint64_t> miss;
+          for (const auto& w : windows) {
+              const uint64_t k = EdgeLock::packKey((w[0] >= 0 && metas[w[0]].valid) ? w[0] : -1, w[1], w[2]);
+              if (!memo.count(k)) miss.insert(k);
+          }
+          todo = (long)miss.size(); }
+        res.contexts = maxCtx;
+        if (todo <= cap) {
+            cout << "Global matching: scoring " << todo << " new windows (<= " << maxCtx
+                 << " contexts per edge) ...\n" << flush;
+            break;
+        }
+        if (maxCtx == 1) {
+            res.failure = "skipped (" + std::to_string(todo) + " window decodes > " + std::to_string(cap) +
+                          " even with 1 context; RP_MATCH_MAX_DECODES raises the cap)";
+            return res;
         }
     }
     res.decodes = EdgeLock::scoreWindows(chunks, metas, windows, memo, threads);
@@ -1427,6 +1476,7 @@ int main(int argc, char* argv[]) {
     size_t foundAttempt = 0;   // which lock attempt produced the ordering (repair policy below)
     bool foundByMatch = false;  // ordering came from the global matching (repair always runs)
     vector<int> matchSeq;       // its chunk sequence (possibly already repaired)
+    double resultGap = std::numeric_limits<double>::quiet_NaN();   // repair's stability margin
     // Deepest partial path over ALL lock attempts, in chunks (each attempt has its own
     // supernode numbering): a late attempt that dead-ends at once mustn't hide an earlier
     // attempt's long partial path in the failure report.
@@ -1629,7 +1679,8 @@ int main(int argc, char* argv[]) {
             const auto t0 = chrono::steady_clock::now();
             MatchResult mr = globalMatch(supernodes, superAdj, startSuper, adj, metas, lockMemo, lockThreads);
             const double secs = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
-            cout << "Global matching: " << supernodes.size() << " supernodes, " << mr.decodes << " decodes, "
+            cout << "Global matching: " << supernodes.size() << " supernodes, " << mr.decodes << " decodes ("
+                 << mr.contexts << " ctx), "
                  << mr.cycles << " cycle(s), " << mr.spliced << " spliced, cost " << fixed << setprecision(3)
                  << mr.cost << ", " << setprecision(2) << secs << "s";
             if (mr.order.empty()) { cout << " - " << mr.failure << "\n"; }
@@ -1648,7 +1699,8 @@ int main(int argc, char* argv[]) {
                     int passes = 50;
                     if (const char* v = std::getenv("RP_REPAIR_PASSES")) passes = std::max(1, atoi(v));
                     const auto r0 = chrono::steady_clock::now();
-                    const int mv = repairOrdering(seqm, metas, adjFull, isLayerIII, sideInfo, maxReservoir, passes);
+                    double gap = std::numeric_limits<double>::quiet_NaN();
+                    const int mv = repairOrdering(seqm, metas, adjFull, isLayerIII, sideInfo, maxReservoir, passes, &gap);
                     const bool ok2 = reservoirValid(metas, seqm, sideInfo, maxReservoir);
                     int tj2 = 0;
                     for (size_t k = 1; k < seqm.size(); ++k) if (origIndexOf[seqm[k]] == origIndexOf[seqm[k - 1]] + 1) ++tj2;
@@ -1657,7 +1709,7 @@ int main(int argc, char* argv[]) {
                          << chrono::duration<double>(chrono::steady_clock::now() - r0).count() << "s - "
                          << (ok2 ? "reservoir OK" : "still invalid") << " [vs source: " << tj2 << "/"
                          << (seqm.size() - 1) << " true junctions]\n";
-                    if (ok2) { result = mr.order; matchSeq = seqm; return true; }
+                    if (ok2) { result = mr.order; matchSeq = seqm; resultGap = gap; return true; }
                 } else if (ok) { result = mr.order; matchSeq = seqm; return true; }
             }
             if (mr.succ.empty()) return false;
@@ -1702,7 +1754,7 @@ int main(int argc, char* argv[]) {
             int passes = 50;
             if (const char* v = std::getenv("RP_REPAIR_PASSES")) passes = std::max(1, atoi(v));
             const auto t0 = chrono::steady_clock::now();
-            const int moves = repairOrdering(seq, metas, adjFull, isLayerIII, sideInfo, maxReservoir, passes);
+            const int moves = repairOrdering(seq, metas, adjFull, isLayerIII, sideInfo, maxReservoir, passes, &resultGap);
             cout << "Block-move repair: " << moves << " move(s), " << fixed << setprecision(2)
                  << chrono::duration<double>(chrono::steady_clock::now() - t0).count() << "s\n";
         }
@@ -1717,6 +1769,17 @@ int main(int argc, char* argv[]) {
             reconOrig.push_back(origIndexOf[ci]);
         }
         cout << "Written " << total << " bytes to output.mp3\n";
+        // Provenance label (a line of its own - regression.sh/parse.py grep the lines around it).
+        // A global-matching ordering is the min-cost assignment patched + repaired: reservoir-
+        // valid, but nothing proves it is the original order, and on some files a wrong order is
+        // cheaper than the true one (Queen 4 KB, cbr192_10s 2 KB). The gap is the summed-flux
+        // margin to the nearest valid ordering one repair move away (small = ambiguous).
+        cout << "Result provenance: " << (foundByMatch ? "best-effort (global matching + repair)" : "DFS search");
+        if (!std::isnan(resultGap)) {
+            if (std::isfinite(resultGap)) cout << ", stability gap " << fixed << setprecision(3) << resultGap;
+            else cout << ", stability gap inf";
+        }
+        cout << "\n";
 
         // C2: score the reconstruction against the true (pre-shuffle) order.
         int exactPos = 0;

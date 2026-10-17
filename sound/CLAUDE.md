@@ -412,6 +412,8 @@ Output is written to `output.mp3` in the current directory. Chunk 0 of the input
 | `RP_REPAIR_SUSPECTS` | max(16, n/20) | repair only evaluates moves that cut one of the K worst-flux junctions. `0` = no filter (slow on dense CBR graphs). |
 | `RP_REPAIR_BUDGET` | 60 | repair wall-clock budget (s). When spent, the best move found so far is still applied. |
 | `RP_CHUNK_SIZE` | 1024 | chunk size in bytes (rp and pcm_probe). The PCM junction window is byte-capped (>= 3 KB / 8 frames before, >= 1 KB / 4 frames after), so its cost doesn't grow with it; frames near the junction stay sample-exact at 4-8 KB (pcm_probe gate 1). |
+| `RP_MATCH` | 1 | global min-cost successor matching (`globalMatch`: assignment on log1p(median flux) + cycle splicing + breaks-first repair). `1` = after a lock attempt's DFS fails, `2` = before the DFS, `0` = off. Its result is labelled `Result provenance: best-effort (global matching + repair)` - reservoir-valid but not proven original (a wrong order can be cheaper than the true one). |
+| `RP_MATCH_MAX_DECODES` | 100000 | matching decode cap: predecessor contexts per single-chunk supernode are halved (8→1) until the not-yet-memoised windows fit; skipped if even 1 context doesn't. ~1.8 ms/decode/thread at 32 kbps. |
 | `RP_SCORE_ORDER` | off | diagnostic: when the found ordering isn't exact, print its summed PCM flux vs the source order's. |
 | `RP_BESTOF` | off | `RP_BESTOF=1` keeps searching past the first complete ordering for the min summed-junction-cost one. Measured *worse* - see Known Limitations item 7. |
 | `RP_BEAM` | unset | `RP_BEAM=K` caps each DFS node to its K best-ranked reservoir-valid candidates (single fixed-width attempt). |
