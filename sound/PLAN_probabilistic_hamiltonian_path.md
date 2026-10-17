@@ -202,14 +202,15 @@ Shortest Hamiltonian path from a fixed start `s` (chunk 0's supernode) = **asymm
 
 | option | exact? | fit here | license / dependency |
 |---|---|---|---|
-| **AP-based branch & bound** (Carpaneto-Dell'Amico-Toth style), in-house | yes (with time limit → best found) | **Best first fit.** The assignment relaxation is already implemented (`globalMatch` SSP), and on our data it leaves only 0-3 subtours. That means a very tight bound and a shallow tree. To branch on a subtour, forbid each of its arcs in turn. Re-solve incrementally from the previous potentials. | none |
+| **AP-based branch & bound** (Carpaneto-Dell'Amico-Toth style), in-house | yes (with time limit → best found) | **First candidate, not yet justified.** The assignment relaxation is already implemented (`globalMatch` SSP). On our data it leaves only 0-3 subtours, so the subtour part of the tree is shallow. But the same AP solutions had 6-12 reservoir breaks and needed 1-22 repair moves (22 on vbrq2_30s 1 KB, 8 on test7_short). **The reservoir cuts, not the subtours, will set the tree depth.** That has to be measured (step 2) before choosing. To branch on a subtour or a no-good, forbid each of its arcs in turn. Re-solve incrementally from the previous potentials. | none |
 | **ILP**, DFJ formulation, lazy subtour cuts (HiGHS) | yes | Second check on the B&B and an upper bound on what exact solving costs. The LP bound is ≥ the AP bound. Reservoir no-goods (below) are linear cuts. | HiGHS: MIT, C++ library, CMake-friendly |
 | **CP-SAT** `AddCircuit` with optional arcs (OR-Tools) | yes | Native Hamiltonian-circuit propagation, strong LNS for good solutions on 5k nodes. Prototype it in Python first, against dumped instances. | Apache-2.0, but a heavy C++ dependency |
 | **LKH-3** (ATSP / SOP) | no (state-of-the-art heuristic) | Seconds on 5k nodes. Use it as an upper bound and a cross-check: if LKH finds a cheaper tour than the exact solver, there's a bug. Called as an external binary with TSPLIB files. | Academic/non-commercial use only. Don't vendor it into the repo. |
 | pure SAT / MaxSAT | in principle | **Not recommended.** Hamiltonicity encodings need O(n² log n) or more clauses with weak propagation, and weighted MaxSAT at n≈5k is out of reach. CP-SAT is the "SAT-solver" route that works, because its circuit constraint does the propagation SAT encodings lack. | - |
 | Concorde | yes, but symmetric only | Poor fit: ATSP→STSP doubles the nodes and loses the sparsity structure. | academic |
 
-**Recommendation.** Implement AP-B&B in `main.cpp`'s neighbourhood (new file
+**Recommendation, pending the step-2 measurements** (AP bound vs the optimum, and reservoir
+cuts per instance). Implement AP-B&B in `main.cpp`'s neighbourhood (new file
 `hampath.{hpp,cpp}`), reusing the SSP code from `globalMatch`. Validate it against HiGHS and
 CP-SAT, in a Python harness over dumped instances, on every bench instance it can finish.
 Keep LKH-3 as an external sanity check only. Today's repair (`repairOrdering`) remains the
@@ -217,22 +218,40 @@ local-search polish when the exact solve hits its time limit.
 
 ### The bit reservoir: lazy no-good cuts
 
-The reservoir check can't be written as arc costs. Use it the way lazy subtour constraints
-are used:
+The reservoir check can't be written as arc costs. Two properties of
+`advanceReservoirFrame` (main.cpp) make it usable as lazy cuts anyway:
+
+- **Monotone in the entry level.** The only level-dependent test is
+  `mainDataBegin > level/8`. The `headOffset` fallback credit only adds. So a fuller
+  reservoir never turns a pass into a fail, and "fails from every entry level" ⇔ "fails from
+  a full reservoir".
+- **Exact re-sync after one validated frame.** The level after a frame is
+  `mainDataBegin*8 + produced - part23Bits` (capped), which does not depend on the entry
+  level. A failure at chunk k therefore depends only on the chunks back to the last frame
+  validated before it. That's 2-3 chunks at most bitrates/chunk sizes. It can be more when
+  chunks hold no complete frame (320 kbps at 1 KB, where frames are ~1044 bytes), via the
+  split-frame side-info path.
+
+So the cut windows below are sound and short. Use them the way lazy subtour constraints are
+used:
 
 1. Solve. Run `reservoirBreaks` on the result.
 2. For each break at position k, walk back to the shortest window `[i..k]` whose check fails
-   from **every** entry reservoir level. The reservoir re-syncs within a frame or two, so this
-   window is short, typically 2-4 chunks.
+   when entered with a **full** reservoir (sound by monotonicity). By the re-sync property
+   this window ends no earlier than the last validated frame before k, so it is typically 2-4
+   chunks. Weak case: a window that starts at chunk 0, because only the pinned start enters
+   with level 0. Its cut covers a long prefix and barely prunes. The fallback there is the
+   existing breaks-first repair from the best solution found.
 3. Add the no-good "not all arcs `seq[i]→…→seq[k]` together":
    - ILP: `Σ x_e ≤ len - 1`;
    - B&B: branch on those arcs;
    - CP-SAT: a `BoolOr` of their negations.
 4. Re-solve and repeat.
 
-Windows of length 1 are single arcs. Those are infeasible on their own and should be deleted
-from the graph up front. That's a pre-pass over all arcs worth adding even without the rest
-of this plan.
+A window of a single arc `a→b` is one that fails even when `a` is entered with a full
+reservoir. Such an arc is infeasible in every context, so delete it from the graph up front.
+That's a pre-pass over all arcs (cheap, no decode) worth adding even without the rest of
+this plan. Measure how many arcs it removes on CBR.
 
 ### Output and confidence
 
@@ -256,13 +275,26 @@ Each step ends with a measurement that decides whether the next one is worth doi
      calibration report).
    - **Gate A (signal):** held-out (gen2) log-loss and AUC beat `log1p(median flux)` alone,
      and the reliability curve stays within ±5 points.
-2. **Objective check: does the truth win?**
-   - New diagnostic `RP_SCORE_ORDER=2` scores the true order and the found order under the
-     new weights.
-   - Go through every bench cell where gm1b/final found a complete order, plus the three
-     known failures.
-   - **Gate B:** the true order must be the cheaper one on the three cells where it loses
-     today (cbr192_10s 2 KB, Queen 4 KB, bohemoan 4 KB). No cell where it wins today may flip.
+   - **No leakage into Gate B.** The three failure cells come from `gen/` (cbr192_10s) and
+     from Queen and bohemoan. Score them with **leave-one-file-out** models: the model that
+     scores a file was never fit on any chunk size of that file.
+2. **Objective check: is the truth the optimum under the new weights?**
+   - Add the instance dump (`RP_DUMP_ATSP=path`: TSPLIB ATSP + forbidden arcs + the
+     true-order and chunk-0 annotations) here rather than in step 4.
+   - Solve every dumped instance with an off-the-shelf optimiser: LKH-3 for a strong upper
+     bound and CP-SAT where it proves optimality.
+   - **Gate B:** under the new weights, cost(truth) ≤ cost(best path found by the optimiser)
+     on the three cells where truth loses today (cbr192_10s 2 KB, Queen 4 KB, bohemoan 4 KB).
+     No cell where truth wins today may flip. Beating the old wrong order is not enough, so
+     compare against the optimiser.
+   - Run this for both the new weights and today's `log1p(flux)` costs. The second run tells
+     how many of today's failures are signal failures rather than search failures.
+   - Also log, per instance:
+     - AP lower bound vs cost(truth): a tight gap means B&B is cheap;
+     - the number of lazy reservoir cuts a cut loop needs to reach a reservoir-valid optimum
+       (CP-SAT/ILP in the Python harness).
+
+     These two numbers decide step 4's solver choice.
    - **If Gate B fails, stop.** A better solver cannot help, and the next step is more or
      better features, not step 4.
 3. **Cascade + probability locking in `rp`** (`RP_PROB=1`).
@@ -271,8 +303,8 @@ Each step ends with a measurement that decides whether the next one is worth doi
 4. **Exact solver.**
    - Build AP-B&B with lazy reservoir cuts, behind `RP_SOLVER=bb` (default `match` = today's
      pipeline).
-   - Dump instances (`RP_DUMP_ATSP=path`, TSPLIB format + forbidden-arc list) for the
-     HiGHS / CP-SAT / LKH-3 cross-checks in `test/solver_check.py`.
+   - Cross-check it against HiGHS / CP-SAT / LKH-3 in `test/solver_check.py`, on the
+     instances dumped in step 2.
    - **Gate C:** on every instance both solve, B&B's optimum equals HiGHS's, and LKH-3 never
      finds anything cheaper.
 5. **Context fixed-point iteration + second-best margin.**
