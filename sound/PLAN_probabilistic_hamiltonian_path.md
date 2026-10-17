@@ -348,5 +348,13 @@ Each step ends with a measurement that decides whether the next one is worth doi
 ## Status
 
 - 2026-10-17: plan written. `global-matching` finished at `eac8255` (decode cap, stability
-  gap, provenance label); regression.sh and ci_sanity pass. Benchmark of `rp_gm2` (gm1b/gm2b)
-  results: see below.
+  gap, provenance label); regression.sh and ci_sanity pass.
+- 2026-10-18: baseline for this plan is now `844fe4b`: reservoir arc filter + LeftContext +
+  min-gain repair. Exact on 49/64 main and 44/56 held-out cells, 8 + 8 wrong outputs, about
+  17x faster than global matching v2 (CLAUDE.md Known Limitations item 8).
+  - Of the 16 wrong outputs, 7 are objective failures (the wrong order is cheaper). These are
+    Gate B's targets.
+  - The other 9 are search failures: the true order is cheaper, but more than one repair move
+    away. An exact solver (step 4) would reach those, provided it finds the global optimum
+    under the same costs.
+  - Arc pre-filter: done (it is the "single-arc window" pre-pass of the reservoir section).
