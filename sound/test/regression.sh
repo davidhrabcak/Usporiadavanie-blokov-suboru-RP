@@ -37,7 +37,7 @@ measure() { # fixture -> "preBrk resvBrk supers exact"
     else preBrk=$(sed -n 's/^Pre-shuffle check FAILED: \([0-9]*\).*/\1/p' <<<"$out"); fi
     if grep -q "Reservoir check PASSED on true order" <<<"$out"; then resvBrk=0
     else resvBrk=$(grep -c "RESERVOIR BREAK" <<<"$out"); fi
-    supers=$(sed -n 's/^Supernodes after chain collapse: \([0-9]*\).*/\1/p' <<<"$out")
+    supers=$(sed -n 's/^Supernodes after chain collapse: \([0-9]*\).*/\1/p' <<<"$out" | tail -1) # last lock attempt
     exact=$(sed -n 's#^Reconstruction vs source: [0-9]*/[0-9]* chunks in original position (\([0-9.]*\)%).*#\1#p' <<<"$out")
     [ -z "$exact" ] && exact=FAILED
     echo "${preBrk:-?} ${resvBrk:-?} ${supers:-?} ${exact}"
