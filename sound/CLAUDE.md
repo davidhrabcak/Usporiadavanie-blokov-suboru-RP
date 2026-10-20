@@ -55,6 +55,8 @@ Reconstructs the header from `a.tailHeadBytes[0..tov-1]` + `b.chunkHead[0..3-tov
 
 `buildAdjacency()` uses a `byFrameStart` hash map (frameStart position → list of chunk indices) for O(1) Case-1 lookups. Case-2 chunks still require an O(n) scan.
 
+**Reservoir arc filter (2026-10-18, `RP_RESV_FILTER`)**: after `buildAdjacency`, arcs a→b that fail the bit-reservoir check even with `a` entered on a full reservoir are dropped. Sound because the check is monotone in the entry level (`advanceReservoirFrame`: the only level-dependent test is `mainDataBegin > level/8`, and a frame's output level does not depend on the entry level). Gated on the reservoir model passing the true order, like AC-3. Removes 40-85% of CBR arcs (0 true arcs on every fixture) and lets AC-3 cascade (cbr128_30s 1 KB: 11003 → 1437 arcs). It exposed a latent AC-3 bug: the successor-side rule forced a chunk's single remaining arc even for the stream's last chunk (no true successor); now that rule applies only once the end is known.
+
 ### Phase 5 — Supernode (forced-chain) collapse
 Identifies maximal forced chains: runs where every node has out-degree 1 and its successor has in-degree 1. These chains are merged into single supernodes, reducing the DFS search space.
 
@@ -205,6 +207,25 @@ Wired into `dfs()` (`main.cpp`): a per-chunk `BoundaryGain` (leading/trailing gr
 **2026-09-07 update 2 - "best-of" search (keep exploring, minimise summed junction cost) tried; it is *worse*, and the reason is informative.** `main.cpp` `RP_BESTOF=1`: don't stop at the first complete ordering, keep the lowest-scoring one where score = summed `junctionCost` (= `|Δ global_gain|`, unknown junctions cost a flat 384) over every supernode boundary, with branch-and-bound on the partial score. Result on `sample-3s` (5 seeds): best-of converges to one score-194 ordering with **only 25% of chunks in place**, vs **76-100% for first-valid** (and 100% for seeds 1/3/777). The summed-junction-cost *global minimum is not the true order* - a real stream genuinely contains large `global_gain` steps at transients / section edges, so a "smoother than reality" reorder wins. **`global_gain` is a good local rank signal, not a good global objective.** first-valid + rank-ordered candidates stays the default; best-of stays behind the flag for trying a better objective (reservoir headroom, or a multi-feature score first *verified* to have the true order as its argmin - which needs a probe extension: "is `trueOrderScore < scoreOf(random valid orderings)` for objective X?").
 
 ---
+
+### 8. Global matching, reservoir filter, min-gain repair - results (2026-10-18, branch `global-matching`)
+
+Benchmark on 64 main + 56 held-out cells (seed 1; `sound/tmp/bench/runs.csv`, configs `devg100b`/`ho_devg100b` = `844fe4b` defaults vs `gm1b` = `57965af` and `final` = PCM final `1c5abe1`):
+
+| set | config | exact | wrong | failed | junctions recovered | total wall |
+|---|---|---|---|---|---|---|
+| main | PCM final | 35 | 0 | 29 | 80.3% | 60 min |
+| main | global matching v2 | 42 | 8 | 14 | 89.7% | 80 min |
+| main | **current** | **49** | 8 | **7** | **93.9%** | **27 min** |
+| held-out | PCM final | 33 | 0 | 23 | 82.7% | 37 min |
+| held-out | global matching v2 | 41 | 9 | 6 | 91.9% | 42 min |
+| held-out | **current** | **44** | 8 | **4** | **94.3%** | **16 min** |
+
+Speed: 2.2-3x less total time; the paired per-cell median ratio is 4-5x (quartiles 1x-30x). Median run 0.2-0.3 s vs 6.5-32 s. 8 earlier runs (6 PCM final, 2 global matching v2) had wall times inflated by machine suspends (up to 20 858 s under a 900 s timeout); they were rerun, which is marked in the table's `note` column, and these totals use the reruns.
+
+What did it: the reservoir arc filter (graphs 5-20x smaller), `PcmJunction::LeftContext` (left side decoded once per context, bit-identical, 1.5-2.9x cheaper scoring), and `RP_REPAIR_MIN_GAIN=1.0` (flux-only repair moves on a valid order need a summed-log1p-flux gain >= 1; the move study `tmp/bench/move_study.txt` found moves below 0.25 harmful 30:4). 1.0 was the provisional default before the comparison. Against 0.25 it scored 49 vs 48 exact on main (noise) and 44 vs 41 on held-out, so **the held-out set took part in choosing this threshold**: gen2 is no longer untouched for `RP_REPAIR_MIN_GAIN`. Iterated matching (`RP_MATCH_ITERS`) changed no outcome and stays off.
+
+**Still open - the wrong outputs.** PCM final never outputs a wrong order; the current pipeline does (16 of 120 cells). 11 are labelled `best-effort (global matching + repair)`, but 5 are labelled `DFS search`: on the much smaller filtered graph the DFS's first valid order can itself be wrong (3 cases), or the min-gain repair moved it (2 cases). So the provenance label no longer separates safe outputs from risky ones. It now also prints `+ N repair move(s)`. 9 of them are search failures (the true order is cheaper but more than one repair move away, or behind the min-gain threshold), 7 are objective failures (the wrong order is cheaper: Queen 2/4 KB, bohemoan 2/4 KB, gen2 cbr32_30s 1 KB, cbr192_30s 2 KB, cbr320_30s 2 KB). The objective failures need a better per-junction signal - see `PLAN_probabilistic_hamiltonian_path.md`.
 
 ## TODO / Future Improvements
 
@@ -412,6 +433,11 @@ Output is written to `output.mp3` in the current directory. Chunk 0 of the input
 | `RP_REPAIR_SUSPECTS` | max(16, n/20) | repair only evaluates moves that cut one of the K worst-flux junctions. `0` = no filter (slow on dense CBR graphs). |
 | `RP_REPAIR_BUDGET` | 60 | repair wall-clock budget (s). When spent, the best move found so far is still applied. |
 | `RP_CHUNK_SIZE` | 1024 | chunk size in bytes (rp and pcm_probe). The PCM junction window is byte-capped (>= 3 KB / 8 frames before, >= 1 KB / 4 frames after), so its cost doesn't grow with it; frames near the junction stay sample-exact at 4-8 KB (pcm_probe gate 1). |
+| `RP_MATCH` | 1 | global min-cost successor matching (`globalMatch`: assignment on log1p(median flux) + cycle splicing + breaks-first repair). `1` = after a lock attempt's DFS fails, `2` = before the DFS, `0` = off. Its result is labelled `Result provenance: best-effort (global matching + repair)` - reservoir-valid but not proven original (a wrong order can be cheaper than the true one). |
+| `RP_MATCH_MAX_DECODES` | 100000 | matching decode cap: predecessor contexts per single-chunk supernode are halved (8→1) until the not-yet-memoised windows fit; skipped if even 1 context doesn't. ~1.8 ms/decode/thread at 32 kbps. |
+| `RP_REPAIR_MIN_GAIN` | 1.0 | on a reservoir-valid order, a flux-only repair move must lower the summed log1p(flux) by at least this (DFS and matching repair). `0` = old behaviour (repair to a flux local optimum; a first-lock-attempt result is then not repaired). |
+| `RP_MATCH_ITERS` | 0 | iterated matching: up to N re-solves, each forbidding the supernode arc at (or just before) every reservoir break of the previous assignment; the result with the fewest breaks (then lowest cost) is kept. |
+| `RP_RESV_FILTER` | auto | reservoir arc pre-filter: drop arcs that fail the reservoir check even from a full reservoir (sound: the check is monotone in the entry level). Auto = on when the reservoir model passed the true order (it feeds AC-3). `=0` off, `=1` forces. |
 | `RP_SCORE_ORDER` | off | diagnostic: when the found ordering isn't exact, print its summed PCM flux vs the source order's. |
 | `RP_BESTOF` | off | `RP_BESTOF=1` keeps searching past the first complete ordering for the min summed-junction-cost one. Measured *worse* - see Known Limitations item 7. |
 | `RP_BEAM` | unset | `RP_BEAM=K` caps each DFS node to its K best-ranked reservoir-valid candidates (single fixed-width attempt). |

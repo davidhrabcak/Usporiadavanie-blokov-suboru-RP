@@ -131,20 +131,23 @@ static void fft(std::vector<std::complex<double>>& a) {
     }
 }
 
-// Log power spectrum (dB, NFFT/2 bins) of mono[start, start+NFFT), Hann-windowed.
-static std::vector<double> logSpec(const std::vector<float>& x, int start) {
+// Log power spectrum (dB, NFFT/2 bins) of x[0, NFFT), Hann-windowed.
+static std::vector<double> logSpecAt(const float* x) {
     static std::vector<double> hann;
     if (hann.empty()) {
         hann.resize(NFFT);
         for (int i = 0; i < NFFT; ++i) hann[i] = 0.5 - 0.5 * std::cos(2 * M_PI * i / (NFFT - 1));
     }
     std::vector<std::complex<double>> a(NFFT);
-    for (int i = 0; i < NFFT; ++i) a[i] = x[start + i] * hann[i];
+    for (int i = 0; i < NFFT; ++i) a[i] = x[i] * hann[i];
     fft(a);
     std::vector<double> L(NFFT / 2);
     for (int k = 0; k < NFFT / 2; ++k) L[k] = 10.0 * std::log10(std::norm(a[k]) + 1e-3);
     return L;
 }
+
+// Log power spectrum (dB, NFFT/2 bins) of mono[start, start+NFFT), Hann-windowed.
+static std::vector<double> logSpec(const std::vector<float>& x, int start) { return logSpecAt(&x[start]); }
 
 static double meanAbsDiff(const std::vector<double>& a, const std::vector<double>& b) {
     double s = 0;
@@ -248,6 +251,231 @@ Metrics junctionMetrics(const Window& w) {
 Metrics scoreJunction(const std::vector<const std::vector<uint8_t>*>& segs, int boundarySeg,
                       int startOffset) {
     return junctionMetrics(decodeWindow(segs, boundarySeg, startOffset));
+}
+
+} // namespace PcmJunction
+
+// ---------------------------------------------------------------------------------------
+// LeftContext - the steps below mirror decodeWindow + junctionMetrics exactly, split at the
+// junction frame (index jf = number of frames lying wholly in the left side).
+
+namespace PcmJunction {
+
+struct LeftContext::Impl {
+    bool dead = false;                 // no candidate can give a valid window (Metrics{})
+    std::vector<uint8_t> tail;         // left bytes from the junction frame's header on
+    long boundary = 0;                 // boundary offset within `tail`
+    mp3dec_t dec;                      // decoder state after the pre frames
+    int channels = 0;
+    int J = 0;                         // pre samples = junction sample
+    std::vector<float> preTail;        // last NFFT pre samples
+    // pre-side analysis (valid only when J allows >= 3 pre windows)
+    bool preOk = false;
+    int tMin = 0;
+    bool silent = false;
+    std::vector<std::vector<double>> L;  // windows t = tMin..0
+    double base = 0, r0 = 0, hfPre = 0, pPre = 0;
+};
+
+static double hfEnergyOf(const std::vector<double>& Ls) {
+    double e = 0;
+    for (size_t k = Ls.size() / 2; k < Ls.size(); ++k) e += std::pow(10.0, Ls[k] / 10.0);
+    return e;
+}
+
+LeftContext::LeftContext(const std::vector<const std::vector<uint8_t>*>& left, int startOffset)
+    : p_(new Impl) {
+    Impl& I = *p_;
+    std::vector<uint8_t> buf;
+    for (const auto* s : left) buf.insert(buf.end(), s->begin(), s->end());
+    const long Lb = (long)buf.size();
+
+    // header walk over the frames lying wholly in the left side
+    std::vector<std::pair<long, int>> walk;
+    long pos = startOffset;
+    while (pos + 4 <= Lb) {
+        const uint32_t raw = packHeaderBytes(&buf[pos]);
+        if (!Mp3FrameScanner::isValidHeader(raw)) { I.dead = true; break; }
+        bool ok = false;
+        Header h(raw, ok);
+        if (!ok) { I.dead = true; break; }
+        const int len = h.getFrameLength();
+        if (len <= 4) { I.dead = true; break; }
+        if (pos + len > Lb) break;          // the junction frame: straddles the boundary
+        walk.push_back({pos, len});
+        pos += len;
+    }
+    if (I.dead) return;
+    const size_t jf = walk.size();
+    I.tail.assign(buf.begin() + pos, buf.end());
+    I.boundary = Lb - pos;
+
+    size_t first = 0;
+    for (size_t i = jf; i-- > 0;)
+        if (Lb - walk[i].first >= PRE_BYTES && jf - i >= (size_t)PRE_FRAMES) { first = i; break; }
+
+    mp3dec_init(&I.dec);
+    std::vector<float> pcm(MINIMP3_MAX_SAMPLES_PER_FRAME), mono;
+    bool started = false;
+    for (size_t wi = first; wi < jf; ++wi) {
+        const long fp = walk[wi].first;
+        const int len = walk[wi].second;
+        bool ok = false;
+        Header h(packHeaderBytes(&buf[fp]), ok);
+        mp3dec_frame_info_t info;
+        std::memset(&info, 0, sizeof(info));
+        const int ns = mp3dec_decode_frame(&I.dec, &buf[fp], len, pcm.data(), &info);
+        if (info.hz == 0 || info.frame_offset != 0) { I.dead = true; return; }  // walk stops before the junction
+        if (ns > 0) {
+            if (!started) { started = true; I.channels = info.channels; }
+            for (int i = 0; i < ns; ++i) {
+                float m = 0;
+                for (int c = 0; c < info.channels; ++c) m += pcm[i * info.channels + c];
+                mono.push_back(m / info.channels);
+            }
+        } else if (started) {
+            const int spf = (h.getVersionID() == 0b11) ? 1152 : 576;
+            mono.insert(mono.end(), spf, 0.0f);
+        }
+    }
+    // junctionSample > 0 needs output before the junction frame
+    if (!started || mono.empty()) { I.dead = true; return; }
+    I.J = (int)mono.size();
+    const int J = I.J;
+
+    auto winStart = [&](int t) { return J + t * HOP - NFFT; };
+    int tMin = 0;
+    while (winStart(tMin - 1) >= 0) --tMin;
+    I.tMin = tMin;
+    if (tMin > -2) return;   // preOk stays false: every candidate gets an invalid (but decoded) window
+    I.preOk = true;
+    I.preTail.assign(mono.end() - NFFT, mono.end());
+    I.silent = rms(mono, J - 2 * HOP, J) < 1e-4;
+    for (int t = tMin; t <= 0; ++t) I.L.push_back(logSpec(mono, winStart(t)));
+    std::vector<double> preFlux;
+    for (int t = tMin + 1; t <= 0; ++t) preFlux.push_back(meanAbsDiff(I.L[t - tMin], I.L[t - 1 - tMin]));
+    std::sort(preFlux.begin(), preFlux.end());
+    I.base = std::max(preFlux[preFlux.size() / 2], 0.5);
+    const double eps = 1e-5;
+    I.r0 = std::log(rms(mono, J - HOP, J) + eps);
+    I.hfPre = hfEnergyOf(I.L[-1 - tMin]) + hfEnergyOf(I.L[0 - tMin]);
+    I.pPre = peakAbs(mono, J - 2 * HOP, J);
+}
+
+LeftContext::~LeftContext() { delete p_; }
+
+Metrics LeftContext::score(const std::vector<uint8_t>& cand) const {
+    const Impl& I = *p_;
+    Metrics m;
+    if (I.dead) return m;
+    std::vector<uint8_t> buf(I.tail);
+    buf.insert(buf.end(), cand.begin(), cand.end());
+
+    // header walk from the junction frame on, with the post-side stop rule
+    std::vector<std::pair<long, int>> walk;
+    for (long pos = 0; pos + 4 <= (long)buf.size();) {
+        const uint32_t raw = packHeaderBytes(&buf[pos]);
+        if (!Mp3FrameScanner::isValidHeader(raw)) break;
+        bool ok = false;
+        Header h(raw, ok);
+        if (!ok) break;
+        const int len = h.getFrameLength();
+        if (len <= 4 || pos + len > (long)buf.size()) break;
+        walk.push_back({pos, len});
+        pos += len;
+    }
+    size_t last = walk.size();
+    for (size_t i = 0; i < walk.size(); ++i)
+        if (walk[i].first + walk[i].second - I.boundary >= POST_BYTES && i + 1 >= (size_t)POST_FRAMES) { last = i + 1; break; }
+    if (last == 0) return m;   // no junction frame
+
+    mp3dec_t dec = I.dec;
+    std::vector<float> pcm(MINIMP3_MAX_SAMPLES_PER_FRAME);
+    // x = last NFFT pre samples followed by the post samples; sample s of the full window is
+    // x[s - (J - NFFT)].
+    std::vector<float> x(I.preTail);
+    int postFailed = 0;
+    for (size_t wi = 0; wi < last; ++wi) {
+        const long fp = walk[wi].first;
+        const int len = walk[wi].second;
+        bool ok = false;
+        Header h(packHeaderBytes(&buf[fp]), ok);
+        mp3dec_frame_info_t info;
+        std::memset(&info, 0, sizeof(info));
+        const int ns = mp3dec_decode_frame(&dec, &buf[fp], len, pcm.data(), &info);
+        if (info.hz == 0 || info.frame_offset != 0) {
+            if (wi == 0) return m;   // junction frame not decoded -> no junction sample
+            break;
+        }
+        if (ns > 0) {
+            for (int i = 0; i < ns; ++i) {
+                float s = 0;
+                for (int c = 0; c < info.channels; ++c) s += pcm[i * info.channels + c];
+                x.push_back(s / info.channels);
+            }
+        } else {
+            const int spf = (h.getVersionID() == 0b11) ? 1152 : 576;
+            x.insert(x.end(), spf, 0.0f);
+            ++postFailed;
+        }
+    }
+    m.postFailed = postFailed;
+    if (!I.preOk) return m;
+    const int J = I.J, off = J - NFFT;               // full-window sample s -> x[s - off]
+    const int N = off + (int)x.size();
+    auto winStart = [&](int t) { return J + t * HOP - NFFT; };
+    int tMax = 0;
+    while (winStart(tMax + 1) + NFFT <= N) ++tMax;
+    if (tMax < 2) return m;
+    m.silent = I.silent;
+
+    std::vector<std::vector<double>> P;   // windows t = 1..tMax
+    for (int t = 1; t <= tMax; ++t) P.push_back(logSpecAt(&x[winStart(t) - off]));
+    auto at = [&](int t) -> const std::vector<double>& { return t <= 0 ? I.L[t - I.tMin] : P[t - 1]; };
+
+    double postMax = 0;
+    for (int t = 1; t <= tMax; ++t) postMax = std::max(postMax, meanAbsDiff(at(t), at(t - 1)));
+    m.flux = postMax / I.base;
+
+    const int tp0 = (NFFT + HOP - 1) / HOP;
+    if (tp0 + 1 <= tMax) {
+        double s = 0;
+        const size_t nb = at(0).size();
+        for (size_t k = 0; k < nb; ++k) {
+            const double pre  = 0.5 * (at(-1)[k] + at(0)[k]);
+            const double post = 0.5 * (at(tp0)[k] + at(tp0 + 1)[k]);
+            s += (pre - post) * (pre - post);
+        }
+        m.specDist = std::sqrt(s / nb);
+    } else {
+        m.specDist = meanAbsDiff(at(0), at(tMax));
+    }
+
+    // rms over full-window samples [a, b) of the post side (a >= J here)
+    auto rmsPost = [&](int a, int b) {
+        b = std::min(b, N);
+        if (b <= a) return 0.0;
+        double s = 0;
+        for (int i = a; i < b; ++i) s += (double)x[i - off] * x[i - off];
+        return std::sqrt(s / (b - a));
+    };
+    const double eps = 1e-5;
+    double jump = 0;
+    for (int g = 0; g < 2; ++g) {
+        if (J + (g + 1) * HOP > N) break;
+        jump = std::max(jump, std::fabs(std::log(rmsPost(J + g * HOP, J + (g + 1) * HOP) + eps) - I.r0));
+    }
+    m.rmsJump = jump;
+
+    const double hfPost = hfEnergyOf(at(1)) + hfEnergyOf(at(2));
+    m.hfBurst = std::max(0.0, std::log((hfPost + 1) / (I.hfPre + 1)));
+
+    double pPost = 0;
+    for (int i = J; i < std::min(J + 2 * HOP, N); ++i) pPost = std::max(pPost, (double)std::fabs(x[i - off]));
+    m.peak = std::max(0.0, std::log((pPost + 1e-4) / (I.pPre + 1e-4)));
+
+    m.valid = true;
+    return m;
 }
 
 } // namespace PcmJunction

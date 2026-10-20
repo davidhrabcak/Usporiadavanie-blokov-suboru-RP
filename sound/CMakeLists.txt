@@ -68,3 +68,17 @@ target_compile_features(pcm_probe PRIVATE cxx_std_17)
 
 target_link_libraries(rp PRIVATE Threads::Threads)
 target_link_libraries(pcm_probe PRIVATE Threads::Threads)
+
+# PcmJunction::LeftContext == scoreJunction, bit for bit (+ timing). Dev/measurement tool.
+add_executable(left_context_check
+        test/left_context_check.cpp
+        frame_scanner.cpp
+        Header.cpp
+        chunk_meta.cpp
+        adjacency.cpp
+        huffman_tables.cpp
+        main_data_decoder.cpp
+        pcm_junction.cpp
+        pcm_decoder_impl.cpp)
+target_include_directories(left_context_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_features(left_context_check PRIVATE cxx_std_17)

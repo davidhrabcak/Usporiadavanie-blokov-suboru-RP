@@ -74,6 +74,25 @@ Metrics junctionMetrics(const Window& w);
 Metrics scoreJunction(const std::vector<const std::vector<uint8_t>*>& segs, int boundarySeg,
                       int startOffset);
 
+// The left side of a window, decoded and analysed once, for scoring many candidates.
+// Everything before the junction frame (the frame straddling the boundary) depends only on the
+// left chunks: the decoder state after them, the pre-junction samples and spectra, the flux
+// baseline. score(cand) resumes a copy of that decoder at the junction frame and only decodes
+// and analyses the post side. score(cand) is bit-identical to
+// scoreJunction({left..., &cand}, left.size(), startOffset) - just 2-4x cheaper per candidate
+// (the pre side is >= 3 KB / 8 frames, the post side ~1 KB / 4 frames).
+class LeftContext {
+public:
+    LeftContext(const std::vector<const std::vector<uint8_t>*>& left, int startOffset);
+    ~LeftContext();
+    LeftContext(const LeftContext&) = delete;
+    LeftContext& operator=(const LeftContext&) = delete;
+    Metrics score(const std::vector<uint8_t>& cand) const;
+private:
+    struct Impl;
+    Impl* p_;
+};
+
 } // namespace PcmJunction
 
 #endif

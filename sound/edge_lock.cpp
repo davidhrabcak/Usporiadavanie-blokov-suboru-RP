@@ -5,6 +5,7 @@
 #include <cmath>
 #include <thread>
 #include <limits>
+#include <memory>
 #include <unordered_map>
 
 #include "pcm_junction.hpp"
@@ -44,11 +45,14 @@ std::vector<LockedEdge> findConfidentEdges(const std::vector<std::vector<uint8_t
                 ctx.push_back(preds[a][(size_t)k * preds[a].size() / maxCtx]);
         }
         scored[a] = 1;
+        // left side [p, a] decoded once per context, on its first memo miss (PcmJunction::LeftContext)
+        std::vector<std::unique_ptr<PcmJunction::LeftContext>> left(ctx.size());
         for (int b : adj[a]) {
             double lo = INF, hi = -INF;
             bool anyBad = false;
             std::vector<double> vals;
-            for (int p : ctx) {
+            for (size_t ci = 0; ci < ctx.size(); ++ci) {
+                const int p = ctx[ci];
                 if (p == b) { continue; } // a 2-cycle context can't be a real path
                 const int pp = (p >= 0 && metas[p].valid) ? p : -1;
                 const uint64_t key = packKey(pp, a, b);
@@ -57,13 +61,14 @@ std::vector<LockedEdge> findConfidentEdges(const std::vector<std::vector<uint8_t
                 if (memo && it != memo->end()) {
                     fx = it->second;
                 } else {
-                    std::vector<const std::vector<uint8_t>*> segs;
-                    int first = a;
-                    if (pp >= 0) { segs.push_back(&chunks[pp]); first = pp; }
-                    segs.push_back(&chunks[a]);
-                    segs.push_back(&chunks[b]);
-                    const PcmJunction::Metrics m =
-                        PcmJunction::scoreJunction(segs, (int)segs.size() - 1, metas[first].headOffset);
+                    if (!left[ci]) {
+                        std::vector<const std::vector<uint8_t>*> segs;
+                        int first = a;
+                        if (pp >= 0) { segs.push_back(&chunks[pp]); first = pp; }
+                        segs.push_back(&chunks[a]);
+                        left[ci].reset(new PcmJunction::LeftContext(segs, metas[first].headOffset));
+                    }
+                    const PcmJunction::Metrics m = left[ci]->score(chunks[b]);
                     ++nDec[a];
                     fx = (!m.valid || m.silent) ? std::numeric_limits<float>::quiet_NaN() : (float)m.flux;
                     if (memo) fresh[a].push_back({key, fx});
@@ -133,6 +138,52 @@ std::vector<LockedEdge> findConfidentEdges(const std::vector<std::vector<uint8_t
         if (m >= tau) out.push_back({a, best, m});
     }
     return out;
+}
+
+long scoreWindows(const std::vector<std::vector<uint8_t>>& chunks,
+                  const std::vector<ChunkMeta>& metas,
+                  const std::vector<std::array<int, 3>>& windows,
+                  FluxMemo& memo, int threads) {
+    std::vector<std::array<int, 3>> todo;
+    for (const auto& w : windows) {
+        const int p = (w[0] >= 0 && metas[w[0]].valid) ? w[0] : -1;
+        if (memo.count(packKey(p, w[1], w[2]))) continue;
+        todo.push_back({p, w[1], w[2]});
+    }
+    std::vector<std::array<int, 3>> uniq;
+    { std::unordered_map<uint64_t, char> seen;
+      for (const auto& w : todo) if (seen.emplace(packKey(w[0], w[1], w[2]), 1).second) uniq.push_back(w); }
+    // Windows sharing a left side [p, a] are scored from one decoded LeftContext.
+    std::sort(uniq.begin(), uniq.end());
+    std::vector<size_t> groups;   // start index of each (p, a) group
+    for (size_t i = 0; i < uniq.size(); ++i)
+        if (i == 0 || uniq[i][0] != uniq[i - 1][0] || uniq[i][1] != uniq[i - 1][1]) groups.push_back(i);
+    groups.push_back(uniq.size());
+    std::vector<float> out(uniq.size());
+    auto one = [&](size_t g) {
+        const auto& w0 = uniq[groups[g]];
+        std::vector<const std::vector<uint8_t>*> segs;
+        int first = w0[1];
+        if (w0[0] >= 0) { segs.push_back(&chunks[w0[0]]); first = w0[0]; }
+        segs.push_back(&chunks[w0[1]]);
+        const PcmJunction::LeftContext left(segs, metas[first].headOffset);
+        for (size_t i = groups[g]; i < groups[g + 1]; ++i) {
+            const PcmJunction::Metrics m = left.score(chunks[uniq[i][2]]);
+            out[i] = (!m.valid || m.silent) ? std::numeric_limits<float>::quiet_NaN() : (float)m.flux;
+        }
+    };
+    const size_t nGroups = groups.size() - 1;
+    threads = std::max(1, std::min<int>(threads, (int)nGroups));
+    if (threads <= 1) { for (size_t g = 0; g < nGroups; ++g) one(g); }
+    else {
+        std::atomic<size_t> next(0);
+        std::vector<std::thread> pool;
+        for (int t = 0; t < threads; ++t)
+            pool.emplace_back([&] { for (size_t g; (g = next.fetch_add(1)) < nGroups;) one(g); });
+        for (auto& th : pool) th.join();
+    }
+    for (size_t i = 0; i < uniq.size(); ++i) memo.emplace(packKey(uniq[i][0], uniq[i][1], uniq[i][2]), out[i]);
+    return (long)uniq.size();
 }
 
 long applyLocks(std::vector<std::vector<int>>& adj, const std::vector<LockedEdge>& locks) {

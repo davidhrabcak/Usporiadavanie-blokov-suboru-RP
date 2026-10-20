@@ -182,8 +182,15 @@ long propagateArcConsistency(vector<vector<int>>& adj, const int n, const int st
             for (const int w : vector<int>(adj[u]))
                 if (w != v) { removeEdge(u, w); changed = true; }
         }
-        for (int u = 0; u < n; ++u) {
-            if (adj[u].size() != 1) continue;
+        // Successor side: u -> v is forced only if u is known NOT to end the stream. Every chunk
+        // but the last has a true successor; the last one's arcs are all wrong, so a single
+        // surviving arc out of it proves nothing (with the reservoir arc filter that happened,
+        // and forcing it deleted the true arc into v - cbr32_10s 1 KB). The end is known once
+        // some chunk has no successors left (e.g. the final fragment).
+        int knownEnd = -1;
+        for (int x = 0; x < n; ++x) if (adj[x].empty()) { knownEnd = x; break; }
+        for (int u = 0; u < n && knownEnd >= 0; ++u) {
+            if (u == knownEnd || adj[u].size() != 1) continue;
             const int v = adj[u][0];                  // u -> v is forced
             for (const int t : vector<int>(pred[v]))
                 if (t != u) { removeEdge(t, v); changed = true; }
