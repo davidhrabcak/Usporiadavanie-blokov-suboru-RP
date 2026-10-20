@@ -30,8 +30,11 @@ bit-reservoir sanity check.
 
 Implemented:
 - `Header` / `frame_scanner` — MPEG frame header parsing and stream scanning
-- `chunk_meta` — per-chunk frame alignment and tail-byte analysis
+- `chunk_meta` — per-chunk frame alignment and tail-byte analysis, including
+  exact cross-chunk Layer III side-info decoding for split frames
 - `adjacency` — builds the chunk-adjacency graph (`canFollow`)
+- `huffman_tables` — Layer III Huffman code tables (data only so far, sourced
+  from minimp3; not yet wired into a decoder)
 - `main` — supernode collapse + DFS reconstruction, writes `output.mp3`
 
 Known limitation: on constant-bitrate files, aliased frame headers can make
@@ -60,4 +63,5 @@ cmake -B cmake-build-debug && cmake --build cmake-build-debug
 ./cmake-build-debug/rp path/to/input.mp3
 ```
 The input file's first chunk is treated as pinned. Output is written to
-`output.mp3` in the current directory.
+`output.mp3` in the current directory. An `RP_SEED` environment variable
+overrides the shuffle's RNG seed, for reproducible A/B comparisons.

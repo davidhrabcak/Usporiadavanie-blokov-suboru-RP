@@ -4,33 +4,28 @@
 
 using namespace std;
 
-Header::Header(const unsigned int input, int &output) {
+Header::Header(const unsigned int input, bool &ok) {
     raw = input;
     if (synchValid()) {
-        output = decode();
+        ok = decode();
     } else {
+        ok = false;
         cerr << "Invalid input" << endl;
     }
 }
 
-uint32_t Header::getRaw() const { return raw; }
-string Header::getMpegVersion() const { return mpegVersion; }
-string Header::getLayer() const { return layer; }
-bool Header::hasCRC() const { return protectionBit == 0; }
 int Header::getBitrate() const { return bitrate; }
 int Header::getSampleRate() const { return sampleRate; }
 bool Header::hasPadding() const { return padding; }
-string Header::getChannelMode() const { return channelMode; }
 int Header::getFrameLength() const { return frameLength; }
 
 bool Header::synchValid() const {
     return ((raw >> 21) & 0x7FF) == 0x7FF;
 }
 
-int Header::decode() {
+bool Header::decode() {
     const uint8_t versionID = (raw >> 19) & 0x3;
     const uint8_t layerIndex = (raw >> 17) & 0x3;
-    protectionBit = (raw >> 16) & 0x1;
     const uint8_t bitrateIndex = (raw >> 12) & 0xF;
     const uint8_t sampleIndex = (raw >> 10) & 0x3;
     padding = ((raw >> 9) & 0x1);
@@ -41,36 +36,24 @@ int Header::decode() {
     sampleRateIdx_raw = sampleIndex;
     channelIdx_raw    = channelIndex;
 
-    if (!decodeVersion(versionID)) return -1;
-    if (!decodeLayer(layerIndex)) return -2;
-    if (!decodeBitrate(bitrateIndex, versionID, layerIndex)) return -3;
-    if (!decodeSampleRate(sampleIndex, versionID)) return -4;
-    if (!decodeChannelMode(channelIndex)) return -5;
+    if (!decodeVersion(versionID)) return false;
+    if (!decodeLayer(layerIndex)) return false;
+    if (!decodeBitrate(bitrateIndex, versionID, layerIndex)) return false;
+    if (!decodeSampleRate(sampleIndex, versionID)) return false;
+    if (!decodeChannelMode(channelIndex)) return false;
 
     frameLength = length(versionID);
-    return 0;
+    return true;
 }
 
+// versionID 01 is a reserved MPEG version - the only invalid value of this 2-bit field.
 bool Header::decodeVersion(const uint8_t versionID) {
-    switch (versionID) {
-        case 0b00: mpegVersion = "MPEG 2.5"; return true;
-        case 0b10: mpegVersion = "MPEG 2"; return true;
-        case 0b11: mpegVersion = "MPEG 1"; return true;
-        default: {
-            mpegVersion = "unknown versionID " + to_string(versionID); return false;
-        }
-    }
+    return versionID == 0b00 || versionID == 0b10 || versionID == 0b11;
 }
 
+// layerIndex 00 is reserved (no such layer) - the only invalid value of this 2-bit field.
 bool Header::decodeLayer(const uint8_t layerIndex) {
-    switch (layerIndex) {
-        case 0b01: layer = "Layer III"; return true;
-        case 0b10: layer = "Layer II"; return true;
-        case 0b11: layer = "Layer I"; return true;
-        default: {
-            layer = "unknown layerIndex " + to_string(layerIndex); return false;
-        }
-    }
+    return layerIndex == 0b01 || layerIndex == 0b10 || layerIndex == 0b11;
 }
 
 bool Header::decodeBitrate(const uint8_t bitrateIndex,
@@ -142,18 +125,9 @@ bool Header::decodeSampleRate(const uint8_t sampleRateIndex,
     return true;
 }
 
-bool Header::decodeChannelMode(const uint8_t channelIndex) {
-    switch (channelIndex) {
-        case 0b00: channelMode = "Stereo"; return true;
-        case 0b01: channelMode = "Joint stereo"; return true;
-        case 0b10: channelMode = "Dual channel"; return true;
-        case 0b11: channelMode = "Mono"; return true;
-        default: {
-            cerr << "decodeChannelMode: Invalid channel index "
-                 << static_cast<int>(channelIndex) << endl;
-            return false;
-        }
-    }
+// channelIndex is a 2-bit field; all four values (stereo/joint/dual/mono) are valid.
+bool Header::decodeChannelMode(const uint8_t) {
+    return true;
 }
 
 int Header::length(const uint8_t versionID) const {

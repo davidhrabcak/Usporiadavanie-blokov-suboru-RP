@@ -1,4 +1,5 @@
 #include "adjacency.hpp"
+#include <algorithm>
 #include <unordered_map>
 
 #include "frame_scanner.hpp"
@@ -18,11 +19,37 @@ static bool hasFrameAt(const ChunkMeta& b, const int rem) {
 }
 
 /**
+ * Reconstructs a Case-2 split frame's 4-byte header from its first `tov` bytes (`tailHead`,
+ * held by the predecessor chunk) plus the following `4-tov` bytes (`rest`, from the candidate
+ * successor), and validates it against `profile`.
+ * @return The byte offset within the successor chunk where the frame's remainder must start
+ *         (frameLen - tov), or -1 if the reconstructed header is invalid/off-profile.
+ */
+static int reconstructTailHeaderOffset(const uint8_t* tailHead, const int tov,
+                                        const uint8_t* rest, const StreamProfile& profile) {
+    uint8_t hdr[4];
+    for (int j = 0; j < tov; ++j) hdr[j] = tailHead[j];
+    for (int j = tov; j < 4; ++j) hdr[j] = rest[j - tov];
+
+    const uint32_t raw = packHeaderBytes(hdr);
+    if (!Mp3FrameScanner::isValidHeader(raw)) return -1;
+
+    bool ok;
+    const Header h(raw, ok);
+    if (!ok || !profile.matches(h)) return -1;
+
+    const int frameLen = h.getFrameLength();
+    if (frameLen <= 0) return -1;
+
+    return frameLen - tov;
+}
+
+/**
  * Checks if chunk 'a' can be followed by chunk 'b'.
  * @return True if b is a valid continuation of chunk a.
  */
 bool canFollow(const ChunkMeta& a, const ChunkMeta& b) {
-    if (!a.valid || !b.valid) return false;
+    if (!a.valid || !b.valid || a.finalFragment) return false;
 
     const int rem = tailRemaining(a);
 
@@ -33,29 +60,12 @@ bool canFollow(const ChunkMeta& a, const ChunkMeta& b) {
     }
 
     // tailOverflow is 1-3: header of partial tail frame is split across chunks.
-    // Reconstruct the 4-byte header from a.tailHeadBytes + first bytes of b.
+    // Reconstruct the 4-byte header from a.tailBytes + first bytes of b.
     const int tail_ov = a.tailOverflow;
     if (tail_ov < 1 || tail_ov > 3) return false;
 
-    uint8_t head_ov[4];
-    for (int j = 0; j < tail_ov; ++j)    head_ov[j] = a.tailHeadBytes[j];
-    for (int j = tail_ov; j < 4; ++j)    head_ov[j] = b.chunkHead[j - tail_ov];
-
-    const uint32_t raw = (static_cast<uint32_t>(head_ov[0]) << 24) | (static_cast<uint32_t>(head_ov[1]) << 16)
-                 | (static_cast<uint32_t>(head_ov[2]) << 8)  |  static_cast<uint32_t>(head_ov[3]);
-
-    if (!Mp3FrameScanner::isValidHeader(raw)) return false;
-
-    int err;
-    const Header h(raw, err);
-    if (err != 0) return false;
-    if (!a.profile.matches(h)) return false;
-
-    const int frameLen = h.getFrameLength();
-    if (frameLen <= 0) return false;
-
-    const int expectedHead = frameLen - tail_ov;
-    return hasFrameAt(b, expectedHead);
+    const int expectedHead = reconstructTailHeaderOffset(a.tailBytes.data(), tail_ov, b.chunkHead, a.profile);
+    return expectedHead >= 0 && hasFrameAt(b, expectedHead);
 }
 
 /**
@@ -101,6 +111,7 @@ vector<vector<int>> buildAdjacency(const vector<ChunkMeta>& metas) {
     }
 
     for (int i = 0; i < n; ++i) {
+        if (metas[i].finalFragment) continue; // end of stream - nothing follows
         int rem = tailRemaining(metas[i]);
         if (rem >= 0) {
             auto it = byFrameStart.find(rem);
@@ -116,21 +127,16 @@ vector<vector<int>> buildAdjacency(const vector<ChunkMeta>& metas) {
             for (const auto& entry : byChunkHeadPrefix[tail_ov - 1]) {
                 const uint32_t prefixKey = entry.first;
                 const vector<int>& members = entry.second;
-                uint8_t hbytes[4];
-                for (int k = 0; k < tail_ov; ++k) hbytes[k] = metas[i].tailHeadBytes[k];
-                for (int k = tail_ov; k < 4; ++k) hbytes[k] = static_cast<uint8_t>(prefixKey >> (8 * (3 - k)));
 
-                const uint32_t raw = (static_cast<uint32_t>(hbytes[0]) << 24) | (static_cast<uint32_t>(hbytes[1]) << 16)
-                             | (static_cast<uint32_t>(hbytes[2]) << 8)  |  static_cast<uint32_t>(hbytes[3]);
-                if (!Mp3FrameScanner::isValidHeader(raw)) continue;
-                int err; Header h(raw, err);
-                if (err != 0) continue;
+                // Unpack prefixKey's (4-tail_ov) bytes, MSB first, matching packPrefix above.
+                const int prefixLen = 4 - tail_ov;
+                uint8_t prefixBytes[3];
+                for (int k = 0; k < prefixLen; ++k)
+                    prefixBytes[k] = static_cast<uint8_t>(prefixKey >> (8 * (prefixLen - 1 - k)));
 
-                if (!metas[i].profile.matches(h)) continue;
-
-                const int frameLen = h.getFrameLength();
-                if (frameLen <= 0) continue;
-                const int expectedHead = frameLen - tail_ov;
+                const int expectedHead = reconstructTailHeaderOffset(
+                    metas[i].tailBytes.data(), tail_ov, prefixBytes, metas[i].profile);
+                if (expectedHead < 0) continue;
 
                 for (int j : members) {
                     if (j == i) continue;
@@ -141,6 +147,58 @@ vector<vector<int>> buildAdjacency(const vector<ChunkMeta>& metas) {
     }
 
     return adj;
+}
+
+long propagateArcConsistency(vector<vector<int>>& adj, const int n, const int start) {
+    const vector<vector<int>> original = adj; // for rollback on contradiction
+
+    vector<vector<int>> pred(n);
+    for (int u = 0; u < n; ++u)
+        for (int v : adj[u]) pred[v].push_back(u);
+
+    long removed = 0;
+    bool contradiction = false;
+
+    auto removeEdge = [&](const int u, const int v) {
+        auto& au = adj[u];
+        const auto ai = find(au.begin(), au.end(), v);
+        if (ai == au.end()) return;
+        au.erase(ai);
+        auto& pv = pred[v];
+        pv.erase(find(pv.begin(), pv.end(), u));
+        ++removed;
+    };
+
+    // Nothing precedes the pinned first chunk.
+    for (const int u : vector<int>(pred[start])) removeEdge(u, start);
+
+    bool changed = true;
+    while (changed && !contradiction) {
+        changed = false;
+
+        for (int v = 0; v < n; ++v) {
+            if (v == start || pred[v].size() != 1) continue;
+            const int u = pred[v][0];                 // u -> v is forced
+            for (const int w : vector<int>(adj[u]))
+                if (w != v) { removeEdge(u, w); changed = true; }
+        }
+        for (int u = 0; u < n; ++u) {
+            if (adj[u].size() != 1) continue;
+            const int v = adj[u][0];                  // u -> v is forced
+            for (const int t : vector<int>(pred[v]))
+                if (t != u) { removeEdge(t, v); changed = true; }
+        }
+
+        int noSucc = 0;
+        for (int x = 0; x < n; ++x) {
+            if (adj[x].empty()) ++noSucc;
+            if (x != start && pred[x].empty()) contradiction = true;
+        }
+        if (noSucc > 1 || adj[start].empty()) contradiction = true;
+    }
+
+    if (contradiction) { adj = original; return -1; }
+    return removed;
 }
 
 /**

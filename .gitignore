@@ -7,3 +7,20 @@
 dictionary_creator
 /main.py
 __pycache__
+
+# Audio test fixtures are third-party / rights-restricted - never commit them.
+# See sound/PLAN_sideinfo_mainbits.md "Test fixtures" for where to obtain them.
+*.mp3
+# ...except the synthetic CI sanity fixture (pure ffmpeg synthesis, no third-party audio -
+# see sound/test/make_ci_sanity.sh). It is committed so CI is hermetic.
+!/sound/test/ci_sanity.mp3
+/sound/cmake-build-debug/
+/sound/build/
+/sound/output.mp3
+
+# Never commit private keys / credentials.
+*_ssh
+*_ssh.pub
+id_ed25519*
+id_rsa*
+*.pem

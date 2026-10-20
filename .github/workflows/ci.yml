@@ -1,0 +1,35 @@
+name: sound CI
+
+# Builds the MP3 chunk-reconstruction pipeline and runs an end-to-end sanity check
+# (test/ci_sanity.sh) on every push / PR: reconstruct a shuffled synthetic MP3 and assert
+# the original chunk order is recovered exactly. See sound/test/ci_sanity.sh for details.
+
+on:
+  push:
+    paths:
+      - 'sound/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    paths:
+      - 'sound/**'
+      - '.github/workflows/ci.yml'
+  workflow_dispatch:
+
+jobs:
+  build-and-sanity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends cmake g++
+
+      - name: Configure
+        run: cmake -S sound -B sound/build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build sound/build -j"$(nproc)"
+
+      - name: End-to-end sanity check
+        working-directory: sound
+        run: bash test/ci_sanity.sh build
