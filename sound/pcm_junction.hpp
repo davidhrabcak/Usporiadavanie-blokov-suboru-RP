@@ -48,6 +48,16 @@ constexpr int  PRE_FRAMES  = 8;
 constexpr long POST_BYTES  = 1024;
 constexpr int  POST_FRAMES = 4;
 
+// Left-side chunks a window needs to be measurable at all. The analysis wants >= 3 pre-junction
+// FFT windows (NFFT + 2 hops = 2176 samples), i.e. ~2 decoded frames after a warm-up frame whose
+// reservoir reaches back before the window, plus the partial frame the window starts in: ~4
+// frame lengths. True-order coverage at 1 KB chunks (2026-10-26): 192 kbps 3 chunks 99%, 2
+// chunks 30%; 320 kbps / 48 kHz 4 chunks 99.7%; 320 kbps / 44.1 kHz 3 chunks 0-0.2%, 5 chunks
+// 95-98%. Callers keep their own minimum (the DFS 3, edge locking 2) on top of this.
+inline int leftChunksNeeded(int frameLen, long chunkSize) {
+    return static_cast<int>((4L * frameLen + chunkSize - 1) / chunkSize);
+}
+
 // Decodes `segs` (chunk byte arrays, in placement order) as one continuous byte stream,
 // starting at the frame header at `startOffset` in segs[0], with a fresh decoder. The first
 // `boundarySeg` segments are the left side (already-placed path) and the rest the right side

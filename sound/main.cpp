@@ -320,7 +320,7 @@ static double spectralJunctionCost(const vector<ChunkMeta>& metas, int curPrev, 
 }
 
 // --- Full PCM decode junction term (PLAN_full_pcm_decode.md). For a candidate edge, decode
-// the last (up to) 3 chunks of the current path followed by the candidate's first chunk all
+// the last (up to) g_pcmLeft chunks of the current path followed by the candidate's first chunk all
 // the way to PCM with minimp3 (fresh decoder, the first 2 chunks are warm-up - with them the
 // window decode is sample-exact vs a full-file decode), and measure the spectral-flux spike
 // at the junction relative to the flux inside the already-placed audio. A wrong successor
@@ -349,22 +349,40 @@ static int trueJunctions(const vector<int>& seq) {
 static bool   g_pcmRank    = true;
 static double g_pcmScale   = 1.0;  // set by calibration
 static double g_pcmNeutral = 0.0;  // raw value used when a junction can't be measured
-static std::unordered_map<uint64_t, float> g_pcmMemo;
+// Path-tail chunks on the window's left side: 3, more when frames are large vs the chunk size
+// (PcmJunction::leftChunksNeeded; set in main, RP_PCM_LEFT overrides).
+constexpr int PCM_LEFT_MAX = 8;
+static int g_pcmLeft = 3;
+// Window key: up to PCM_LEFT_MAX left ids (oldest first, -1 padded) + the candidate.
+struct PcmKey {
+    std::array<int, PCM_LEFT_MAX + 1> id;
+    bool operator==(const PcmKey& o) const { return id == o.id; }
+};
+struct PcmKeyHash {
+    size_t operator()(const PcmKey& k) const {
+        uint64_t h = 1469598103934665603ull;
+        for (int v : k.id) h = (h ^ (uint32_t)v) * 1099511628211ull;
+        return (size_t)h;
+    }
+};
+static std::unordered_map<PcmKey, float, PcmKeyHash> g_pcmMemo;
 
 // Raw log1p(flux) for path tail `left[0..nLeft)` (oldest first) followed by `cand`;
 // -1 when the window can't be measured (too little audio, silent pre side).
 static double pcmRaw(const vector<ChunkMeta>& metas, const int* left, int nLeft, int cand) {
     while (nLeft > 1 && !metas[left[0]].valid) { ++left; --nLeft; }
-    uint64_t key = (uint64_t)(unsigned)cand;
-    for (int k = 0; k < 3; ++k)
-        key = (key << 16) | (k < nLeft ? (uint64_t)(unsigned)left[k] : 0xFFFFu);
+    PcmKey key;
+    key.id.fill(-1);
+    for (int k = 0; k < nLeft; ++k) key.id[k] = left[k];
+    key.id[PCM_LEFT_MAX] = cand;
     auto it = g_pcmMemo.find(key);
     if (it != g_pcmMemo.end()) return it->second;
     // The DFS scores all candidates of one node with the same left side, so keep the decoded
     // left sides of the last few contexts (a LeftContext holds up to ~250 KB at 32 kbps).
-    static std::unordered_map<uint64_t, std::unique_ptr<PcmJunction::LeftContext>> leftCache;
-    static std::deque<uint64_t> leftOrder;
-    const uint64_t lkey = key & 0xFFFFFFFFFFFFull;   // the three left ids (cand is in the top 16 bits)
+    static std::unordered_map<PcmKey, std::unique_ptr<PcmJunction::LeftContext>, PcmKeyHash> leftCache;
+    static std::deque<PcmKey> leftOrder;
+    PcmKey lkey = key;
+    lkey.id[PCM_LEFT_MAX] = -1;   // the left ids only
     auto lit = leftCache.find(lkey);
     if (lit == leftCache.end()) {
         vector<const vector<uint8_t>*> segs;
@@ -408,8 +426,8 @@ struct OrderCost {
 static OrderCost summedFlux(const vector<ChunkMeta>& metas, const vector<int>& seq) {
     OrderCost c;
     for (size_t k = 1; k < seq.size(); ++k) {
-        int left[3], nl = 0;
-        for (int j = (int)k - 3; j < (int)k; ++j) if (j >= 0) left[nl++] = seq[j];
+        int left[PCM_LEFT_MAX], nl = 0;
+        for (int j = (int)k - g_pcmLeft; j < (int)k; ++j) if (j >= 0) left[nl++] = seq[j];
         const double v = pcmRaw(metas, left, nl, seq[k]);
         if (v < 0) ++c.unmeasured; else c.sum += v;
     }
@@ -483,8 +501,8 @@ static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
     string nearestWhat;
 
     // A candidate is a list of [from, to] segments of the current `seq`. It is evaluated
-    // incrementally: a junction's flux depends on its 4-chunk window, so only the first 3
-    // positions of each segment need a pcmRaw lookup (the rest come from prefix sums of the
+    // incrementally: a junction's flux depends on its (g_pcmLeft + 1)-chunk window, so only the
+    // first g_pcmLeft positions of each segment need a pcmRaw lookup (the rest come from prefix sums of the
     // current order), and the reservoir state re-synchronises with the current order's within
     // a frame or two, after which the segment's remaining breaks come from prefix sums too.
     using Seg = pair<int, int>;
@@ -497,8 +515,8 @@ static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
         for (int k = 0; k < n; ++k) {
             double v = 0;
             if (k >= 1) {
-                int left[3], nl = 0;
-                for (int j = k - 3; j < k; ++j) if (j >= 0) left[nl++] = seq[j];
+                int left[PCM_LEFT_MAX], nl = 0;
+                for (int j = k - g_pcmLeft; j < k; ++j) if (j >= 0) left[nl++] = seq[j];
                 v = pcmRaw(metas, left, nl, seq[k]);
             }
             jv[k] = v;
@@ -541,27 +559,27 @@ static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
     };
     auto evalFlux = [&](const vector<Seg>& segs, OrderCost& c) {
         int g = 0;              // position in the candidate
-        int last[3], nl = 0;    // last (up to) 3 chunks placed, oldest first
+        int last[PCM_LEFT_MAX], nl = 0;    // last (up to) g_pcmLeft chunks placed, oldest first
+        const int W = g_pcmLeft;
         for (const Seg& sg : segs) {
             for (int k = sg.first; k <= sg.second; ++k, ++g) {
                 if (g >= 1) {
-                    if (k - sg.first >= 3 || sg.first == 0) {   // same window as the current order
+                    if (k - sg.first >= W || sg.first == 0) {   // same window as the current order
                         c.sum += PS[sg.second + 1] - PS[k];
                         c.unmeasured += PU[sg.second + 1] - PU[k];
                         g += sg.second - k;
                         k = sg.second;
+                        // Only a segment of >= W chunks is skipped mid-way (or the order's
+                        // prefix, which starts at 0), so the last W chunks are all in it.
                         nl = 0;
-                        for (int j = std::max(sg.first, sg.second - 2); j <= sg.second; ++j) last[nl++] = seq[j];
-                        if (nl < 3 && sg.second - sg.first < 2) {
-                            // segment shorter than 3 and fully skipped can't happen here
-                        }
+                        for (int j = std::max(sg.first, sg.second - (W - 1)); j <= sg.second; ++j) last[nl++] = seq[j];
                         goto nextSeg;
                     }
                     const double v = pcmRaw(metas, last, nl, seq[k]);
                     if (v < 0) ++c.unmeasured; else c.sum += v;
                 }
-                if (nl < 3) last[nl++] = seq[k];
-                else { last[0] = last[1]; last[1] = last[2]; last[2] = seq[k]; }
+                if (nl < W) last[nl++] = seq[k];
+                else { std::copy(last + 1, last + W, last); last[W - 1] = seq[k]; }
             }
             nextSeg:;
         }
@@ -816,13 +834,13 @@ bool dfs(DfsState& state,
     if (rankByContinuity && candidates.size() > 1) {
         const bool useSpec = g_specRank && isLayerIII;
         const bool usePcm  = g_pcmRank;
-        // Last (up to) 3 chunks of the path, oldest first - the PCM window's left side.
-        int left[3], nLeft = 0;
+        // Last (up to) g_pcmLeft chunks of the path, oldest first - the PCM window's left side.
+        int left[PCM_LEFT_MAX], nLeft = 0;
         if (usePcm) {
-            int tmp[3];
-            for (int oi = (int)state.order.size() - 1; oi >= 0 && nLeft < 3; --oi) {
+            int tmp[PCM_LEFT_MAX];
+            for (int oi = (int)state.order.size() - 1; oi >= 0 && nLeft < g_pcmLeft; --oi) {
                 const auto& ch = supernodes[state.order[oi]].chunks;
-                for (int k = (int)ch.size() - 1; k >= 0 && nLeft < 3; --k) tmp[nLeft++] = ch[k];
+                for (int k = (int)ch.size() - 1; k >= 0 && nLeft < g_pcmLeft; --k) tmp[nLeft++] = ch[k];
             }
             for (int k = 0; k < nLeft; ++k) left[k] = tmp[nLeft - 1 - k];
         }
@@ -930,6 +948,7 @@ struct MatchResult {
 static MatchResult globalMatch(const vector<Supernode>& sn, const vector<vector<int>>& superAdj,
                                int startSuper, const vector<vector<int>>& chunkAdj,
                                const vector<ChunkMeta>& metas, EdgeLock::FluxMemo& memo, int threads,
+                               const EdgeLock::WarmChains* warm,
                                const std::unordered_set<uint64_t>* forbidden = nullptr) {
     auto banned = [&](int s, int t) {
         return forbidden && forbidden->count(((uint64_t)(unsigned)s << 32) | (unsigned)t) > 0;
@@ -990,7 +1009,7 @@ static MatchResult globalMatch(const vector<Supernode>& sn, const vector<vector<
             return res;
         }
     }
-    res.decodes = EdgeLock::scoreWindows(chunks, metas, windows, memo, threads);
+    res.decodes = EdgeLock::scoreWindows(chunks, metas, windows, memo, threads, warm);
 
     // edge costs
     std::unordered_map<uint64_t, double> cost;
@@ -1289,6 +1308,27 @@ int main(int argc, char* argv[]) {
     if (invalidCount > 0)
         cerr << invalidCount << " invalid chunks — reconstruction may fail\n";
 
+    // PCM window left side: grows past 3 chunks when frames are large vs the chunk size (320 kbps
+    // at 1 KB measured ~0% of junctions otherwise). Sized on the 90th-percentile frame length so
+    // a few large frames in a VBR stream don't widen every window. Shuffle-invariant.
+    {
+        vector<int> lens;
+        for (const auto& m : metas) {   // + the spilling tail: a frame > chunk is never whole in one
+            for (const auto& f : m.frames) lens.push_back(f.length);
+            if (m.valid && m.tailPartialLen > 0) lens.push_back(m.tailPartialLen);
+        }
+        int p90 = 0;
+        if (!lens.empty()) {
+            std::nth_element(lens.begin(), lens.begin() + lens.size() * 9 / 10, lens.end());
+            p90 = lens[lens.size() * 9 / 10];
+        }
+        g_pcmLeft = std::max(3, PcmJunction::leftChunksNeeded(p90, chunkSize));
+        if (const char* v = std::getenv("RP_PCM_LEFT")) g_pcmLeft = atoi(v);
+        g_pcmLeft = std::min(std::max(g_pcmLeft, 2), PCM_LEFT_MAX);
+        if (g_pcmLeft != 3)
+            cout << "PCM window: " << g_pcmLeft << " left chunks (p90 frame " << p90 << " B)\n";
+    }
+
     // Boundary granule loudness for the DFS continuity heuristic (see BoundaryGain / dfs()).
     // Off only if RP_RANK=0 - kept as a switch for the pinned-seed A/B in
     // PLAN_sideinfo_mainbits.md Step 1.
@@ -1442,8 +1482,8 @@ int main(int argc, char* argv[]) {
     }
 
     // Calibrate the PCM term against the existing ranking cost (z-score style): over a sample
-    // of real structural edges a->b with a plausible 2-chunk path context (pp->p->a, drawn from
-    // the graph's in-edges), scale log1p(flux) so its spread is RP_PCM_W times the spread of
+    // of real structural edges a->b with a plausible (g_pcmLeft - 1)-chunk path context (... ->pp
+    // ->p->a, drawn from the graph's in-edges), scale log1p(flux) so its spread is RP_PCM_W times the spread of
     // junctionCost + spectral. Unmeasurable junctions get the median (neutral) value.
     if (const char* v = std::getenv("RP_PCM")) g_pcmRank = (v[0] != '0');
     if (g_pcmRank && rankByContinuity) {
@@ -1458,14 +1498,23 @@ int main(int argc, char* argv[]) {
         for (int t = 0; t < 20000 && pv.size() < 600; ++t) {
             const int a = pa(rc);
             if (adj[a].size() < 2 || preds[a].empty()) continue;
-            const int p = preds[a][rc() % preds[a].size()];
-            if (p == a || preds[p].empty()) continue;
-            const int pp = preds[p][rc() % preds[p].size()];
-            if (pp == p || pp == a) continue;
+            // backward walk a <- p <- pp <- ... of g_pcmLeft chunks, no repeats
+            int walk[PCM_LEFT_MAX], nw = 0;
+            walk[nw++] = a;
+            bool ok = true;
+            for (int d = 1; d < g_pcmLeft && ok; ++d) {
+                const int x = walk[nw - 1];
+                const int q = preds[x][rc() % preds[x].size()];
+                ok = std::find(walk, walk + nw, q) == walk + nw && (d == g_pcmLeft - 1 || !preds[q].empty());
+                walk[nw++] = q;
+            }
+            if (!ok) continue;
             const int b = adj[a][rc() % adj[a].size()];
-            if (b == a || b == p || b == pp) continue;
-            const int left[3] = {pp, p, a};
-            const double raw = pcmRaw(metas, left, 3, b);
+            if (std::find(walk, walk + nw, b) != walk + nw) continue;
+            const int p = nw > 1 ? walk[1] : -1;
+            int left[PCM_LEFT_MAX];
+            for (int k = 0; k < nw; ++k) left[k] = walk[nw - 1 - k];
+            const double raw = pcmRaw(metas, left, nw, b);
             if (raw < 0) continue;
             double o = junctionCost(boundaryGain, a, b);
             if (g_specRank && isLayerIII) o += spectralJunctionCost(metas, p, a, b);
@@ -1558,6 +1607,10 @@ int main(int argc, char* argv[]) {
     if (const char* t = std::getenv("RP_THREADS")) lockThreads = std::max(1, atoi(t));
 
     const auto adjBase = adj;
+    // Lock/matching windows are [p, a, b], one chunk less on the left than the DFS's; past 3
+    // they get g_pcmLeft - 3 warm-up chunks before p (EdgeLock::buildWarmChains).
+    const EdgeLock::WarmChains warm = EdgeLock::buildWarmChains(adjBase, g_pcmLeft - 3);
+    const EdgeLock::WarmChains* warmPtr = warm.empty() ? nullptr : &warm;
     vector<vector<int>> superAdj;
     vector<Supernode> supernodes;
     vector<int> result;
@@ -1598,7 +1651,7 @@ int main(int argc, char* argv[]) {
                 long dec = 0;
                 const auto locks = EdgeLock::findConfidentEdges(chunks, metas, adj, 0, tau, 8,
                                                                 EdgeLock::Mode::Median, &dec,
-                                                                &lockMemo, lockThreads);
+                                                                &lockMemo, lockThreads, warmPtr);
                 totalDec += dec;
                 if (locks.empty()) break;
                 const long removed = EdgeLock::applyLocks(adj, locks);
@@ -1768,7 +1821,7 @@ int main(int argc, char* argv[]) {
         // otherwise the DFS is rerun (fresh budget) with each matched successor ranked first.
         auto tryMatch = [&]() -> bool {
             const auto t0 = chrono::steady_clock::now();
-            MatchResult mr = globalMatch(supernodes, superAdj, startSuper, adj, metas, lockMemo, lockThreads);
+            MatchResult mr = globalMatch(supernodes, superAdj, startSuper, adj, metas, lockMemo, lockThreads, warmPtr);
             // Iterated matching (RP_MATCH_ITERS rounds): the assignment ignores the bit
             // reservoir, so forbid the supernode arc at (or, for a break inside a supernode, just
             // before) each reservoir break and re-solve; keep the result with the fewest breaks,
@@ -1801,7 +1854,7 @@ int main(int argc, char* argv[]) {
                         forb.insert(((uint64_t)(unsigned)cur.order[sp - 1] << 32) | (unsigned)cur.order[sp]);
                     }
                     if (forb.size() == before) break;
-                    MatchResult nx = globalMatch(supernodes, superAdj, startSuper, adj, metas, lockMemo, lockThreads, &forb);
+                    MatchResult nx = globalMatch(supernodes, superAdj, startSuper, adj, metas, lockMemo, lockThreads, warmPtr, &forb);
                     if (nx.order.empty()) break;   // over-constrained: keep the best so far
                     const int b = breaksOf(nx, nullptr);
                     if (b < bestBreaks || (b == bestBreaks && nx.cost < mr.cost)) { mr = nx; bestBreaks = b; }
@@ -1948,8 +2001,8 @@ int main(int argc, char* argv[]) {
             auto summed = [&](const vector<int>& ord, int& unmeasured) {
                 double sum = 0; unmeasured = 0;
                 for (size_t k = 1; k < ord.size(); ++k) {
-                    int left[3], nl = 0;
-                    for (int j = (int)k - 3; j < (int)k; ++j) if (j >= 0) left[nl++] = ord[j];
+                    int left[PCM_LEFT_MAX], nl = 0;
+                    for (int j = (int)k - g_pcmLeft; j < (int)k; ++j) if (j >= 0) left[nl++] = ord[j];
                     const double v = pcmRaw(metas, left, nl, ord[k]);
                     if (v < 0) ++unmeasured; else sum += v;
                 }

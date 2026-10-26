@@ -51,8 +51,6 @@ int main(int argc, char** argv) {
     if (argc < 2) { fprintf(stderr, "usage: %s <fixture.mp3> [maxJunctions]\n", argv[0]); return 2; }
     const string filename = argv[1];
     const int maxJ = argc > 2 ? atoi(argv[2]) : 1 << 30;
-    // Number of warm-up chunks before chunk i (PROBE_CTX, default 2: i-2 and i-1).
-    const int ctx = getenv("PROBE_CTX") ? max(1, atoi(getenv("PROBE_CTX"))) : 2;
     if (const char* cs = getenv("RP_CHUNK_SIZE")) CHUNK_SIZE = max(1024, atoi(cs));
 
     Mp3FrameScanner scanner(filename);
@@ -76,6 +74,24 @@ int main(int argc, char** argv) {
     vector<ChunkMeta> metas;
     for (int i = 0; i < n; ++i) metas.push_back(computeChunkMeta(i, chunks[i], profile, chunks[i].size() < chunks[0].size()));
     const auto adj = buildAdjacency(metas);
+    // Warm-up chunks before chunk i: like rp's DFS window (g_pcmLeft - 1), i.e. 2 (i-2, i-1)
+    // unless frames are large vs the chunk size (PcmJunction::leftChunksNeeded on the p90 frame
+    // length). PROBE_CTX overrides. The lock probe below gets the matching warm-up chains.
+    int ctx = 2;
+    {
+        vector<int> lens;
+        for (const auto& m : metas) {   // + the spilling tail: a frame > chunk is never whole in one
+            for (const auto& f : m.frames) lens.push_back(f.length);
+            if (m.valid && m.tailPartialLen > 0) lens.push_back(m.tailPartialLen);
+        }
+        if (!lens.empty()) {
+            nth_element(lens.begin(), lens.begin() + lens.size() * 9 / 10, lens.end());
+            ctx = max(2, PcmJunction::leftChunksNeeded(lens[lens.size() * 9 / 10], CHUNK_SIZE) - 1);
+        }
+    }
+    if (getenv("PROBE_CTX")) ctx = max(1, atoi(getenv("PROBE_CTX")));
+    printf("window: %d warm-up chunks before the junction chunk\n", ctx);
+    const EdgeLock::WarmChains warm = EdgeLock::buildWarmChains(adj, ctx - 2);
 
     // ---- Gate 1: windowed decode == full decode ---------------------------------------
     {
@@ -319,7 +335,8 @@ int main(int argc, char** argv) {
         for (int i = 0; i < n; ++i) if (adj[i].size() >= 2) ++branchOut;
         for (auto mode : {EdgeLock::Mode::Robust, EdgeLock::Mode::Median}) {
             long dec = 0;
-            const auto all = EdgeLock::findConfidentEdges(chunks, metas, adj, 0, 1.0, maxCtx, mode, &dec);
+            const auto all = EdgeLock::findConfidentEdges(chunks, metas, adj, 0, 1.0, maxCtx, mode, &dec,
+                                                          nullptr, 1, warm.empty() ? nullptr : &warm);
             printf("\n== Confident-edge locking, %s mode (maxCtx=%d, %ld window decodes) ==\n",
                    mode == EdgeLock::Mode::Robust ? "robust" : "median", maxCtx, dec);
             printf("  true edges at a branch point (out- or in-degree >= 2): %ld; chunks with out-degree >= 2: %ld\n",

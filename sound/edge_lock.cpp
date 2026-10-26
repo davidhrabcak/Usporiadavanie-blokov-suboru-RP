@@ -15,11 +15,60 @@ namespace EdgeLock {
 static constexpr double INF = std::numeric_limits<double>::infinity();
 static constexpr double FLOOR = 0.1; // keeps margins finite when a flux is ~0
 
+WarmChains buildWarmChains(const std::vector<std::vector<int>>& adj, int len) {
+    WarmChains warm;
+    if (len <= 0) return warm;
+    const int n = static_cast<int>(adj.size());
+    std::vector<std::vector<int>> preds(n);
+    for (int a = 0; a < n; ++a) for (int b : adj[a]) preds[b].push_back(a);
+    warm.assign(n, {});
+    for (int p = 0; p < n; ++p) {
+        std::vector<int> chain;   // newest first
+        int x = p;
+        for (int d = 0; d < len; ++d) {
+            int q = -1;
+            for (int c : preds[x]) {
+                if (c == p || std::find(chain.begin(), chain.end(), c) != chain.end()) continue;
+                if (adj[c].size() == 1) { q = c; break; }
+                if (q < 0) q = c;
+            }
+            if (q < 0) break;
+            chain.push_back(q);
+            x = q;
+        }
+        warm[p].assign(chain.rbegin(), chain.rend());
+    }
+    return warm;
+}
+
+// Left side of window [p, a, .]: warm[p] (oldest first), p, a. Returns the decode start offset
+// (headOffset of the first chunk). Invalid leading chunks are dropped (no usable headOffset).
+static int leftSegs(const std::vector<std::vector<uint8_t>>& chunks, const std::vector<ChunkMeta>& metas,
+                    int p, int a, const WarmChains* warm, std::vector<const std::vector<uint8_t>*>& segs) {
+    std::vector<int> ids;
+    if (p >= 0) {
+        if (warm && p < (int)warm->size()) {
+            const auto& w = (*warm)[p];
+            // a chain reached through a cycle can contain `a`: keep only what follows it
+            auto it = std::find(w.rbegin(), w.rend(), a);
+            ids.assign(it.base(), w.end());
+        }
+        ids.push_back(p);
+    }
+    ids.push_back(a);
+    size_t f = 0;
+    while (f + 1 < ids.size() && !metas[ids[f]].valid) ++f;
+    segs.clear();
+    for (size_t k = f; k < ids.size(); ++k) segs.push_back(&chunks[ids[k]]);
+    return metas[ids[f]].headOffset;
+}
+
 std::vector<LockedEdge> findConfidentEdges(const std::vector<std::vector<uint8_t>>& chunks,
                                            const std::vector<ChunkMeta>& metas,
                                            const std::vector<std::vector<int>>& adj,
                                            int start, double tau, int maxCtx, Mode mode,
-                                           long* decodes, FluxMemo* memo, int threads) {
+                                           long* decodes, FluxMemo* memo, int threads,
+                                           const WarmChains* warm) {
     const int n = static_cast<int>(chunks.size());
     std::vector<std::vector<int>> preds(n);
     for (int a = 0; a < n; ++a) for (int b : adj[a]) preds[b].push_back(a);
@@ -63,10 +112,8 @@ std::vector<LockedEdge> findConfidentEdges(const std::vector<std::vector<uint8_t
                 } else {
                     if (!left[ci]) {
                         std::vector<const std::vector<uint8_t>*> segs;
-                        int first = a;
-                        if (pp >= 0) { segs.push_back(&chunks[pp]); first = pp; }
-                        segs.push_back(&chunks[a]);
-                        left[ci].reset(new PcmJunction::LeftContext(segs, metas[first].headOffset));
+                        const int off = leftSegs(chunks, metas, pp, a, warm, segs);
+                        left[ci].reset(new PcmJunction::LeftContext(segs, off));
                     }
                     const PcmJunction::Metrics m = left[ci]->score(chunks[b]);
                     ++nDec[a];
@@ -143,7 +190,7 @@ std::vector<LockedEdge> findConfidentEdges(const std::vector<std::vector<uint8_t
 long scoreWindows(const std::vector<std::vector<uint8_t>>& chunks,
                   const std::vector<ChunkMeta>& metas,
                   const std::vector<std::array<int, 3>>& windows,
-                  FluxMemo& memo, int threads) {
+                  FluxMemo& memo, int threads, const WarmChains* warm) {
     std::vector<std::array<int, 3>> todo;
     for (const auto& w : windows) {
         const int p = (w[0] >= 0 && metas[w[0]].valid) ? w[0] : -1;
@@ -163,10 +210,8 @@ long scoreWindows(const std::vector<std::vector<uint8_t>>& chunks,
     auto one = [&](size_t g) {
         const auto& w0 = uniq[groups[g]];
         std::vector<const std::vector<uint8_t>*> segs;
-        int first = w0[1];
-        if (w0[0] >= 0) { segs.push_back(&chunks[w0[0]]); first = w0[0]; }
-        segs.push_back(&chunks[w0[1]]);
-        const PcmJunction::LeftContext left(segs, metas[first].headOffset);
+        const int off = leftSegs(chunks, metas, w0[0], w0[1], warm, segs);
+        const PcmJunction::LeftContext left(segs, off);
         for (size_t i = groups[g]; i < groups[g + 1]; ++i) {
             const PcmJunction::Metrics m = left.score(chunks[uniq[i][2]]);
             out[i] = (!m.valid || m.silent) ? std::numeric_limits<float>::quiet_NaN() : (float)m.flux;

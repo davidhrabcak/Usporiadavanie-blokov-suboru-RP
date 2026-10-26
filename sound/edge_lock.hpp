@@ -37,6 +37,15 @@ enum class Mode { Robust, Median };
 // Flux of window [p, a, b] (p = -1: none), keyed by packKey. A window's flux depends only on
 // those three chunks, so one memo can be shared across lock rounds and tau attempts.
 using FluxMemo = std::unordered_map<uint64_t, float>;
+// Warm-up chunks decoded before p (oldest first), when [p, a] alone holds too few frames
+// (large frames vs the chunk size, PcmJunction::leftChunksNeeded). warm[p] must stay fixed for
+// the memo's lifetime, so that a window is still determined by (p, a, b). nullptr / empty: none.
+using WarmChains = std::vector<std::vector<int>>;
+// Warm-up chain of `len` chunks for every p: a backward walk on `adj` that takes a forced
+// predecessor (one whose only successor is the current chunk) when there is one, else the
+// first. Usually not the true chunks, but the decoder only needs warming up, and the pre-side
+// flux baseline is shared by every candidate b of the same context. Empty when len <= 0.
+WarmChains buildWarmChains(const std::vector<std::vector<int>>& adj, int len);
 inline uint64_t packKey(int p, int a, int b) {
     return ((uint64_t)(unsigned)(p + 1) << 42) | ((uint64_t)(unsigned)a << 21) | (uint64_t)(unsigned)b;
 }
@@ -49,7 +58,8 @@ std::vector<LockedEdge> findConfidentEdges(const std::vector<std::vector<uint8_t
                                            const std::vector<std::vector<int>>& adj,
                                            int start, double tau, int maxCtx,
                                            Mode mode = Mode::Robust, long* decodes = nullptr,
-                                           FluxMemo* memo = nullptr, int threads = 1);
+                                           FluxMemo* memo = nullptr, int threads = 1,
+                                           const WarmChains* warm = nullptr);
 
 // Scores every window [p, a, b] in `windows` (p = -1: none) that isn't in `memo` yet, on
 // `threads` threads, and adds the results to `memo` (NaN = unmeasurable). Returns the number
@@ -57,7 +67,7 @@ std::vector<LockedEdge> findConfidentEdges(const std::vector<std::vector<uint8_t
 long scoreWindows(const std::vector<std::vector<uint8_t>>& chunks,
                   const std::vector<ChunkMeta>& metas,
                   const std::vector<std::array<int, 3>>& windows,
-                  FluxMemo& memo, int threads);
+                  FluxMemo& memo, int threads, const WarmChains* warm = nullptr);
 
 // Forces every locked edge into `adj`: a's only successor becomes b, and b is removed from
 // every other chunk's successor list. Returns the number of edges removed.
