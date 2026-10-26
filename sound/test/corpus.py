@@ -345,7 +345,7 @@ def cmd_run(args):
         for k, r in enumerate(ex.map(one_run, jobs), 1):
             w.writerow(r)
             f.flush()
-            print(f"[{k}/{len(jobs)}] {r['class']:<11} {r['chunk_size']:>5} {r['recipe']:<8} {r['name'][:60]} ({r['wall_s']}s)")
+            print(f"[{k}/{len(jobs)}] {r['class']:<11} {r['chunk_size']:>5} {r['recipe']:<8} {r['name'][:60]} ({r['wall_s']}s)", flush=True)
     print("results:", results)
 
 # --------------------------------------------------------------------------------------------

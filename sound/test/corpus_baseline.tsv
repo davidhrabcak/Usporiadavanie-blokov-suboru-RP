@@ -1,0 +1,356 @@
+id	recipe	chunk_size	config	seed	class	name
+005c6e3aebad	sec10	1024	default	1	STRUCTURAL	1-28 Koopa's Message.mp3
+005c6e3aebad	sec10	4096	default	1	EXACT	1-28 Koopa's Message.mp3
+01d0cdd5098f	orig	1024	budget20	1	SEARCH_FAIL	cbr192_30s.mp3
+020afa687aeb	sec10	1024	default	1	STRUCTURAL	1-19 Correct Solution.mp3
+020afa687aeb	sec10	4096	default	1	EXACT	1-19 Correct Solution.mp3
+021d11b714fb	sec10	4096	default	1	WRONG	Cheap Time - Handyman.mp3
+0221d81eb610	sec10	1024	default	1	EXACT	72-06 Le carnaval des animaux _ Kangourous.mp3
+0221d81eb610	sec10	4096	default	1	EXACT	72-06 Le carnaval des animaux _ Kangourous.mp3
+02a6cc822dba	sec10	1024	default	1	EXACT	03 _Peer Gynt_ Suite N.1 Op.46 - La Danza Di Anitra.mp3
+02a6cc822dba	sec10	4096	default	1	EXACT	03 _Peer Gynt_ Suite N.1 Op.46 - La Danza Di Anitra.mp3
+044c0184adaa	sec10	1024	default	1	EXACT	1-04 Opening.mp3
+044c0184adaa	sec10	4096	default	1	EXACT	1-04 Opening.mp3
+055087eef5ba	sec10	1024	default	1	EXACT	72-03 Le carnaval des animaux _ Hemiones.mp3
+055087eef5ba	sec10	4096	default	1	EXACT	72-03 Le carnaval des animaux _ Hemiones.mp3
+05bce6a15c87	sec10	4096	default	1	WRONG	Ariel Pink's Haunted Graffiti - Calm Me Down.mp3
+07e6cacb61b3	sec10	4096	default	1	WRONG	Happiness In Music - Blog Music.mp3
+083d634746aa	sec10	4096	default	1	EXACT	Bird Names - Ghosts.mp3
+0b2b8cbf1803	sec10	4096	default	1	EXACT	The Dark Bean - Rocks Monolindor.mp3
+0b901dc0934b	sec10	1024	default	1	EXACT	09 Francis Poulenc - Aubade.mp3
+0b901dc0934b	sec10	4096	default	1	EXACT	09 Francis Poulenc - Aubade.mp3
+0baf7ffa4f8e	orig	1024	budget20	1	EXACT	vbrq2_10s.mp3
+0d89d227e81a	sec10	1024	default	1	EXACT	02 Stravinski_ Petruska _ Danza Russa.mp3
+0d89d227e81a	sec10	4096	default	1	EXACT	02 Stravinski_ Petruska _ Danza Russa.mp3
+0e139484fa36	sec10	1024	default	1	STRUCTURAL	1-17 Metallic Mario.mp3
+0e139484fa36	sec10	4096	default	1	EXACT	1-17 Metallic Mario.mp3
+0ec6e6f6a40a	orig	1024	budget20	1	STRUCTURAL	cbr320_10s.mp3
+0feac56ee893	sec10	4096	default	1	EXACT	Dirk Dehler - Step into the Ring (Glitch Hop Version)(1).mp3
+107bdf40dded	sec10	1024	default	1	SEARCH_FAIL	01.01. Cut Me Loose Charlie.mp3
+107bdf40dded	sec10	4096	default	1	EXACT	01.01. Cut Me Loose Charlie.mp3
+1236e91ee8ea	sec10	4096	default	1	EXACT	MARSANARYAS - My Darling has left me.mp3
+1358aab84f34	sec10	4096	default	1	WRONG	Explosive_Sound - Jazzy swing party.mp3
+163ba245c024	sec10	1024	default	1	EXACT	02 _Peer Gynt_ Suite N.1 Op.46 - La Morte Di Aase.mp3
+163ba245c024	sec10	4096	default	1	EXACT	02 _Peer Gynt_ Suite N.1 Op.46 - La Morte Di Aase.mp3
+197845cd5417	sec10	4096	default	1	WRONG	The Minor Thirds - Points North.mp3
+19a6e8f2f8df	sec10	4096	default	1	EXACT	Ov Moi Omm - The Anomalous Third.mp3
+1a0a429f4e6e	sec10	4096	default	1	WRONG	Jon Shuemaker - LOOP 8 (93 bpm).mp3.mp3
+1ae3fa5b9b46	sec10	4096	default	1	WRONG	Play House - Lost.mp3
+1c142e4c73fe	sec10	1024	default	1	EXACT	72-04 Le carnaval des animaux _ Tortues.mp3
+1c142e4c73fe	sec10	4096	default	1	EXACT	72-04 Le carnaval des animaux _ Tortues.mp3
+1d0ec77d4501	sec10	4096	default	1	WRONG	Jon Shuemaker - LOOP 7 (76 bpm).mp3.mp3
+20e4f770fcd3	sec10	1024	default	1	EXACT	1-07 Inside The Castle Walls.mp3
+20e4f770fcd3	sec10	4096	default	1	EXACT	1-07 Inside The Castle Walls.mp3
+216fd9273d2f	sec10	4096	default	1	WRONG	Hecuba - Sir.mp3
+219ea2c1ebbc	sec10	4096	default	1	WRONG	Circus Marcus - Levantaran el vuelo.mp3
+23f2dbe3fde0	sec10	4096	default	1	EXACT	AONESCAPE - New Day.mp3.mp3
+24747e39933f	sec10	1024	default	1	STRUCTURAL	1-12 Haunted House.mp3
+24747e39933f	sec10	4096	default	1	EXACT	1-12 Haunted House.mp3
+254cff2ca0cf	sec10	1024	default	1	EXACT	1-34 Ending Demo.mp3
+254cff2ca0cf	sec10	4096	default	1	EXACT	1-34 Ending Demo.mp3
+2a7ff9d3c738	sec10	4096	default	1	EXACT	TimTaj - Football.mp3
+2ac2146727c0	sec10	4096	default	1	EXACT	Irama Gema - Grasp (Outer Himalayan Mix).mp3
+2ac5c466981a	sec10	4096	default	1	WRONG	Jon Shuemaker - LOOP 10 (145 bpm).mp3.mp3
+2b8ca86d2c18	sec10	1024	default	1	STRUCTURAL	1-11 Snow Mountain.mp3
+2b8ca86d2c18	sec10	4096	default	1	EXACT	1-11 Snow Mountain.mp3
+2f14d38f9b13	orig	1024	budget20	1	EXACT	cbr128_10s.mp3
+2fb215f0c096	orig	1024	budget20	1	EXACT	vbrq2_10s.mp3
+2fd5a6b317da	orig	1024	budget20	1	WRONG	cbr128_30s.mp3
+33b36b4d066a	sec10	4096	default	1	EXACT	HoliznaCC0 - Tengu.mp3
+3463d8fb5e76	sec10	4096	default	1	SEARCH_FAIL	Jon Shuemaker - Loop 20 (126 bpm).mp3.mp3
+36e25921d479	sec10	1024	default	1	EXACT	07 Stravinski_ L'uccello di fuoco _ Preludio e Danza dell'Uccello di Fuoco.mp3
+36e25921d479	sec10	4096	default	1	EXACT	07 Stravinski_ L'uccello di fuoco _ Preludio e Danza dell'Uccello di Fuoco.mp3
+3708771bd689	orig	1024	budget20	1	EXACT	cbr64_10s.mp3
+37e2ffce299d	sec10	1024	default	1	EXACT	10 _Siguard Jorsalfar_ Suite Op.56 - Intermezzo. Sogno Di Borghild.mp3
+37e2ffce299d	sec10	4096	default	1	EXACT	10 _Siguard Jorsalfar_ Suite Op.56 - Intermezzo. Sogno Di Borghild.mp3
+389f7bfda481	sec10	1024	default	1	EXACT	06 Stravinski_ Petruska _ Festa popolare della Settimana grassa - Morte di Petruska.mp3
+389f7bfda481	sec10	4096	default	1	EXACT	06 Stravinski_ Petruska _ Festa popolare della Settimana grassa - Morte di Petruska.mp3
+391a633e0d2b	sec10	1024	default	1	STRUCTURAL	1-30 Koopa's Theme.mp3
+391a633e0d2b	sec10	4096	default	1	EXACT	1-30 Koopa's Theme.mp3
+3922fdd4de06	sec10	4096	default	1	EXACT	legacyAlli - Irish Meadow.mp3
+3953afa7e50c	sec10	4096	default	1	EXACT	Siddhartha - God Is Love.mp3
+399bc16f1bea	sec10	1024	default	1	STRUCTURAL	1-36 Piranha Plant's Lullaby-Piano.mp3
+399bc16f1bea	sec10	4096	default	1	EXACT	1-36 Piranha Plant's Lullaby-Piano.mp3
+39a45e4580c4	sec10	4096	default	1	SEARCH_FAIL	Orchestraman - Be higher.mp3
+3b4f4b8bf3f6	sec10	1024	default	1	WRONG	01.03. Samba Da Tartaruga (Turtle Samba)_sample.mp3
+3b4f4b8bf3f6	sec10	4096	default	1	EXACT	01.03. Samba Da Tartaruga (Turtle Samba)_sample.mp3
+3ca34b6d5fca	sec10	4096	default	1	WRONG	AUDIOINSMUSIC - Electronic Drive.mp3.mp3
+3cc0306ddd3a	sec10	4096	default	1	EXACT	AONESCAPE - Dream Day.mp3.mp3
+3d68be4845a8	sec10	4096	default	1	WRONG	Brentin Davis - Lobby Profits.mp3
+3ea047f423d3	sec10	1024	default	1	EXACT	05 Darius Milhaud - Scaramouche - Vivace.mp3
+3ea047f423d3	sec10	4096	default	1	EXACT	05 Darius Milhaud - Scaramouche - Vivace.mp3
+3f828a9747e5	sec10	1024	default	1	STRUCTURAL	1-06 Slider.mp3
+3f828a9747e5	sec10	4096	default	1	EXACT	1-06 Slider.mp3
+4286bf353889	sec10	4096	default	1	EXACT	Irama Gema - Hati-hati! Aku temanmu. Seberapa jauh desa dari sini.mp3
+43825bab9b99	sec10	1024	default	1	EXACT	03 Erik Satie - Jack in the box - Finale.mp3
+43825bab9b99	sec10	4096	default	1	EXACT	03 Erik Satie - Jack in the box - Finale.mp3
+43901ad0bcf6	sec10	1024	default	1	EXACT	1-01 _It's A Me, Mario!_.mp3
+43901ad0bcf6	sec10	4096	default	1	EXACT	1-01 _It's A Me, Mario!_.mp3
+45032f152b50	sec10	1024	default	1	EXACT	07 _Peer Gynt_ Suite N.2 Op.55 - Il Ritorno Di Peer Gynt.mp3
+45032f152b50	sec10	4096	default	1	EXACT	07 _Peer Gynt_ Suite N.2 Op.55 - Il Ritorno Di Peer Gynt.mp3
+47f89d13577a	sec10	4096	default	1	WRONG	Lopkerjo - My Red White n Blue.mp3
+4816925e8eef	sec10	1024	default	1	EXACT	72-08 Le carnaval des animaux _ Personnages à longues oreilles.mp3
+4816925e8eef	sec10	4096	default	1	EXACT	72-08 Le carnaval des animaux _ Personnages à longues oreilles.mp3
+48385d0365c3	sec10	1024	default	1	EXACT	1-21 Power Star.mp3
+48385d0365c3	sec10	4096	default	1	EXACT	1-21 Power Star.mp3
+4a1434d68f41	orig	1024	budget20	1	SEARCH_FAIL	cbr192_30s.mp3
+4aa25d909b11	sec10	4096	default	1	EXACT	Sparrow Steeple - Pineapple Finials.mp3
+4ae31eed61a2	sec10	4096	default	1	EXACT	Alex Morgan - Japanese Music.mp3
+4d4abdae7d5f	sec10	4096	default	1	EXACT	Cryptacize - Heaven Is Human.mp3
+4d8265d81ffe	sec10	4096	default	1	SEARCH_FAIL	pat102 - computer beat (Experimental Electronic Music).mp3
+4de716cebcb2	sec10	4096	default	1	WRONG	Axletree - Goldfinch_ Flight to the North (Remastered).mp3
+50106a4f24fe	sec10	1024	default	1	STRUCTURAL	1-13 Merry-Go-Round.mp3
+50106a4f24fe	sec10	4096	default	1	EXACT	1-13 Merry-Go-Round.mp3
+51fc3fba65f9	orig	1024	budget20	1	EXACT	cbr128_10s.mp3
+5249d3856770	sec10	4096	default	1	EXACT	Strobotone - Medieval Theme 01.mp3
+5511c26523aa	sec10	1024	default	1	EXACT	72-15 Danse Macabre.mp3
+5511c26523aa	sec10	4096	default	1	EXACT	72-15 Danse Macabre.mp3
+557cc661d3fe	sec10	1024	default	1	STRUCTURAL	1-33 Ultimate Koopa Clear.mp3
+557cc661d3fe	sec10	4096	default	1	EXACT	1-33 Ultimate Koopa Clear.mp3
+56909c082a0b	orig	1024	budget20	1	EXACT	vbrq2_30s.mp3
+59e3abe2a79d	sec10	4096	default	1	WRONG	Makaih Beats - Cold Summer.mp3
+5b1933e5181e	sec10	1024	default	1	WRONG	01.02. O Barulho Da Noite (Noise Of The Night)_sample.mp3
+5b1933e5181e	sec10	4096	default	1	EXACT	01.02. O Barulho Da Noite (Noise Of The Night)_sample.mp3
+5baf0421ab25	sec10	4096	default	1	WRONG	Policy - pURE.mp3
+5e953f1f1a37	sec10	4096	default	1	EXACT	Alex Morgan - Hip Hop Music.mp3
+5f5546319451	sec10	4096	default	1	EXACT	HoliznaCC0 - transcendental earth people.mp3
+62e9e1457e09	sec10	4096	default	1	WRONG	Lopkerjo - Your Comfort Lies.mp3
+63906cc4b631	orig	1024	budget20	1	EXACT	sample-3s.mp3
+65399c9bb6ca	sec10	1024	default	1	STRUCTURAL	1-26 Game Over.mp3
+65399c9bb6ca	sec10	4096	default	1	EXACT	1-26 Game Over.mp3
+665168eb70c3	orig	1024	budget20	1	STRUCTURAL	cbr320_10s.mp3
+666ce22f8a46	sec10	1024	default	1	EXACT	72-07 Le carnaval des animaux _ Aquarium.mp3
+666ce22f8a46	sec10	4096	default	1	EXACT	72-07 Le carnaval des animaux _ Aquarium.mp3
+66dd4e728b8b	sec10	1024	default	1	STRUCTURAL	1-02 Title Theme.mp3
+66dd4e728b8b	sec10	4096	default	1	EXACT	1-02 Title Theme.mp3
+6792c98270ce	orig	1024	budget20	1	EXACT	vbrq5_30s.mp3
+6810b662bc18	sec10	1024	default	1	EXACT	72-11 Le carnaval des animaux _ Pianistes.mp3
+6810b662bc18	sec10	4096	default	1	EXACT	72-11 Le carnaval des animaux _ Pianistes.mp3
+689e4f64e1d2	sec10	1024	default	1	STRUCTURAL	1-27 Stage Boss.mp3
+689e4f64e1d2	sec10	4096	default	1	EXACT	1-27 Stage Boss.mp3
+6a751d35c4f4	sec10	4096	default	1	SEARCH_FAIL	AONESCAPE - Deepform.mp3.mp3
+6b28b18c15ee	sec10	1024	default	1	STRUCTURAL	1-15 Piranha Plant's Lullaby.mp3
+6b28b18c15ee	sec10	4096	default	1	EXACT	1-15 Piranha Plant's Lullaby.mp3
+6ca73c131be7	sec10	1024	default	1	EXACT	1-24 Game Start.mp3
+6ca73c131be7	sec10	4096	default	1	EXACT	1-24 Game Start.mp3
+6e4801209259	sec10	4096	default	1	WRONG	Waveloom - Phonk Music.mp3
+6e8a137d103d	orig	1024	budget20	1	WRONG	cbr32_30s.mp3
+6f609a52cdd1	orig	1024	budget20	1	WRONG	test7.mp3
+729fa45e7e89	sec10	1024	default	1	EXACT	05 _Peer Gynt_ Suite N.2 Op.55 - Rapimento E Lamento Di Ingrid.mp3
+729fa45e7e89	sec10	4096	default	1	EXACT	05 _Peer Gynt_ Suite N.2 Op.55 - Rapimento E Lamento Di Ingrid.mp3
+73967eb79e8c	sec10	1024	default	1	EXACT	08 Georges Auric - Adieu New York.mp3
+73967eb79e8c	sec10	4096	default	1	EXACT	08 Georges Auric - Adieu New York.mp3
+74209157a1fd	sec10	4096	default	1	WRONG	The Baskervilles - Apartment.mp3
+7509f17e0c4c	sec10	1024	default	1	STRUCTURAL	1-14 Cave Dungeon.mp3
+7509f17e0c4c	sec10	4096	default	1	EXACT	1-14 Cave Dungeon.mp3
+75a42698d6bc	sec10	1024	default	1	STRUCTURAL	1-18 File Select.mp3
+75a42698d6bc	sec10	4096	default	1	EXACT	1-18 File Select.mp3
+788d665c3029	sec10	4096	default	1	WRONG	Music for Creators - Ocean Breeze.mp3
+78fa7b570ab5	sec10	4096	default	1	EXACT	AONESCAPE - Skylight.mp3.mp3
+799af0d82d9e	sec10	1024	default	1	STRUCTURAL	72-12 Le carnaval des animaux _ Fossiles.mp3
+799af0d82d9e	sec10	4096	default	1	EXACT	72-12 Le carnaval des animaux _ Fossiles.mp3
+7a6b568c606d	sec10	1024	default	1	WRONG	02.01. A Meia-Noite (At Midnight)_sample.mp3
+7a6b568c606d	sec10	4096	default	1	EXACT	02.01. A Meia-Noite (At Midnight)_sample.mp3
+7a9c6f990924	orig	1024	budget20	1	WRONG	cbr128_30s.mp3
+7bbd735c6343	orig	1024	budget20	1	STRUCTURAL	vbrq2_30s.mp3
+7c1c35bdba0b	sec10	4096	default	1	WRONG	Dirk Dehler - Inductance(1).mp3
+7c509466c4eb	orig	1024	budget20	1	EXACT	cbr32_10s.mp3
+7e510a8eaded	orig	1024	budget20	1	STRUCTURAL	cbr320_30s.mp3
+7e53a2c1d530	sec10	4096	default	1	EXACT	Plasticine Cowboy - Unto the Coven (Gemini Sun).mp3
+803a562232ef	sec10	4096	default	1	WRONG	Joseph Sacco - Window To The Sky.mp3.mp3
+8124c8a34387	orig	1024	budget20	1	EXACT	cbr64_30s.mp3
+814cb3b56616	sec10	1024	default	1	EXACT	03 Mozart_ String Quartet #17 In B Flat, K 458, _Hunt_ - 3. Adagio.mp3
+814cb3b56616	sec10	4096	default	1	EXACT	03 Mozart_ String Quartet #17 In B Flat, K 458, _Hunt_ - 3. Adagio.mp3
+81ac61a33f42	sec10	1024	default	1	EXACT	72-13 Le carnaval des animaux _ Le Cygne.mp3
+81ac61a33f42	sec10	4096	default	1	EXACT	72-13 Le carnaval des animaux _ Le Cygne.mp3
+81be932cfab5	sec10	4096	default	1	WRONG	Alex Morgan - Jingles.mp3
+823b4fb9d527	sec10	1024	default	1	STRUCTURAL	1-09 Dire, Dire Docks.mp3
+823b4fb9d527	sec10	4096	default	1	EXACT	1-09 Dire, Dire Docks.mp3
+8256a9e99218	sec10	4096	default	1	EXACT	HoliznaCC0 - Little Green Men.mp3
+82dee093b42d	orig	1024	budget20	1	EXACT	cbr32_30s.mp3
+84d7988e204f	sec10	4096	default	1	WRONG	Audio Surgeon - Nuclear Winter.mp3.mp3
+878f59053beb	sec10	1024	default	1	EXACT	72-16 Concerto pour violoncelle et orchestre n°1 en La Mineur.mp3
+878f59053beb	sec10	4096	default	1	EXACT	72-16 Concerto pour violoncelle et orchestre n°1 en La Mineur.mp3
+890c2b64a976	sec10	4096	default	1	WRONG	Lopkerjo - Execution LIVE TV.mp3
+8ce20736b44c	orig	1024	budget20	1	EXACT	test7_shorter.mp3
+8d7208da9e5c	sec10	1024	default	1	SEARCH_FAIL	02.01. Damned If I Know.mp3
+8d7208da9e5c	sec10	4096	default	1	EXACT	02.01. Damned If I Know.mp3
+8d966751edb5	orig	1024	budget20	1	EXACT	test7_short.mp3
+8e40cdfe9e1f	sec10	1024	default	1	EXACT	08 Mozart_ String Quartet #19 In C, K 465, _Dissonance_ - 4. Allegro Molto.mp3
+8e40cdfe9e1f	sec10	4096	default	1	EXACT	08 Mozart_ String Quartet #19 In C, K 465, _Dissonance_ - 4. Allegro Molto.mp3
+8eaff823bd5b	sec10	1024	default	1	EXACT	06 Darius Milhaud - Scaramouche - Moderato.mp3
+8eaff823bd5b	sec10	4096	default	1	EXACT	06 Darius Milhaud - Scaramouche - Moderato.mp3
+8f0d65ea42a2	sec10	1024	default	1	EXACT	09 _Siguard Jorsalfar_ Suite Op.56 - Preludio. Nella Sala Del Re.mp3
+8f0d65ea42a2	sec10	4096	default	1	EXACT	09 _Siguard Jorsalfar_ Suite Op.56 - Preludio. Nella Sala Del Re.mp3
+8f35d530f41b	sec10	1024	default	1	WRONG	01.04. Amor Levado (Mischievous Love)_sample.mp3
+8f35d530f41b	sec10	4096	default	1	EXACT	01.04. Amor Levado (Mischievous Love)_sample.mp3
+8fa7c01b03a8	sec10	4096	default	1	EXACT	Cheap Time - Penny and Jenny.mp3
+903b743c29f6	sec10	1024	default	1	EXACT	08 _Peer Gynt_ Suite N.2 Op.55 - Canzone Di Solvejg.mp3
+903b743c29f6	sec10	4096	default	1	EXACT	08 _Peer Gynt_ Suite N.2 Op.55 - Canzone Di Solvejg.mp3
+922b69b453a9	sec10	1024	default	1	SEARCH_FAIL	01.02. Tom Thumb.mp3
+922b69b453a9	sec10	4096	default	1	EXACT	01.02. Tom Thumb.mp3
+939d040bbe20	sec10	1024	default	1	EXACT	01 _Peer Gynt_ Suite N.1 Op.46 - Il Mattino.mp3
+939d040bbe20	sec10	4096	default	1	EXACT	01 _Peer Gynt_ Suite N.1 Op.46 - Il Mattino.mp3
+9408d33db115	sec10	4096	default	1	EXACT	1000 Handz - Chainsaw.mp3
+94fc19c6b22e	sec10	4096	default	1	EXACT	Axletree - The New Mown Hay, feat. Will Mason (after Holst).mp3
+96572cedd847	sec10	1024	default	1	EXACT	07 Mozart_ String Quartet #19 In C, K 465, _Dissonance_ - 3. Menuetto.mp3
+96572cedd847	sec10	4096	default	1	EXACT	07 Mozart_ String Quartet #19 In C, K 465, _Dissonance_ - 3. Menuetto.mp3
+96d1c1f5da31	orig	1024	budget20	1	SEARCH_FAIL	cbr192_10s.mp3
+982acf8a0e8b	sec10	1024	default	1	SEARCH_FAIL	02.03. Little Waltz.mp3
+982acf8a0e8b	sec10	4096	default	1	EXACT	02.03. Little Waltz.mp3
+98794fd9ab48	sec10	4096	default	1	EXACT	Sparrow Steeple - I Pod.mp3
+997233feb524	sec10	4096	default	1	WRONG	Bird Names - Masters Of Enjoyment.mp3
+99e50552d951	sec10	4096	default	1	EXACT	The Derek Piotr Fieldwork Archive - Lena Weber – Ich geh' mit meiner Laterne.mp3
+9c7076fa83db	sec10	4096	default	1	WRONG	Orchestraman - Back to the Past.mp3
+9c92dc396114	sec10	1024	default	1	STRUCTURAL	1-35 Staff Roll.mp3
+9c92dc396114	sec10	4096	default	1	EXACT	1-35 Staff Roll.mp3
+9d2903b32f0e	sec10	4096	default	1	EXACT	MARSANARYAS - Midnight in Bollywood.mp3
+9d8d69b707e0	sec10	1024	default	1	EXACT	Jesus, My Lord, My God, My All - John McCormack-restored.mp3
+9d8d69b707e0	sec10	4096	default	1	EXACT	Jesus, My Lord, My God, My All - John McCormack-restored.mp3
+9fe6390b9496	sec10	1024	default	1	EXACT	07 Darius Milhaud - Scaramouche - Brazileira.mp3
+9fe6390b9496	sec10	4096	default	1	EXACT	07 Darius Milhaud - Scaramouche - Brazileira.mp3
+a010ced14d19	sec10	4096	default	1	WRONG	Alex Morgan - Phonk Songs.mp3
+a0b72bf576b5	sec10	4096	default	1	EXACT	AONESCAPE - Dream Higher.mp3.mp3
+a0c737ea0f8e	sec10	4096	default	1	EXACT	LIGHTNING TRAVELER - Fractured Horizon.mp3.mp3
+a0ce23b409d0	sec10	1024	default	1	EXACT	11 Stravinski_ L'uccello di fuoco _ Berceuse.mp3
+a0ce23b409d0	sec10	4096	default	1	EXACT	11 Stravinski_ L'uccello di fuoco _ Berceuse.mp3
+a2f4a2d9efda	orig	1024	budget20	1	EXACT	vbrq5_10s.mp3
+a5151eb351e9	sec10	1024	default	1	EXACT	06 _Peer Gynt_ Suite N.2 Op.55 - Danza Araba.mp3
+a5151eb351e9	sec10	4096	default	1	EXACT	06 _Peer Gynt_ Suite N.2 Op.55 - Danza Araba.mp3
+a69dfb62ff6a	sec10	1024	default	1	SEARCH_FAIL	02.02. Tenaj.mp3
+a69dfb62ff6a	sec10	4096	default	1	EXACT	02.02. Tenaj.mp3
+a8b3bfef904a	sec10	4096	default	1	WRONG	BoDleasons - Clear Visions (Short Version).mp3
+a8ce6783143b	sec10	4096	default	1	EXACT	TimTaj - Big Football.mp3
+a8f9e5609cf8	sec10	4096	default	1	EXACT	Lobo Loco - City of the Dogants (ID 192).mp3
+ad40481d2a40	sec10	4096	default	1	EXACT	Sir Lord Von Raven - Take it or Leave it.mp3
+ad677e31b3c7	sec10	4096	default	1	WRONG	LIGHTNING TRAVELER - Action Drums.mp3.mp3
+adaf4e8e2e30	sec10	1024	default	1	SEARCH_FAIL	01.03. Ein Bahn Strasse (One Way Street).mp3
+adaf4e8e2e30	sec10	4096	default	1	EXACT	01.03. Ein Bahn Strasse (One Way Street).mp3
+af1491d543b3	sec10	4096	default	1	WRONG	AUDIOINSMUSIC - Electronic Nights.mp3.mp3
+afb592c0ea73	sec10	1024	default	1	EXACT	1-20 Toad's Message.mp3
+afb592c0ea73	sec10	4096	default	1	EXACT	1-20 Toad's Message.mp3
+affad13dbfae	sec10	1024	default	1	EXACT	72-02 Le carnaval des animaux _ Poules et coqs.mp3
+affad13dbfae	sec10	4096	default	1	EXACT	72-02 Le carnaval des animaux _ Poules et coqs.mp3
+b028ac11973b	sec10	4096	default	1	WRONG	Dirk Dehler - Universe 1.mp3
+b182c18d1478	sec10	1024	default	1	EXACT	02 Erik Satie - Jack in the box - Entracte.mp3
+b182c18d1478	sec10	4096	default	1	EXACT	02 Erik Satie - Jack in the box - Entracte.mp3
+b19f653aa2d3	sec10	4096	default	1	WRONG	Alex Morgan - Sports Music.mp3
+b2b8c2850728	sec10	1024	default	1	EXACT	01 Erik Satie - Jack in the box - Preludio.mp3
+b2b8c2850728	sec10	4096	default	1	EXACT	01 Erik Satie - Jack in the box - Preludio.mp3
+b41682535a8a	sec10	1024	default	1	EXACT	04 _Peer Gynt_ Suite N.1 Op.46 - Nell'Antro Del Re Della Montagna.mp3
+b41682535a8a	sec10	4096	default	1	EXACT	04 _Peer Gynt_ Suite N.1 Op.46 - Nell'Antro Del Re Della Montagna.mp3
+b465222c5c02	sec10	1024	default	1	STRUCTURAL	1-23 Star Catch Fanfare.mp3
+b465222c5c02	sec10	4096	default	1	EXACT	1-23 Star Catch Fanfare.mp3
+b49269e85678	sec10	1024	default	1	EXACT	10 Stravinski_ L'uccello di fuoco _ Danza Infernale.mp3
+b49269e85678	sec10	4096	default	1	EXACT	10 Stravinski_ L'uccello di fuoco _ Danza Infernale.mp3
+b61b1efbfeb2	orig	1024	budget20	1	WRONG	Queen – Bohemian Rhapsody VBR.mp3
+b749cd97e190	sec10	1024	default	1	EXACT	01 Mozart_ String Quartet #17 In B Flat, K 458, _Hunt_ - 1. Allegro Vivace Assai.mp3
+b749cd97e190	sec10	4096	default	1	EXACT	01 Mozart_ String Quartet #17 In B Flat, K 458, _Hunt_ - 1. Allegro Vivace Assai.mp3
+ba3acbc8da46	sec10	4096	default	1	EXACT	The Dark Bean - overstep60.mp3
+ba3d1a80eecf	sec10	4096	default	1	WRONG	Jon Shuemaker - Loop 27 (117 bpm).mp3.mp3
+bab50cae9152	orig	1024	budget20	1	WRONG	CBR.mp3
+bb2c9d9cda53	orig	1024	budget20	1	EXACT	cbr32_10s.mp3
+bc1198425e1e	sec10	1024	default	1	EXACT	72-17 Le rouet d'Omphale.mp3
+bc1198425e1e	sec10	4096	default	1	EXACT	72-17 Le rouet d'Omphale.mp3
+be6bba906a7d	sec10	1024	default	1	EXACT	1-29 Koopa's Road.mp3
+be6bba906a7d	sec10	4096	default	1	EXACT	1-29 Koopa's Road.mp3
+bf29fd2c283a	sec10	4096	default	1	EXACT	Brentin Davis - Pedal Heavy.mp3
+c0c34fe6fe20	sec10	4096	default	1	WRONG	Waveloom - No Copyright Phonk.mp3
+c114e1c4ac75	sec10	4096	default	1	EXACT	1st Contact - Normopathie.mp3
+c11a000df416	sec10	1024	default	1	EXACT	1-32 Ultimate Koopa.mp3
+c11a000df416	sec10	4096	default	1	EXACT	1-32 Ultimate Koopa.mp3
+c21ebab6aa5b	sec10	1024	default	1	EXACT	72-05 Le carnaval des animaux _ L'Elephant.mp3
+c21ebab6aa5b	sec10	4096	default	1	EXACT	72-05 Le carnaval des animaux _ L'Elephant.mp3
+c264544df2a1	sec10	1024	default	1	WRONG	02.03. A Pele Do Marfin (Skin Of Ivory)_sample.mp3
+c264544df2a1	sec10	4096	default	1	EXACT	02.03. A Pele Do Marfin (Skin Of Ivory)_sample.mp3
+c2a31b2ca180	sec10	4096	default	1	EXACT	Kurt Vile - Freeway.mp3
+c395905cec81	sec10	4096	default	1	EXACT	Softboiled Eggies - October Days.mp3
+c52b0f3b067f	sec10	4096	default	1	WRONG	Ariel Pink's Haunted Graffiti - Want Me.mp3
+c5475e9700fd	sec10	4096	default	1	SEARCH_FAIL	SUB8ION - Wings of Destiny.mp3.mp3
+c6a659e2a278	sec10	1024	default	1	EXACT	05 Stravinski_ Petruska _ Valzer - La Ballerina e il Moro.mp3
+c6a659e2a278	sec10	4096	default	1	EXACT	05 Stravinski_ Petruska _ Valzer - La Ballerina e il Moro.mp3
+c6dd0b6f48c7	sec10	1024	default	1	WRONG	02.04. Porque De Moras? (Why Do You Linger?)_sample.mp3
+c6dd0b6f48c7	sec10	4096	default	1	EXACT	02.04. Porque De Moras? (Why Do You Linger?)_sample.mp3
+c88eccc791a0	sec10	1024	default	1	EXACT	08 Stravinski_ L'uccello di fuoco _ Variazioni.mp3
+c88eccc791a0	sec10	4096	default	1	EXACT	08 Stravinski_ L'uccello di fuoco _ Variazioni.mp3
+c94f7b4eaa2b	orig	1024	budget20	1	EXACT	vbrq5_30s.mp3
+c98d387848a8	sec10	1024	default	1	WRONG	02.02. Samba Un Pouco Azul (Blue Samba)_sample.mp3
+c98d387848a8	sec10	4096	default	1	EXACT	02.02. Samba Un Pouco Azul (Blue Samba)_sample.mp3
+ca4f38328186	orig	1024	budget20	1	SEARCH_FAIL	bohemoan-rhapsody-2k.mp3
+cab2cce067b2	orig	1024	budget20	1	STRUCTURAL	cbr320_30s.mp3
+cb0c24cb4f39	sec10	4096	default	1	WRONG	Ondrosik - Mirror of the week - music bed 1.mp3
+cb378fa0bfc9	sec10	4096	default	1	WRONG	Brentin Davis - The Bag Man.mp3
+cbaf3a721d7d	sec10	1024	default	1	EXACT	11 _Siguard Jorsalfar_ Suite Op.56 - Marcia.mp3
+cbaf3a721d7d	sec10	4096	default	1	EXACT	11 _Siguard Jorsalfar_ Suite Op.56 - Marcia.mp3
+cfa7a8f904e9	sec10	1024	default	1	EXACT	72-14 Le carnaval des animaux _ Finale.mp3
+cfa7a8f904e9	sec10	4096	default	1	EXACT	72-14 Le carnaval des animaux _ Finale.mp3
+d2123c54a0af	sec10	1024	default	1	STRUCTURAL	1-05 Super Mario 64 Main Theme.mp3
+d2123c54a0af	sec10	4096	default	1	EXACT	1-05 Super Mario 64 Main Theme.mp3
+d2ba80d5ae0e	sec10	4096	default	1	EXACT	1st Contact - Notstand.mp3
+d35e29cb2c36	sec10	4096	default	1	WRONG	Orchestraman - New beginning.mp3
+d45596ec4beb	sec10	1024	default	1	EXACT	05 Mozart_ String Quartet #19 In C, K 465, _Dissonance_ - 1. Adagio, Allegro.mp3
+d45596ec4beb	sec10	4096	default	1	EXACT	05 Mozart_ String Quartet #19 In C, K 465, _Dissonance_ - 1. Adagio, Allegro.mp3
+d4a26d13c785	sec10	1024	default	1	STRUCTURAL	1-25 Course Clear.mp3
+d4a26d13c785	sec10	4096	default	1	EXACT	1-25 Course Clear.mp3
+d4b87fed1d4a	sec10	1024	default	1	SEARCH_FAIL	01.01. Nao Pode Ser (It Can Never Be)_sample.mp3
+d4b87fed1d4a	sec10	4096	default	1	EXACT	01.01. Nao Pode Ser (It Can Never Be)_sample.mp3
+db4fa8056e98	sec10	1024	default	1	EXACT	72-01 Le carnaval des animaux _ Introduction et marche royale du lion.mp3
+db4fa8056e98	sec10	4096	default	1	EXACT	72-01 Le carnaval des animaux _ Introduction et marche royale du lion.mp3
+dba56a4cc644	sec10	4096	default	1	WRONG	Alex Morgan - Workout Songs.mp3
+dc2d365a40f3	sec10	4096	default	1	EXACT	Cheap Time - Wild Life.mp3
+dccd435f346d	sec10	4096	default	1	WRONG	Audioflame - Short corporate background(1).mp3
+dcf5c60cefb1	sec10	4096	default	1	WRONG	Jon Shuemaker - LOOP 1 (123 bpm).mp3.mp3
+dd59fc075108	sec10	4096	default	1	EXACT	Tommaso Motteran - Happy Piano Jingle - Positive, Dreamy & Chill Music.mp3
+de265038f2c2	sec10	1024	default	1	STRUCTURAL	1-08 Looping Steps.mp3
+de265038f2c2	sec10	4096	default	1	EXACT	1-08 Looping Steps.mp3
+def3d0436caa	sec10	4096	default	1	EXACT	MARSANARYAS - Autumn.mp3
+df364405a9f8	sec10	1024	default	1	EXACT	02 Mozart_ String Quartet #17 In B Flat, K 458, _Hunt_ - 2. Menuetto.mp3
+df364405a9f8	sec10	4096	default	1	EXACT	02 Mozart_ String Quartet #17 In B Flat, K 458, _Hunt_ - 2. Menuetto.mp3
+e008c0446b27	sec10	1024	default	1	EXACT	12 Stravinski_ L'uccello di fuoco _ Stravinski_ Finale.mp3
+e008c0446b27	sec10	4096	default	1	EXACT	12 Stravinski_ L'uccello di fuoco _ Stravinski_ Finale.mp3
+e21d771fe0b2	sec10	4096	default	1	WRONG	SUB8ION - Winds of Courage.mp3.mp3
+e2316146749e	sec10	1024	default	1	EXACT	03 Stravinski_ Petruska _ Petruska.mp3
+e2316146749e	sec10	4096	default	1	EXACT	03 Stravinski_ Petruska _ Petruska.mp3
+e41d9b8c72c9	sec10	4096	default	1	SEARCH_FAIL	AONESCAPE - Pressure.mp3.mp3
+e4f97be31928	sec10	1024	default	1	STRUCTURAL	1-16 Powerful Mario.mp3
+e4f97be31928	sec10	4096	default	1	EXACT	1-16 Powerful Mario.mp3
+e6012714dc29	sec10	4096	default	1	WRONG	sdacfn - 4.35.mp3.mp3
+e6934e444b73	sec10	1024	default	1	EXACT	06 Mozart_ String Quartet #19 In C, K 465, _Dissonance_ - 2. Andante Cantabile.mp3
+e6934e444b73	sec10	4096	default	1	EXACT	06 Mozart_ String Quartet #19 In C, K 465, _Dissonance_ - 2. Andante Cantabile.mp3
+e6ef80be9a21	sec10	4096	default	1	WRONG	1000 Handz - Rock On Elm Street.mp3
+e77a853e243c	orig	1024	budget20	1	EXACT	cbr64_30s.mp3
+e7c70d87a262	sec10	4096	default	1	WRONG	Audioflame - Acoustic Inspiration.mp3
+e97a736a6369	sec10	1024	default	1	EXACT	1-10 Lethal Lava Land.mp3
+e97a736a6369	sec10	4096	default	1	EXACT	1-10 Lethal Lava Land.mp3
+eb2a2dd3d5c6	sec10	1024	default	1	SEARCH_FAIL	_01_Jesus, My Lord, My God, My All - John McCormack.mp3
+eb2a2dd3d5c6	sec10	4096	default	1	EXACT	_01_Jesus, My Lord, My God, My All - John McCormack.mp3
+ec2e4992d451	orig	1024	budget20	1	EXACT	vbrq5_10s.mp3
+ec8004e665c5	sec10	1024	default	1	STRUCTURAL	1-22 Race Fanfare.mp3
+ec8004e665c5	sec10	4096	default	1	EXACT	1-22 Race Fanfare.mp3
+ed0c1898462a	sec10	1024	default	1	EXACT	04 Darius Milhaud - La creazione del mondo.mp3
+ed0c1898462a	sec10	4096	default	1	EXACT	04 Darius Milhaud - La creazione del mondo.mp3
+ef81cf71eba4	orig	1024	budget20	1	EXACT	cbr64_10s.mp3
+ef997a6b31c2	sec10	4096	default	1	EXACT	Pumpupthemind - Quantum Drive.mp3
+efda6c92ee4c	sec10	1024	default	1	EXACT	01 Stravinski_ Petruska _ Festa Popolare della Settimana grassa.mp3
+efda6c92ee4c	sec10	4096	default	1	EXACT	01 Stravinski_ Petruska _ Festa Popolare della Settimana grassa.mp3
+f02580506431	sec10	1024	default	1	EXACT	72-09 Le carnaval des animaux _ Le Coucou au fond des bois.mp3
+f02580506431	sec10	4096	default	1	EXACT	72-09 Le carnaval des animaux _ Le Coucou au fond des bois.mp3
+f0dc7220c403	sec10	4096	default	1	EXACT	The Baskervilles - Midnight at the Underground.mp3
+f21150fbdfcb	sec10	4096	default	1	WRONG	Joseph Sacco - Rink Rat.mp3
+f3a646b1f5f9	sec10	4096	default	1	WRONG	Alex Morgan - Indian Classical Music(1).mp3
+f40739251870	sec10	1024	default	1	STRUCTURAL	72-10 Le carnaval des animaux _ Volière.mp3
+f40739251870	sec10	4096	default	1	EXACT	72-10 Le carnaval des animaux _ Volière.mp3
+f5987f10d185	sec10	1024	default	1	EXACT	09 Stravinski_ L'uccello di fuoco _ Danza delle Principesse.mp3
+f5987f10d185	sec10	4096	default	1	EXACT	09 Stravinski_ L'uccello di fuoco _ Danza delle Principesse.mp3
+f668484c6162	orig	1024	budget20	1	EXACT	ci_sanity.mp3
+f875420ffde8	sec10	1024	default	1	EXACT	1-03 Peach's Message.mp3
+f875420ffde8	sec10	4096	default	1	EXACT	1-03 Peach's Message.mp3
+fa39dac9c17e	sec10	4096	default	1	WRONG	The Derek Piotr Fieldwork Archive - Frida Haltli – Villemann og Magnhild.mp3
+fa7e5a0182ef	sec10	1024	default	1	EXACT	04 Mozart_ String Quartet #17 In B Flat, K 458, _Hunt_ - 4. Allegro Assai.mp3
+fa7e5a0182ef	sec10	4096	default	1	EXACT	04 Mozart_ String Quartet #17 In B Flat, K 458, _Hunt_ - 4. Allegro Assai.mp3
+fb4504432375	sec10	4096	default	1	WRONG	Audio Surgeon - Neon Kawaii.mp3.mp3
+fc8367271d3e	sec10	1024	default	1	STRUCTURAL	1-31 Koopa Clear.mp3
+fc8367271d3e	sec10	4096	default	1	EXACT	1-31 Koopa Clear.mp3
+fdb68c175903	sec10	4096	default	1	WRONG	The Baskervilles - A Little More Time.mp3
+fe7ebd230a89	orig	1024	budget20	1	SEARCH_FAIL	cbr192_10s.mp3
+ff818707b8fd	sec10	4096	default	1	WRONG	NoKings XXX - Ballroom Billionaire Bitches.mp3
