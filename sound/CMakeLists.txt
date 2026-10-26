@@ -22,6 +22,8 @@ add_executable(rp
         pcm_decoder_impl.cpp
         edge_lock.cpp
         edge_lock.hpp
+        slot_fill.cpp
+        slot_fill.hpp
         main.cpp)
 
 add_executable(evaluate_order

@@ -160,6 +160,81 @@ So:
 - **Gap edges are blind for flux.** About 2% of edges at 320 kbps / 44.1 kHz, plus the windows
   within `g_pcmLeft` chunks after each slot (~10% of junctions at 5 left chunks).
 
+## Stage A results (2026-10-26)
+
+### A third kind of chunk: split tails
+
+Every split-header slot is really **two** headerless chunks in a row: a **split tail** (the end
+of frame `F` and the first `t` = 1-3 bytes of the next header `G`), then the true interior chunk
+inside `G`. The split tail's predecessor demands `rem = C - t`, which no ordinary chunk can
+satisfy (frame starts are scanned only up to `C - 4`), so the split tail is fully determined by
+its predecessor too.
+
+Split tails become **valid nodes** (`promoteSplitTails`, `adjacency.cpp`): frame start `C - t`,
+Case-2 tail of `t` bytes. The existing Case-2 gap logic then makes them demanders, and only
+interior chunks go to the pool. The alternative - split tails in the pool, two-chunk slots -
+was dropped: every such slot would need a split tail and an interior chunk chosen together,
+a much harder assignment.
+
+Classification rule (content only, same before and after the shuffle):
+
+- `E_t > 0` (some chunk's tail leaves exactly `C - t` bytes);
+- the last `t` bytes complete to a profile-matching header with a real header's rest;
+- the first bytes do **not** complete a header for any `t'` in {1, 2} with `E_t' > 0` - that is
+  what the interior chunk after a split tail looks like. `t' = 3` can't be tested: the chunk
+  would supply only header byte 3, which is almost always valid.
+
+Measured (musiclib, 1 KB, 101 tracks, 10 854 headerless chunks): 4 false positives, 16 false
+negatives; split-tail count equals `E_t` on 87 files. Split tails are 3868 of the slots, almost all
+`t = 1`; with the bitrate fixed (CBR) the head test is ~25x more selective.
+
+### Two fixes this needed elsewhere
+
+- **CBR detection at 1 KB.** `detectCBR` read 6 chunks, ~5.8 frames of 1045 B, below its 8-frame
+  minimum, so the bitrate filter was off on exactly these files. It now reads enough chunks for
+  10 maximum-size frames (15 chunks at 1 KB, 8 at 2 KB, 6 from 4 KB up as before).
+- **False syncs win ties in `computeChunkMeta`.** At 320 kbps / 1 KB a chunk holds at most one
+  real frame start; a false sync before it tied on (tail quality, frame count) and won as the
+  earlier offset, giving the chunk a wrong tail. Third key, ties only: side info that is impossible
+  for a real frame (`sideInfoPlausible`: big_values > 288, window switching with block_type 0,
+  tables 4 / 14, part2_3_length over capacity) loses.
+
+### True-order checks at 1 KB (101 tracks with headerless chunks)
+
+| | both checks pass | count check OK |
+|---|---|---|
+| Case 1 only (first try) | 3 / 63 | 13 / 63 |
+| + split tails, CBR detection | 40 / 101 | 77 / 101 |
+| + side-info tie-breaker | **59 / 101** | 77 / 101 |
+
+Remaining 42: 15 have an ID3v1 tag after the last frame (break at the final junction - not this
+problem; the `strip` recipe avoids it, a fix would let the final chunk end in tag bytes);
+24 fail the count check (FMA CBR off by 1-2 from the residual split-tail errors; Super Mario 64
+VBR tracks off by more - they mix `t` values including `t = 3`); 3 other.
+
+## Stage B results (2026-10-26)
+
+`slot_fill.{hpp,cpp}`: per slot, the left side is the path tail up to `g_pcmLeft` chunks ending
+at the demander (never across another slot); the right side is the candidate, `b` and the chunk
+after `b` when known. Cost `log1p(flux)`; a window whose frames fail after the junction costs 30
+(wrong chunks mostly do); silent windows get the median. Hard constraints: split-tail header
+completion must land on a frame start of `b`; CRC must match. Exact rectangular min-cost
+assignment (Hungarian), slots on `RP_THREADS` threads. `RP_SLOT_FILL=0` keeps pool order.
+
+Oracle (`RP_SLOT_ORACLE=1`: true order of the chunks with a header, search skipped), whole tracks,
+1 KB:
+
+| track | slots right | output |
+|---|---|---|
+| Chainsaw (CBR 320, split-tail slots) | 80 / 80 | exact (was 32.5% in the scratch probe) |
+| Ov Moi Omm (CRC) | 245 / 245 | exact - the CRC leaves one candidate per slot |
+| Irama Gema - Grasp (CRC, whole-header slots) | 240 / 241 (one false demander, slot left empty) | exact |
+| Circus Marcus | 204 / 209 | not exact |
+| Super Mario 64 Title Theme (VBR, count mismatch 57 / 65) | 52 / 57 | not exact |
+
+On Chainsaw 5485 of 6400 (slot, chunk) windows fail to decode cleanly - nearly all wrong
+candidates - which is what makes it work where flux alone (32.5%) didn't.
+
 ## Stages
 
 - **A.** Detection (Case 1 + Case 2), reduction, gap edges, reservoir set to full across gap

@@ -258,6 +258,33 @@ SideInfoResult decodeSplitFrameSideInfo(const ChunkMeta& a, const vector<uint8_t
 
 
 /**
+ * Plausibility of the Layer III side info of the frame whose header is at `off`: 0 when it is
+ * impossible for a real frame (big_values > 288, window switching with block_type 0, the unused
+ * Huffman tables 4 / 14, more part2_3_length bits than the frame plus its reservoir can hold),
+ * 1 when it passes, -1 when it can't be told (not Layer III, or the block runs past the chunk).
+ * A false sync carries random side info and fails ~80% of the time; a real frame never does.
+ */
+static int sideInfoPlausible(const vector<uint8_t>& chunk, const int off, const Header& h) {
+    if (!h.isLayerIII()) return -1;
+    const int sideStart = off + 4 + h.crcBytes();
+    if (sideStart >= static_cast<int>(chunk.size())) return -1;
+    const SideInfoBitSource src{&chunk[sideStart], static_cast<int>(chunk.size()) - sideStart};
+    const FrameSideInfo f = parseFrameSideInfo(src, h.getVersionID() == 0b11, h.isMono());
+    if (!f.valid) return -1;
+    for (int g = 0; g < f.numGranules; ++g)
+        for (int c = 0; c < f.numChannels; ++c) {
+            const GranuleSideInfo& s = f.gr[g][c];
+            if (s.bigValues > 288) return 0;
+            if (s.windowSwitching && s.blockType == 0) return 0;
+            for (int k = 0; k < (s.windowSwitching ? 2 : 3); ++k)
+                if (s.tableSelect[k] == 4 || s.tableSelect[k] == 14) return 0;
+        }
+    const long payload = static_cast<long>(h.getFrameLength()) - 4 - h.crcBytes()
+                       - sideInfoSize(h.getVersionID(), h.isMono());
+    return f.part23BitsTotal > 8L * (f.mainDataBegin + payload) ? 0 : 1;
+}
+
+/**
  * Try parsing a run of frames starting at `startOff` within `chunk`.
  * Returns number of consecutive consistent frames found (all matching `expected`).
  *
@@ -368,6 +395,7 @@ ChunkMeta computeChunkMeta(const int chunkIndex,
 
     int bestCount    = 0;
     int bestQuality  = -1;   // -1 so the first candidate found always wins
+    bool bestPlausible = true;
     int bestOff      = -1;
     vector<FrameSlice> bestFrames;
     int bestTail     = 0;
@@ -398,7 +426,14 @@ ChunkMeta computeChunkMeta(const int chunkIndex,
         // headOffset"), but the true boundary almost always has a cleanly-readable tail.
         // Preferring quality over count fixes that class of bug even when it means
         // accepting fewer frames.
-        if (quality > bestQuality || (quality == bestQuality && count > bestCount)) {
+        // Third key, ties only: a candidate whose side info is impossible loses (it used to be
+        // "earlier offset wins"). At 320 kbps / 1 KB a chunk holds at most one real frame
+        // start, so any false sync before it tied and won, giving the chunk a wrong tail
+        // (1-7 true-order breaks per musiclib track; PLAN_headerless_chunks.md).
+        const bool plausible = sideInfoPlausible(chunk, off, h) != 0;
+        if (quality > bestQuality || (quality == bestQuality && count > bestCount) ||
+            (quality == bestQuality && count == bestCount && plausible && !bestPlausible)) {
+            bestPlausible = plausible;
             bestCount   = count;
             bestQuality = quality;
             bestOff     = off;

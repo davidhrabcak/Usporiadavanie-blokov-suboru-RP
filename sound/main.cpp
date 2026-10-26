@@ -24,6 +24,7 @@
 #include "pcm_junction.hpp"
 #include "edge_lock.hpp"
 #include "run_report.hpp"
+#include "slot_fill.hpp"
 
 extern char** environ;
 
@@ -118,7 +119,13 @@ static bool advanceReservoirChunk(int& level,
     const int maxBits = maxReservoir * 8;
     bool creditedExactly = false;
 
-    if (prevMeta != nullptr && prevMeta->tailPartialLen > 0) {
+    if (prevMeta != nullptr && prevMeta->gapAfter) {
+        // A headerless chunk (not placed yet) sits between: the straddling frame's side info
+        // is in it. A full reservoir is sound - the check is monotone in the entry level
+        // (PLAN_headerless_chunks.md).
+        level = maxBits;
+        creditedExactly = true;
+    } else if (prevMeta != nullptr && prevMeta->tailPartialLen > 0) {
         const SideInfoResult side = decodeSplitFrameSideInfo(*prevMeta, metaBytes);
         if (side.valid) {
             FrameSlice splitFrame{-1, prevMeta->tailPartialLen, 0, side.mainDataBegin, side.part23Bits};
@@ -298,8 +305,10 @@ static const Mp3MainData::GranuleSpectrum* memoSpec(bool head, const vector<Chun
     auto it = memo.find(key);
     if (it == memo.end()) {
         static const vector<uint8_t> empty;
-        const vector<uint8_t>& pv = (prev >= 0) ? chunks[prev] : empty;
-        const ChunkMeta* pm = (prev >= 0) ? &metas[prev] : nullptr;
+        // across a slot (headerless chunk not placed yet) the predecessor's bytes don't continue
+        const bool usePrev = prev >= 0 && !metas[prev].gapAfter;
+        const vector<uint8_t>& pv = usePrev ? chunks[prev] : empty;
+        const ChunkMeta* pm = usePrev ? &metas[prev] : nullptr;
         const int off = head ? metas[chunk].frames.front().offset : metas[chunk].frames.back().offset;
         const Mp3MainData::FrameSpectra fsp =
             Mp3MainData::decodeChunkFrame(pm, pv, chunks[chunk], metas[chunk], off, g_sampleRate);
@@ -375,6 +384,11 @@ static std::unordered_map<PcmKey, float, PcmKeyHash> g_pcmMemo;
 // -1 when the window can't be measured (too little audio, silent pre side).
 static double pcmRaw(const vector<ChunkMeta>& metas, const int* left, int nLeft, int cand) {
     while (nLeft > 1 && !metas[left[0]].valid) { ++left; --nLeft; }
+    // A window spanning a slot (a headerless chunk not placed yet) can't be decoded: neutral
+    // once calibrated, never "unmeasured" - the repair would otherwise bunch slots together
+    // to share such windows (PLAN_headerless_chunks.md). Not memoised: neutral is set later.
+    for (int k = 0; k < nLeft; ++k)
+        if (metas[left[k]].gapAfter) return g_pcmNeutral > 0 ? g_pcmNeutral : -1.0;
     PcmKey key;
     key.id.fill(-1);
     for (int k = 0; k < nLeft; ++k) key.id[k] = left[k];
@@ -1208,8 +1222,11 @@ int main(int argc, char* argv[]) {
     {
         StreamProfile tmp{};
         if (deriveProfile(chunks[0], tmp)) {
+            // Enough bytes for detectCBR's 8 frames even at the largest frame size: 6 chunks at
+            // 1 KB held only ~5.8 frames of 320 kbps / 44.1 kHz, so CBR was never detected there.
+            const size_t nHead = std::max<size_t>(6, static_cast<size_t>((10L * MAX_FRAME_LENGTH + chunkSize - 1) / chunkSize));
             vector<uint8_t> head;
-            for (size_t i = 0; i < chunks.size() && i < 6; ++i)
+            for (size_t i = 0; i < chunks.size() && i < nHead; ++i)
                 head.insert(head.end(), chunks[i].begin(), chunks[i].end());
             cbr = detectCBR(head, tmp, cbrKbps);
         }
@@ -1222,6 +1239,13 @@ int main(int argc, char* argv[]) {
     // --- Pre-shuffle sanity check ---
     int preShuffleBreaks = -1; // -1 = not computed; >=0 = broken consecutive-pair count on true order
     int preShuffleResvBreaks = -1; // same, for the reservoir model on the true order
+    // Frames longer than the chunk (PLAN_headerless_chunks.md): the headerless chunks ("pool")
+    // are taken out before the shuffle. The search orders the rest; a demander's edge a => b
+    // stands for a, slot, b, and the pool fills the slots at output. RP_GAP=0 disables.
+    vector<vector<uint8_t>> pool;   // headerless chunks (shuffled below like the rest)
+    vector<int> poolFull;           // their index in the full source stream
+    vector<int> keptFull;           // full-stream index of each remaining chunk (true order); empty = no pool
+    int splitTailsPre = 0;          // split-tail chunks promoted on the true order (promoteSplitTails)
     {
         StreamProfile prof0{};
         if (deriveProfile(chunks[0], prof0)) {
@@ -1231,10 +1255,54 @@ int main(int argc, char* argv[]) {
             for (int i = 0; i < static_cast<int>(chunks.size()); ++i)
                 origMetas.push_back(computeChunkMeta(i, chunks[i], prof0, chunks[i].size() < chunks[0].size()));
 
+            const char* gapEnv = std::getenv("RP_GAP");
+            if (!(gapEnv && gapEnv[0] == '0') && chunks[0].size() >= 4) {
+                const SplitTails st = promoteSplitTails(origMetas, chunks, chunkSize, prof0, chunks[0].data());
+                splitTailsPre = st.promoted[1] + st.promoted[2] + st.promoted[3];
+                if (splitTailsPre > 0 || st.expected[1] + st.expected[2] + st.expected[3] > 0) {
+                    cout << "Split-tail chunks (frame end + 1-3 header bytes): promoted / expected by t:";
+                    for (int t = 1; t <= 3; ++t) cout << " " << t << ":" << st.promoted[t] << "/" << st.expected[t];
+                    cout << "\n";
+                    RunReport::set("split_tails", splitTailsPre);
+                    RunReport::set("split_tails_expected", st.expected[1] + st.expected[2] + st.expected[3]);
+                }
+                vector<int> keep;
+                for (int i = 0; i < static_cast<int>(chunks.size()); ++i)
+                    (i > 0 && isHeaderless(origMetas[i], chunks[i].size(), chunkSize) ? poolFull : keep).push_back(i);
+                if (!poolFull.empty()) {
+                    vector<vector<uint8_t>> kept;
+                    vector<ChunkMeta> keptMetas;
+                    for (int i : poolFull) pool.push_back(chunks[i]);
+                    for (int i : keep) {
+                        kept.push_back(std::move(chunks[i]));
+                        keptMetas.push_back(origMetas[i]);
+                        keptMetas.back().chunkIndex = static_cast<int>(keptMetas.size()) - 1;
+                    }
+                    chunks = std::move(kept);
+                    origMetas = std::move(keptMetas);
+                    keptFull = std::move(keep);
+                }
+            }
+
             auto origAdj = buildAdjacency(origMetas);
+            GapSlots gaps0;
+            if (!pool.empty()) {
+                gaps0 = findGapSlots(origMetas, origAdj, pool, chunkSize);
+                for (size_t i = 0; i < origMetas.size(); ++i) origMetas[i].gapAfter = !gaps0.offsets[i].empty();
+                cout << "Headerless chunks (frames > chunk): " << pool.size() << " taken out; demanders "
+                     << gaps0.demanders() << " (" << gaps0.case1 << " whole header, " << gaps0.case2
+                     << " split header" << (gaps0.ambiguous ? ", " + std::to_string(gaps0.ambiguous) + " ambiguous left out" : string())
+                     << ") - count check " << ((int)pool.size() == gaps0.demanders() ? "OK" : "MISMATCH") << "\n";
+                RunReport::set("pool", pool.size());
+                RunReport::set("demanders", gaps0.demanders());
+                RunReport::set("demanders_ambiguous", gaps0.ambiguous);
+                RunReport::set("count_check", (int)pool.size() == gaps0.demanders());
+            }
             int broken = 0;
             for (int i = 0; i + 1 < static_cast<int>(origMetas.size()); ++i) {
-                if (!canFollow(origMetas[i], origMetas[i+1])) {
+                const bool follows = origMetas[i].gapAfter ? canFollowGap(origMetas[i + 1], gaps0.offsets[i])
+                                                           : canFollow(origMetas[i], origMetas[i + 1]);
+                if (!follows) {
                     cout << "  BREAK at " << i << "->" << i+1
                          << ": tailOvfl=" << origMetas[i].tailOverflow
                          << " tailPartialLen=" << origMetas[i].tailPartialLen
@@ -1300,6 +1368,8 @@ int main(int argc, char* argv[]) {
     g_origIndexOf = &origIndexOf;
     shuffle(chunks.begin() + 1, chunks.end(), default_random_engine(seed));
     shuffle(origIndexOf.begin() + 1, origIndexOf.end(), default_random_engine(seed));
+    shuffle(pool.begin(), pool.end(), default_random_engine(seed + 1));
+    shuffle(poolFull.begin(), poolFull.end(), default_random_engine(seed + 1));
 
     cout << "Total chunks: " << chunks.size() << "\n";
     RunReport::set("chunk_size", static_cast<long long>(chunkSize));
@@ -1406,7 +1476,19 @@ int main(int argc, char* argv[]) {
     }
 
     // Build adjacency graph
+    if (splitTailsPre > 0) {
+        const SplitTails st = promoteSplitTails(metas, chunks, chunkSize, profile, chunks[0].data());
+        const int n = st.promoted[1] + st.promoted[2] + st.promoted[3];
+        if (n != splitTailsPre)
+            cout << "WARNING: split tails promoted after the shuffle " << n << " != " << splitTailsPre << " before\n";
+    }
     auto adj    = buildAdjacency(metas);
+    GapSlots gaps;   // demanders and their gap edges a => b (PLAN_headerless_chunks.md)
+    if (!pool.empty()) {
+        gaps = findGapSlots(metas, adj, pool, chunkSize);
+        for (size_t i = 0; i < metas.size(); ++i) metas[i].gapAfter = !gaps.offsets[i].empty();
+        addGapEdges(adj, metas, gaps);
+    }
 
     // Reservoir arc pre-filter: drop arcs a->b that fail the bit-reservoir check even when `a`
     // is entered with a FULL reservoir. The check is monotone in the entry level (the only
@@ -1669,6 +1751,17 @@ int main(int argc, char* argv[]) {
             bestPartialOf = supernodes.size();
         }
     };
+    // RP_SLOT_ORACLE=1 (diagnostic, PLAN_headerless_chunks.md stage B): skip the search and take
+    // the true order of the chunks with a header, so the slot assignment is measured alone.
+    bool slotOracle = false;
+    if (const char* o = std::getenv("RP_SLOT_ORACLE")) {
+        if (o[0] == '1') {
+            matchSeq.assign(chunks.size(), 0);
+            for (size_t ci = 0; ci < chunks.size(); ++ci) matchSeq[origIndexOf[ci]] = static_cast<int>(ci);
+            found = foundByMatch = slotOracle = true;
+            cout << "Slot oracle: true order of the chunks with a header (search skipped)\n";
+        }
+    }
     for (size_t lockAttempt = 0; lockAttempt < lockTaus.size() && !found; ++lockAttempt) {
         foundAttempt = lockAttempt;
         RunReport::set("lock_attempts", static_cast<long long>(lockAttempt + 1));
@@ -1994,14 +2087,75 @@ int main(int argc, char* argv[]) {
 
         vector<int> reconOrig; // original index of each chunk, in reconstructed order
         reconOrig.reserve(chunks.size());
+        vector<int> reconFull; // full-stream index of each written chunk, slots included
         size_t total = 0;
-        for (int ci : seq) {
-            out.write(reinterpret_cast<const char*>(chunks[ci].data()),
-                      static_cast<long>(chunks[ci].size()));
-            total += chunks[ci].size();
+        size_t nextPool = 0;
+        int slots = 0, slotsTrue = 0;
+        // Stage B (PLAN_headerless_chunks.md): assign the pool to the slots after the demanders
+        // by PCM flux (SlotFill). RP_SLOT_FILL=0: pool order (stage A behaviour).
+        vector<int> slotPool;   // per slot, in order: pool index, -1 none
+        vector<char> poolUsed(pool.size(), 0);
+        const char* sf = std::getenv("RP_SLOT_FILL");
+        if (!pool.empty() && !(sf && sf[0] == '0')) {
+            vector<SlotFill::Slot> sl;
+            for (size_t k = 0; k + 1 < seq.size(); ++k) {
+                if (!metas[seq[k]].gapAfter) continue;
+                SlotFill::Slot s;
+                size_t from = k;   // left side: back to g_pcmLeft chunks, not across another slot
+                while (from > 0 && k - from + 1 < static_cast<size_t>(g_pcmLeft) && !metas[seq[from - 1]].gapAfter) --from;
+                s.left.assign(seq.begin() + from, seq.begin() + k + 1);
+                s.b = seq[k + 1];
+                if (k + 2 < seq.size() && !metas[s.b].gapAfter) s.after = seq[k + 2];
+                sl.push_back(s);
+            }
+            SlotFill::Stats st;
+            slotPool = SlotFill::assign(chunks, metas, sl, pool, chunkSize, lockThreads, &st);
+            cout << "Slot assignment: " << sl.size() << " slots x " << pool.size() << " headerless chunks, "
+                 << st.decodes << " decodes, " << st.excluded << " pairs excluded by header/CRC, "
+                 << st.unmeasured << " unmeasured, " << st.forced << " forced, " << fixed << setprecision(2)
+                 << st.seconds << "s\n";
+            RunReport::set("slot_decodes", static_cast<long long>(st.decodes));
+            RunReport::set("slots_forced", st.forced);
+        }
+        size_t slotIdx = 0;
+        auto writeChunk = [&](const vector<uint8_t>& c) {
+            out.write(reinterpret_cast<const char*>(c.data()), static_cast<long>(c.size()));
+            total += c.size();
+        };
+        for (size_t k = 0; k < seq.size(); ++k) {
+            const int ci = seq[k];
+            writeChunk(chunks[ci]);
             reconOrig.push_back(origIndexOf[ci]);
+            reconFull.push_back(keptFull.empty() ? origIndexOf[ci] : keptFull[origIndexOf[ci]]);
+            // A demander is followed by a slot. Stage A fills slots in pool order; the
+            // assignment by flux is stage B (PLAN_headerless_chunks.md).
+            if (metas[ci].gapAfter && k + 1 < seq.size()) {
+                ++slots;
+                int pi = -1;
+                if (!slotPool.empty()) pi = slotIdx < slotPool.size() ? slotPool[slotIdx] : -1;
+                else {   // pool order
+                    while (nextPool < pool.size() && poolUsed[nextPool]) ++nextPool;
+                    if (nextPool < pool.size()) pi = static_cast<int>(nextPool);
+                }
+                ++slotIdx;
+                if (pi >= 0) {
+                    poolUsed[pi] = 1;
+                    writeChunk(pool[pi]);
+                    reconFull.push_back(poolFull[pi]);
+                    if (poolFull[pi] == reconFull[reconFull.size() - 2] + 1) ++slotsTrue;
+                }
+            }
+        }
+        for (size_t pi = 0; pi < pool.size(); ++pi) {   // pool chunks no slot took: keep the bytes
+            if (poolUsed[pi]) continue;
+            writeChunk(pool[pi]);
+            reconFull.push_back(poolFull[pi]);
         }
         cout << "Written " << total << " bytes to output.mp3\n";
+        if (!pool.empty())
+            cout << "Slots: " << slots << " for " << pool.size() << " headerless chunks, " << slotsTrue
+                 << " filled with the true chunk" << (slotPool.empty() ? " (pool order)" : "") << "\n";
+        if (!pool.empty()) { RunReport::set("slots", slots); RunReport::set("slots_true", slotsTrue); }
         // Provenance label (a line of its own - regression.sh/parse.py grep the lines around it).
         // A global-matching ordering is the min-cost assignment patched + repaired: reservoir-
         // valid, but nothing proves it is the original order, and on some files a wrong order is
@@ -2010,7 +2164,8 @@ int main(int argc, char* argv[]) {
         // "+ N repair move(s)": the order was changed by flux-driven repair moves after it was
         // found. Neither label means "verified": in the 2026-10-18 benchmark 5 wrong outputs
         // came from the DFS (2 of them repaired, 3 wrong as found) and 11 from the matching.
-        cout << "Result provenance: " << (foundByMatch ? "best-effort (global matching + repair)"
+        cout << "Result provenance: " << (slotOracle ? "slot oracle (true order of the chunks with a header)"
+                                          : foundByMatch ? "best-effort (global matching + repair)"
                                           : foundByHint ? "DFS search (matching-ranked)" : "DFS search");
         if (resultRepairMoves > 0) cout << " + " << resultRepairMoves << " repair move(s)";
         if (!std::isnan(resultGap)) {
@@ -2025,8 +2180,18 @@ int main(int argc, char* argv[]) {
             if (reconOrig[i] == static_cast<int>(i)) ++exactPos;
         int trueJ = 0; // chunk-level junctions whose successor is the true next chunk
         for (size_t i = 1; i < reconOrig.size(); ++i) if (reconOrig[i] == reconOrig[i - 1] + 1) ++trueJ;
+        // With headerless chunks taken out, the lines below score the order of the chunks the
+        // search placed; the output is only exact when the slots got the true chunks as well.
         const bool exactMatch = (reconOrig.size() == chunks.size()) &&
-                                std::is_sorted(reconOrig.begin(), reconOrig.end());
+                                std::is_sorted(reconOrig.begin(), reconOrig.end()) &&
+                                (pool.empty() || (reconFull.size() == chunks.size() + pool.size() &&
+                                                  std::is_sorted(reconFull.begin(), reconFull.end())));
+        if (!pool.empty()) {
+            int fullPos = 0;
+            for (size_t i = 0; i < reconFull.size(); ++i) if (reconFull[i] == static_cast<int>(i)) ++fullPos;
+            cout << "Full stream (slots included): " << fullPos << "/" << reconFull.size()
+                 << " chunks in original position\n";
+        }
         cout << "Reconstruction vs source: " << exactPos << "/" << reconOrig.size()
              << " chunks in original position ("
              << fixed << setprecision(1) << (100.0 * exactPos / std::max<size_t>(1, reconOrig.size())) << "%)"
@@ -2037,7 +2202,7 @@ int main(int argc, char* argv[]) {
         RunReport::set("exact_pct", 100.0 * exactPos / std::max<size_t>(1, reconOrig.size()));
         RunReport::set("true_junctions", trueJ);
         RunReport::set("junctions", reconOrig.empty() ? size_t(0) : reconOrig.size() - 1);
-        RunReport::set("provenance", foundByMatch ? "matching" : foundByHint ? "dfs_matching_ranked" : "dfs");
+        RunReport::set("provenance", slotOracle ? "slot_oracle" : foundByMatch ? "matching" : foundByHint ? "dfs_matching_ranked" : "dfs");
         RunReport::set("repair_moves", resultRepairMoves);
         cout << "Reconstruction junctions: " << trueJ << "/" << (reconOrig.empty() ? 0 : reconOrig.size() - 1)
              << " are true successor pairs\n";

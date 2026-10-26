@@ -59,6 +59,8 @@ static int leftSegs(const std::vector<std::vector<uint8_t>>& chunks, const std::
     size_t f = 0;
     while (f + 1 < ids.size() && !metas[ids[f]].valid) ++f;
     segs.clear();
+    // spans a slot (headerless chunk not placed yet): no decodable window
+    for (size_t k = f; k < ids.size(); ++k) if (metas[ids[k]].gapAfter) return -1;
     for (size_t k = f; k < ids.size(); ++k) segs.push_back(&chunks[ids[k]]);
     return metas[ids[f]].headOffset;
 }
@@ -84,6 +86,10 @@ std::vector<LockedEdge> findConfidentEdges(const std::vector<std::vector<uint8_t
 
     auto scoreChunk = [&](int a) {
         if (!metas[a].valid || adj[a].empty()) return;
+        // A demander's edges cross a slot: never scored, so never locked - and, unscored, it
+        // blocks every lock into its successors on the predecessor side below, where its
+        // invisible true edge could otherwise be out-competed (PLAN_headerless_chunks.md).
+        if (metas[a].gapAfter) return;
         std::vector<int> ctx;
         if (a == start) ctx.push_back(-1);
         else {
@@ -113,11 +119,15 @@ std::vector<LockedEdge> findConfidentEdges(const std::vector<std::vector<uint8_t
                     if (!left[ci]) {
                         std::vector<const std::vector<uint8_t>*> segs;
                         const int off = leftSegs(chunks, metas, pp, a, warm, segs);
-                        left[ci].reset(new PcmJunction::LeftContext(segs, off));
+                        if (off >= 0) left[ci].reset(new PcmJunction::LeftContext(segs, off));
                     }
-                    const PcmJunction::Metrics m = left[ci]->score(chunks[b]);
-                    ++nDec[a];
-                    fx = (!m.valid || m.silent) ? std::numeric_limits<float>::quiet_NaN() : (float)m.flux;
+                    if (left[ci]) {
+                        const PcmJunction::Metrics m = left[ci]->score(chunks[b]);
+                        ++nDec[a];
+                        fx = (!m.valid || m.silent) ? std::numeric_limits<float>::quiet_NaN() : (float)m.flux;
+                    } else {
+                        fx = std::numeric_limits<float>::quiet_NaN();   // context spans a slot
+                    }
                     if (memo) fresh[a].push_back({key, fx});
                 }
                 if (std::isnan(fx)) { anyBad = true; continue; }
@@ -211,6 +221,10 @@ long scoreWindows(const std::vector<std::vector<uint8_t>>& chunks,
         const auto& w0 = uniq[groups[g]];
         std::vector<const std::vector<uint8_t>*> segs;
         const int off = leftSegs(chunks, metas, w0[0], w0[1], warm, segs);
+        if (off < 0) {   // spans a slot
+            for (size_t i = groups[g]; i < groups[g + 1]; ++i) out[i] = std::numeric_limits<float>::quiet_NaN();
+            return;
+        }
         const PcmJunction::LeftContext left(segs, off);
         for (size_t i = groups[g]; i < groups[g + 1]; ++i) {
             const PcmJunction::Metrics m = left.score(chunks[uniq[i][2]]);

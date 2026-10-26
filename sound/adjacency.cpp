@@ -234,3 +234,125 @@ vector<int> computeOutDegree(const vector<vector<int>>& adj, const int n) {
         outdeg[i] = static_cast<int>(adj[i].size());
     return outdeg;
 }
+
+bool isHeaderless(const ChunkMeta& m, const size_t chunkBytes, const long chunkSize) {
+    return !m.valid && m.frameStarts.empty() && static_cast<long>(chunkBytes) == chunkSize;
+}
+
+GapSlots findGapSlots(const vector<ChunkMeta>& metas, const vector<vector<int>>& adj,
+                      const vector<vector<uint8_t>>& pool, const long chunkSize) {
+    const int n = static_cast<int>(metas.size());
+    const int C = static_cast<int>(chunkSize);
+    GapSlots g;
+    g.offsets.assign(n, {});
+    if (pool.empty()) return g;
+    for (int i = 0; i < n; ++i) {
+        const ChunkMeta& a = metas[i];
+        if (!a.valid || a.finalFragment) continue;
+        const int rem = tailRemaining(a);
+        if (rem >= C) {
+            if (rem - C < C) { g.offsets[i] = {rem - C}; ++g.case1; }
+            continue;
+        }
+        const int tov = a.tailOverflow;
+        if (rem >= 0 || tov < 1 || tov > 3) continue;
+        vector<int>& R = g.offsets[i];
+        for (const auto& m : pool) {
+            if (m.size() < 4) continue;
+            const int off = reconstructTailHeaderOffset(a.tailBytes.data(), tov, m.data(), a.profile);
+            if (off >= C && off - C < C) R.push_back(off - C);
+        }
+        sort(R.begin(), R.end());
+        R.erase(unique(R.begin(), R.end()), R.end());
+        if (R.empty()) continue;
+        if (!adj[i].empty()) { R.clear(); ++g.ambiguous; continue; }
+        ++g.case2;
+    }
+    return g;
+}
+
+bool canFollowGap(const ChunkMeta& b, const vector<int>& offsets) {
+    if (!b.valid) return false;
+    for (int off : offsets) if (hasFrameAt(b, off)) return true;
+    return false;
+}
+
+void addGapEdges(vector<vector<int>>& adj, const vector<ChunkMeta>& metas, const GapSlots& g) {
+    const int n = static_cast<int>(metas.size());
+    unordered_map<int, vector<int>> byFrameStart;
+    for (int j = 0; j < n; ++j)
+        if (metas[j].valid) for (int pos : metas[j].frameStarts) byFrameStart[pos].push_back(j);
+    for (int i = 0; i < n; ++i) {
+        if (g.offsets[i].empty()) continue;
+        vector<int> succ;
+        for (int off : g.offsets[i]) {
+            auto it = byFrameStart.find(off);
+            if (it == byFrameStart.end()) continue;
+            for (int j : it->second) if (j != i) succ.push_back(j);
+        }
+        sort(succ.begin(), succ.end());
+        succ.erase(unique(succ.begin(), succ.end()), succ.end());
+        adj[i] = std::move(succ);
+    }
+}
+
+static bool headerMatches(const uint8_t hdr[4], const StreamProfile& profile) {
+    const uint32_t raw = packHeaderBytes(hdr);
+    if (!Mp3FrameScanner::isValidHeader(raw)) return false;
+    bool ok;
+    const Header h(raw, ok);
+    return ok && profile.matches(h) && h.getFrameLength() > 0;
+}
+
+SplitTails promoteSplitTails(vector<ChunkMeta>& metas, const vector<vector<uint8_t>>& chunks,
+                             const long chunkSize, const StreamProfile& prof, const uint8_t proto[4]) {
+    const int n = static_cast<int>(metas.size());
+    const int C = static_cast<int>(chunkSize);
+    SplitTails st;
+    for (int i = 0; i < n; ++i) {
+        const ChunkMeta& a = metas[i];
+        if (!a.valid || a.finalFragment) continue;
+        const int rem = tailRemaining(a);
+        if (rem >= C - 3 && rem <= C - 1) ++st.expected[C - rem];
+    }
+    for (int i = 1; i < n; ++i) {
+        ChunkMeta& m = metas[i];
+        const vector<uint8_t>& ch = chunks[i];
+        if (!isHeaderless(m, ch.size(), chunkSize)) continue;
+        int t = 0;
+        for (int tt = 3; tt >= 1 && !t; --tt) {
+            if (!st.expected[tt]) continue;
+            uint8_t hdr[4];
+            for (int k = 0; k < 4; ++k) hdr[k] = k < tt ? ch[C - tt + k] : proto[k];
+            if (headerMatches(hdr, prof)) t = tt;
+        }
+        if (!t) continue;
+        bool headCompletes = false;
+        for (int tt = 1; tt <= 2 && !headCompletes; ++tt) {
+            if (!st.expected[tt]) continue;
+            uint8_t hdr[4];
+            for (int k = 0; k < 4; ++k) hdr[k] = k < tt ? proto[k] : ch[k - tt];
+            headCompletes = headerMatches(hdr, prof);
+        }
+        if (headCompletes) continue;
+        m.valid          = true;
+        m.finalFragment  = false;
+        m.headOffset     = C - t;
+        m.frameStarts    = {C - t};
+        m.frames.clear();
+        m.tailOverflow   = t;
+        m.tailPartialLen = -1;
+        m.tailBytes.assign(ch.end() - t, ch.end());
+        m.profile        = prof;
+        ++st.promoted[t];
+    }
+    return st;
+}
+
+int splitHeaderOffset(const ChunkMeta& a, const vector<uint8_t>& next) {
+    const int tov = a.tailOverflow;
+    if (a.tailPartialLen != -1 || tov < 1 || tov > 3 || next.size() < 4) return -1;
+    return reconstructTailHeaderOffset(a.tailBytes.data(), tov, next.data(), a.profile);
+}
+
+bool hasFrameStart(const ChunkMeta& b, const int off) { return hasFrameAt(b, off); }
