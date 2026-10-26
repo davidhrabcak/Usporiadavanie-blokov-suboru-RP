@@ -463,6 +463,12 @@ bool detectCBR(const vector<uint8_t>& stream, const StreamProfile& prof, int& kb
 }
 
 bool deriveProfile(const vector<uint8_t>& chunk, StreamProfile& out) {
+    // The Xing/Info/VBRI frame carries a valid header for the stream, so it is the fallback
+    // when chunk 0 holds no other frame start (e.g. a 320 kbps Info frame is ~1044 bytes, so
+    // skipping it runs past a 1024-byte chunk). Only chunk 0 is in true order, so we can't
+    // look further.
+    bool haveXing = false;
+    StreamProfile xing{};
     for (int i = 0; i + 4 <= static_cast<int>(chunk.size()); ++i) {
         const uint32_t raw = computeChunkHeader(chunk, i);
 
@@ -475,6 +481,13 @@ bool deriveProfile(const vector<uint8_t>& chunk, StreamProfile& out) {
         if (frameLen <= 0) continue;
 
         if (isXingFrame(chunk, i, h)) {
+            if (!haveXing) {
+                haveXing = true;
+                xing.versionID  = h.getVersionID();
+                xing.layerID    = h.getLayerID();
+                xing.channelIdx = h.getChannelIdx();
+                xing.sampleRate = h.getSampleRate();
+            }
             i += frameLen - 1; // skip to next frame (loop will ++i)
             continue;
         }
@@ -485,5 +498,6 @@ bool deriveProfile(const vector<uint8_t>& chunk, StreamProfile& out) {
         out.sampleRate = h.getSampleRate();
         return true;
     }
+    if (haveXing) { out = xing; return true; }
     return false;
 }
