@@ -460,9 +460,16 @@ Output is written to `output.mp3` in the current directory. Chunk 0 of the input
 | `RP_BROADEN` | auto (>120 supernodes) | `=1`/`=0` force/disable iterative broadening over K ∈ {1,2,3,4,6,9,unlimited}. |
 | `RP_TIME_BUDGET` | 45s broaden / 30s best-of / none otherwise | wall-clock stop for the whole search (seconds). |
 | `RP_MAX_NODES` | 0 (unlimited) | hard cap on supernode placements tried. |
+| `RP_REPORT` | unset | path: write one JSON object describing the run (input, profile, true-order checks, graph, locks, result, timings) on any normal exit - used by `test/corpus.py`. |
 | `RP_PROGRESS` | ~10M | print a `[nodes=… depth=… elapsed=…]` line every N placements. |
 
 **Verification scripts** (in `sound/`, run from there):
 - `test/ci_sanity.sh build` - end-to-end pipeline check on the committed synthetic fixture (also run by CI).
 - `test/measurements.sh build` - regenerate this doc's quantitative claims (C3).
 - `test/regression.sh [--update] build` - local accuracy regression vs `test/regression_baseline.tsv` (C4; needs the fixtures).
+- `test/corpus.py` - corpus tests (`PLAN_test_automation.md`; Python stdlib only; run from `sound/`):
+  - `scan`: manifest of every `*.mp3` under `musiclib/` (any layout; cached; `musiclib/` is gitignored, derived files go to `musiclib/.derived/`).
+  - `run --recipe orig|strip|headN --chunk 1024 4096 --config default ...`: parallel, resumable matrix; each run writes `RP_REPORT` JSON; one row per run in `musiclib/.derived/results/*.csv` with an outcome class (EXACT / WRONG / SEARCH_FAIL / STRUCTURAL / TIMEOUT / ERROR / CRASH). `headN` = the first N chunks' worth of whole frames at that chunk size (differs per chunk size), `secN` = the first N seconds (same input at every chunk size); both start at the real start (empty bit reservoir). Configs: `test/corpus_configs.json`.
+  - `report RESULTS.csv`: `summary.md` (outcomes by chunk size, format, source, structural cause, per input).
+  - `compare RESULTS.csv [--against OTHER.csv | --update-baseline]`: outcome changes vs `test/corpus_baseline.tsv`; exit 1 on a regression (EXACT lost, new STRUCTURAL, new CRASH or ERROR).
+  - `RP_CORPUS=test test/corpus.py ...`: the fixtures in `test/` (same outcomes as `regression.sh` with config `budget20`).

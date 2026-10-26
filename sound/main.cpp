@@ -23,6 +23,9 @@
 #include "main_data_decoder.hpp"
 #include "pcm_junction.hpp"
 #include "edge_lock.hpp"
+#include "run_report.hpp"
+
+extern char** environ;
 
 #define CHUNK_SIZE 1024
 #define COUNTER_FREQUENCY 9999999
@@ -1159,9 +1162,25 @@ static MatchResult globalMatch(const vector<Supernode>& sn, const vector<vector<
 int main(int argc, char* argv[]) {
     const string filename = (argc > 1) ? argv[1] : FILENAME;
 
+    // RP_REPORT (PLAN_test_automation.md): starts the clock; written on any return from main.
+    RunReport::set("file", filename);
+    RunReport::set("status", "error");
+    {
+        string env = "{";
+        for (char** e = environ; e && *e; ++e) {
+            const string kv = *e;
+            if (kv.compare(0, 3, "RP_") != 0 || kv.compare(0, 10, "RP_REPORT=") == 0) continue;
+            const size_t eq = kv.find('=');
+            if (env.size() > 1) env += ", ";
+            env += RunReport::quote(kv.substr(0, eq)) + ": " + RunReport::quote(eq == string::npos ? "" : kv.substr(eq + 1));
+        }
+        RunReport::setRaw("env", env + "}");
+    }
+
     Mp3FrameScanner scanner(filename);
     if (scanner.getFrameCount() == 0) {
         cerr << "No frames found\n";
+        RunReport::set("error", "no frames found");
         return 1;
     }
 
@@ -1224,6 +1243,7 @@ int main(int argc, char* argv[]) {
                 }
             }
             preShuffleBreaks = broken;
+            RunReport::set("pre_breaks", broken);
             if (broken == 0)
                 cout << "Pre-shuffle check PASSED: all " << chunks.size()
                      << " consecutive pairs compatible\n";
@@ -1249,6 +1269,7 @@ int main(int argc, char* argv[]) {
                     }
                 }
                 preShuffleResvBreaks = reservoirBreaks;
+                RunReport::set("resv_breaks", reservoirBreaks);
                 if (reservoirBreaks == 0)
                     cout << "Reservoir check PASSED on true order: all "
                          << chunks.size() << " chunks consistent\n";
@@ -1281,15 +1302,25 @@ int main(int argc, char* argv[]) {
     shuffle(origIndexOf.begin() + 1, origIndexOf.end(), default_random_engine(seed));
 
     cout << "Total chunks: " << chunks.size() << "\n";
+    RunReport::set("chunk_size", static_cast<long long>(chunkSize));
+    RunReport::set("seed", static_cast<long long>(seed));
+    RunReport::set("chunks", chunks.size());
     cout << "Shuffle seed: " << seed << (randomSeed ? " (random)" : " (fixed default; RP_SEED to override)") << "\n";
 
     // Derive stream profile from chunk 0 (pinned, never shuffled)
     StreamProfile profile{};
     if (!deriveProfile(chunks[0], profile)) {
         cerr << "Could not derive stream profile from first chunk\n";
+        RunReport::set("error", "could not derive stream profile");
         return 1;
     }
     if (cbr) { profile.isCBR = true; profile.bitrateKbps = cbrKbps; }
+    RunReport::setRaw("profile", string("{\"mpeg\": ") + RunReport::quote(profile.versionID == 0b11 ? "1" : profile.versionID == 0b10 ? "2" : "2.5")
+        + ", \"layer\": " + std::to_string(profile.layerID == 0b01 ? 3 : profile.layerID == 0b10 ? 2 : 1)
+        + ", \"sample_rate\": " + std::to_string(profile.sampleRate)
+        + ", \"cbr_kbps\": " + (profile.isCBR ? std::to_string(profile.bitrateKbps) : string("null"))
+        + ", \"crc\": " + (profile.hasCrc ? "true" : "false")
+        + ", \"mono\": " + (profile.isMono() ? "true" : "false") + "}");
     cout << "Stream profile: versionID=" << static_cast<int>(profile.versionID)
          << " layerID=" << static_cast<int>(profile.layerID)
          << " sampleRate=" << profile.sampleRate
@@ -1640,6 +1671,7 @@ int main(int argc, char* argv[]) {
     };
     for (size_t lockAttempt = 0; lockAttempt < lockTaus.size() && !found; ++lockAttempt) {
         foundAttempt = lockAttempt;
+        RunReport::set("lock_attempts", static_cast<long long>(lockAttempt + 1));
         const double tau = lockTaus[lockAttempt];
         adj = adjBase;
         if (lockAttempt > 0) keepDeepest();
@@ -1672,6 +1704,8 @@ int main(int argc, char* argv[]) {
             const double secs = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
             cout << "Edge locking total: " << totalLocks << " edges (" << totalDec << " decodes, " << fixed
                  << setprecision(2) << secs << "s) [vs source: " << totalTrue << "/" << totalLocks << " correct]\n";
+            RunReport::set("locks", static_cast<long long>(totalLocks));
+            RunReport::set("locks_correct", static_cast<long long>(totalTrue));
         }
 
         auto indeg  = computeInDegree(adj, static_cast<int>(chunks.size()));
@@ -1684,6 +1718,7 @@ int main(int argc, char* argv[]) {
             if (outdeg[i] == 1) ++forced;
             edges += static_cast<long>(adj[i].size());
         }
+        RunReport::set("edges", static_cast<long long>(edges));
         cout << "\nAdjacency graph: " << edges << " edges, "
              << forced << "/" << chunks.size()
              << " chunks have exactly one valid successor\n";
@@ -1694,6 +1729,7 @@ int main(int argc, char* argv[]) {
             adj, indeg, outdeg, static_cast<int>(chunks.size()), 0, superAdj);
 
         cout << "Supernodes after chain collapse: " << supernodes.size() << "\n";
+        RunReport::set("supernodes", supernodes.size());
 
         int startSuper = -1;
         for (int si = 0; si < static_cast<int>(supernodes.size()); ++si)
@@ -1701,6 +1737,7 @@ int main(int argc, char* argv[]) {
 
         if (startSuper == -1) {
             cerr << "Could not find supernode for chunk 0\n";
+            RunReport::set("error", "no supernode for chunk 0");
             return 1;
         }
 
@@ -1730,6 +1767,7 @@ int main(int argc, char* argv[]) {
                 continue;
             }
             if (!startOk) {
+                RunReport::set("error", "reservoir check failed on the pinned starting chunk");
                 cerr << "Reservoir check failed on the pinned starting chunk - "
                         "mainDataBegin metadata is likely wrong for chunk 0\n";
                 return 1;
@@ -1872,6 +1910,7 @@ int main(int argc, char* argv[]) {
                  << mr.contexts << " ctx), "
                  << mr.cycles << " cycle(s), " << mr.spliced << " spliced, cost " << fixed << setprecision(3)
                  << mr.cost << ", " << setprecision(2) << secs << "s";
+            RunReport::set("matching", mr.order.empty() ? mr.failure : string("ok"));
             if (mr.order.empty()) { cout << " - " << mr.failure << "\n"; }
             else {
                 vector<int> seqm;
@@ -1922,7 +1961,7 @@ int main(int argc, char* argv[]) {
     if (found) {
         cout << "Reconstruction found" << (g_bestOf ? (" (score " + std::to_string(g_bestScore) + ")") : "") << "\n";
         ofstream out("output.mp3", ios::binary | ios::trunc);
-        if (!out) { cerr << "Cannot open output.mp3\n"; return 1; }
+        if (!out) { cerr << "Cannot open output.mp3\n"; RunReport::set("error", "cannot open output.mp3"); return 1; }
 
         vector<int> seq; // reconstructed chunk order
         if (foundByMatch && !matchSeq.empty()) seq = matchSeq;
@@ -1993,6 +2032,13 @@ int main(int argc, char* argv[]) {
              << fixed << setprecision(1) << (100.0 * exactPos / std::max<size_t>(1, reconOrig.size())) << "%)"
              << (exactMatch ? "  --  EXACT (output.mp3 is byte-identical to the source stream)" : "")
              << "\n";
+        RunReport::set("status", "complete");
+        RunReport::set("exact", exactMatch);
+        RunReport::set("exact_pct", 100.0 * exactPos / std::max<size_t>(1, reconOrig.size()));
+        RunReport::set("true_junctions", trueJ);
+        RunReport::set("junctions", reconOrig.empty() ? size_t(0) : reconOrig.size() - 1);
+        RunReport::set("provenance", foundByMatch ? "matching" : foundByHint ? "dfs_matching_ranked" : "dfs");
+        RunReport::set("repair_moves", resultRepairMoves);
         cout << "Reconstruction junctions: " << trueJ << "/" << (reconOrig.empty() ? 0 : reconOrig.size() - 1)
              << " are true successor pairs\n";
         // Diagnostic (RP_SCORE_ORDER=1): summed PCM flux of the found ordering vs the source
@@ -2034,6 +2080,10 @@ int main(int argc, char* argv[]) {
             if (path[k] == path[k - 1] + 1) ++good;
             else if (firstBad < 0) firstBad = static_cast<int>(k);
         }
+        RunReport::set("status", "no_ordering");
+        RunReport::set("budget_exhausted", static_cast<bool>(g_aborted));
+        RunReport::set("partial_chunks", path.size());
+        RunReport::set("partial_true_junctions", good);
         cout << "Deepest partial path: " << bestPartialSupers << "/" << bestPartialOf << " supernodes, "
              << path.size() << " chunks; true junctions " << good << "/" << (path.empty() ? 0 : path.size() - 1)
              << "; correct prefix = " << (firstBad < 0 ? (int)path.size() : firstBad) << " chunks\n";

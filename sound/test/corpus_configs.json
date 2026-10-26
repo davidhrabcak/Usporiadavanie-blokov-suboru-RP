@@ -1,0 +1,6 @@
+{
+  "default": {},
+  "no_pcm": {"RP_PCM": "0"},
+  "no_lock": {"RP_LOCK": "0"},
+  "budget20": {"RP_TIME_BUDGET": "20"}
+}
