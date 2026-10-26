@@ -19,6 +19,9 @@ public:
     uint8_t getChannelIdx() const;
     bool isMono() const;
     bool isLayerIII() const;
+    // protection_bit == 0: a 16-bit CRC follows the header, before the side info.
+    bool hasCrc() const;
+    int crcBytes() const { return hasCrc() ? 2 : 0; }
 
 private:
     uint32_t raw;

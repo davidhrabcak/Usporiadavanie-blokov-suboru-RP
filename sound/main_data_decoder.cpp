@@ -261,7 +261,7 @@ FrameSpectra decodeFrameSpectra(const std::vector<uint8_t>& buf, int mainDataBit
 
 // A chunk's own main-data stream: the leading headOffset bytes (tail of the previous chunk's
 // split frame - main data) followed by every complete frame's payload (bytes after its 4-byte
-// header + side info). `payMdStart[k]` = md offset of frame k's payload.
+// header, CRC if any, and side info). `payMdStart[k]` = md offset of frame k's payload.
 static std::vector<uint8_t> buildChunkMainData(const std::vector<uint8_t>& bytes, const ChunkMeta& m,
                                                int sideSz, std::vector<int>& payMdStart) {
     payMdStart.clear();
@@ -269,7 +269,7 @@ static std::vector<uint8_t> buildChunkMainData(const std::vector<uint8_t>& bytes
                             bytes.begin() + std::min<int>(std::max(0, m.headOffset), (int)bytes.size()));
     for (const auto& fr : m.frames) {
         payMdStart.push_back((int)md.size());
-        const int ps = fr.offset + 4 + sideSz;
+        const int ps = fr.offset + 4 + fr.crcBytes + sideSz;
         const int pe = fr.offset + fr.length;
         if (ps >= 0 && pe <= (int)bytes.size() && ps < pe)
             md.insert(md.end(), bytes.begin() + ps, bytes.begin() + pe);

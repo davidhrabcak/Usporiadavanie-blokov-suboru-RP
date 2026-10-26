@@ -14,6 +14,9 @@ struct StreamProfile {
     uint8_t layerID;
     uint8_t channelIdx;
     int     sampleRate;
+    // Protection bit: encoders set it for the whole stream, so a header that disagrees is a
+    // false sync (seen: a 256 kbps no-CRC "frame" inside a 320 kbps CRC stream).
+    bool    hasCrc = false;
 
     // Set only when the stream has been positively identified as constant-bitrate (A3a):
     // then every real frame carries this exact bitrate, so a header at any other bitrate is a
@@ -29,6 +32,7 @@ struct StreamProfile {
         return h.getVersionID()    == versionID
             && h.getLayerID()      == layerID
             && h.getSampleRate()   == sampleRate
+            && h.hasCrc()          == hasCrc
             && (!isCBR || h.getBitrate() == bitrateKbps);
     }
 };
@@ -84,6 +88,8 @@ struct FrameSlice {
                                // consumes from the reservoir. Kept bit-precise (not rounded
                                // to bytes) so per-frame rounding doesn't compound into a
                                // systematic drift over many frames - see computeSideInfoFields.
+    uint8_t  crcBytes = 0;    // 2 when the header's protection bit asks for a CRC (side info
+                               // and payload then start 2 bytes later), else 0
 };
 
 struct ChunkMeta {

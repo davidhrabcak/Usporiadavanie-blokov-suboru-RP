@@ -52,7 +52,7 @@ static bool isXingFrame(const vector<uint8_t>& chunk, const int off, const Heade
     if (!h.isLayerIII()) return false;
     // Side info size: MPEG1 stereo=32, MPEG1 mono=17, MPEG2/2.5 stereo=17, MPEG2/2.5 mono=9
     const int side = sideInfoSize(h.getVersionID(), h.isMono());
-    const int xpos = off + 4 + side;
+    const int xpos = off + 4 + h.crcBytes() + side;
     if (xpos + 4 > static_cast<int>(chunk.size())) return false;
 
     const uint8_t* ptr = &chunk[xpos];
@@ -69,13 +69,14 @@ static uint32_t computeChunkHeader(const vector<uint8_t>& chunk, const int index
 /**
  * Extracts `main_data_begin` and the sum of `part2_3_length` (actual main-data bits this frame
  * consumes from the bit reservoir) across every granule/channel, from a side-info block starting
- * at bit 0 of `sideBuf` (i.e. immediately after the frame's 4-byte header).
+ * at bit 0 of `sideBuf` (i.e. immediately after the frame's 4-byte header and CRC, if any).
  *
  * part2_3_length is returned in BITS, not bytes, and must stay that way: it's a bit-granular
  * quantity, and rounding it up to bytes on every frame compounds into a large false reservoir
  * deficit over a whole file. Only `mainDataBegin` is a byte-granular bitstream field.
  *
- * Side-info layout (ISO/IEC 11172-3 / 13818-3), all fields MSB-first, no CRC:
+ * Side-info layout (ISO/IEC 11172-3 / 13818-3), all fields MSB-first. It starts right after the
+ * header, or 2 bytes later when the header's protection bit is 0 (16-bit CRC) - callers skip it:
  *   MPEG1:      main_data_begin(9) + private_bits(mono:5/stereo:3) + scfsi(4 bits/channel),
  *               then 2 granules x numChannels blocks of 59 bits (leading 12 = part2_3_length).
  *   MPEG2/2.5:  main_data_begin(8) + private_bits(mono:1/stereo:2), no scfsi,
@@ -123,7 +124,7 @@ static GranuleSideInfo parseGranuleSideInfo(const SideInfoBitSource& src, int& b
 
 /**
  * Parses a full Layer III side-info block starting at bit 0 of `sideBuf` (immediately after the
- * frame's 4-byte header, no CRC). See computeSideInfoFields's old comment (now below) for the
+ * frame's 4-byte header and its CRC, if any). See computeSideInfoFields's old comment (now below) for the
  * top-level layout. `.valid` is false if the block doesn't fully fit in `sideBuf`.
  */
 static FrameSideInfo parseFrameSideInfo(const SideInfoBitSource& sideBuf, const bool mpeg1, const bool mono) {
@@ -170,13 +171,14 @@ static FrameSideInfo parseFrameSideInfo(const SideInfoBitSource& sideBuf, const 
 /**
  * Extracts `main_data_begin` and the sum of `part2_3_length` (actual main-data bits this frame
  * consumes from the bit reservoir) across every granule/channel, from a side-info block starting
- * at bit 0 of `sideBuf` (i.e. immediately after the frame's 4-byte header).
+ * at bit 0 of `sideBuf` (i.e. immediately after the frame's 4-byte header and CRC, if any).
  *
  * part2_3_length is returned in BITS, not bytes, and must stay that way: it's a bit-granular
  * quantity, and rounding it up to bytes on every frame compounds into a large false reservoir
  * deficit over a whole file. Only `mainDataBegin` is a byte-granular bitstream field.
  *
- * Side-info layout (ISO/IEC 11172-3 / 13818-3), all fields MSB-first, no CRC:
+ * Side-info layout (ISO/IEC 11172-3 / 13818-3), all fields MSB-first. It starts right after the
+ * header, or 2 bytes later when the header's protection bit is 0 (16-bit CRC) - callers skip it:
  *   MPEG1:      main_data_begin(9) + private_bits(mono:5/stereo:3) + scfsi(4 bits/channel),
  *               then 2 granules x numChannels blocks of 59 bits (leading 12 = part2_3_length).
  *   MPEG2/2.5:  main_data_begin(8) + private_bits(mono:1/stereo:2), no scfsi,
@@ -204,14 +206,16 @@ static SideInfoResult computeSideInfoFields(const SideInfoBitSource& sideBuf, co
  */
 static SideInfoResult readFrameSideInfo(const vector<uint8_t>& chunk, const int off, const Header& h) {
     if (!h.isLayerIII()) return {};
-    const int sideStart = off + 4;
+    const int sideStart = off + 4 + h.crcBytes();
+    if (sideStart >= static_cast<int>(chunk.size())) return {};
     const SideInfoBitSource src{&chunk[sideStart], static_cast<int>(chunk.size()) - sideStart};
     return computeSideInfoFields(src, h.getVersionID() == 0b11, h.isMono());
 }
 
 FrameSideInfo parseFrameSideInfoAt(const vector<uint8_t>& buf, const int off, const bool mpeg1, const bool mono) {
-    const int sideStart = off + 4;
-    if (sideStart < 0 || sideStart >= static_cast<int>(buf.size())) return {};
+    if (off < 0 || off + 4 > static_cast<int>(buf.size())) return {};
+    const int sideStart = off + 4 + ((buf[off + 1] & 1) ? 0 : 2);   // + CRC when protection bit is 0
+    if (sideStart >= static_cast<int>(buf.size())) return {};
     const SideInfoBitSource src{&buf[sideStart], static_cast<int>(buf.size()) - sideStart};
     return parseFrameSideInfo(src, mpeg1, mono);
 }
@@ -235,11 +239,20 @@ SideInfoResult decodeSplitFrameSideInfo(const ChunkMeta& a, const vector<uint8_t
     if (!a.profile.isLayerIII()) return {};
     if (a.tailPartialLen <= 0 || a.tailOverflow < 4) return {}; // not a readable Case-1 split frame
 
-    const int headerLen = 4;
-    const uint8_t* afterHeader = a.tailBytes.data() + headerLen;
-    const int afterHeaderLen   = a.tailOverflow - headerLen;
+    // header + CRC (protection bit 0); the CRC itself may straddle the chunk boundary
+    const int skip = 4 + ((a.tailBytes[1] & 1) ? 0 : 2);
+    const uint8_t* bHead = bBytes.data();
+    int bLen = static_cast<int>(bBytes.size());
+    const uint8_t* afterHeader = a.tailBytes.data() + std::min(skip, a.tailOverflow);
+    const int afterHeaderLen   = std::max(0, a.tailOverflow - skip);
+    if (a.tailOverflow < skip) {
+        const int inB = skip - a.tailOverflow;
+        if (bLen < inB) return {};
+        bHead += inB;
+        bLen  -= inB;
+    }
 
-    const SideInfoBitSource src{afterHeader, afterHeaderLen, bBytes.data(), static_cast<int>(bBytes.size())};
+    const SideInfoBitSource src{afterHeader, afterHeaderLen, bHead, bLen};
     return computeSideInfoFields(src, a.profile.versionID == 0b11, a.profile.isMono());
 }
 
@@ -300,7 +313,9 @@ static int tryParse(const vector<uint8_t>& chunk,
             mdb    = side.mainDataBegin;
             part23 = side.part23Bits;
         }
-        out.push_back({i, len, h.getBitrate(), mdb, part23});
+        FrameSlice fs{i, len, h.getBitrate(), mdb, part23};
+        fs.crcBytes = static_cast<uint8_t>(h.crcBytes());
+        out.push_back(fs);
         // Xing/Info/VBRI frames are real, valid frames (their bytes are kept in `out` so
         // reservoir accounting and output reconstruction stay correct) but carry no audio,
         // so they must not count towards the "most consecutive frames" contest below -
@@ -449,9 +464,9 @@ bool detectCBR(const vector<uint8_t>& stream, const StreamProfile& prof, int& kb
         // A Xing (as opposed to Info) header marks the stream as VBR even if these first
         // frames happen to share a bitrate - bail so we don't wrongly filter.
         if (frames == 0 && isXingFrame(stream, i, h)) {
-            const int side = sideInfoSize(h.getVersionID(), h.isMono());
-            if (i + 4 + side + 4 <= static_cast<int>(stream.size()) &&
-                std::memcmp(&stream[i + 4 + side], "Xing", 4) == 0)
+            const int tag = i + 4 + h.crcBytes() + sideInfoSize(h.getVersionID(), h.isMono());
+            if (tag + 4 <= static_cast<int>(stream.size()) &&
+                std::memcmp(&stream[tag], "Xing", 4) == 0)
                 return false;
         }
         ++frames;
@@ -487,6 +502,7 @@ bool deriveProfile(const vector<uint8_t>& chunk, StreamProfile& out) {
                 xing.layerID    = h.getLayerID();
                 xing.channelIdx = h.getChannelIdx();
                 xing.sampleRate = h.getSampleRate();
+                xing.hasCrc     = h.hasCrc();
             }
             i += frameLen - 1; // skip to next frame (loop will ++i)
             continue;
@@ -496,6 +512,7 @@ bool deriveProfile(const vector<uint8_t>& chunk, StreamProfile& out) {
         out.layerID    = h.getLayerID();
         out.channelIdx = h.getChannelIdx();
         out.sampleRate = h.getSampleRate();
+        out.hasCrc     = h.hasCrc();
         return true;
     }
     if (haveXing) { out = xing; return true; }

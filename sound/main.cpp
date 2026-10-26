@@ -66,7 +66,7 @@ vector<vector<uint8_t>> chunks; // moved for debugging
 static bool advanceReservoirFrame(int& level, const FrameSlice& f, const int sideInfo, const int maxReservoir) {
     if (f.mainDataBegin > level / 8) return false; // mainDataBegin is byte-granular
 
-    int producedBits = (f.length - 4 - sideInfo) * 8;
+    int producedBits = (f.length - 4 - f.crcBytes - sideInfo) * 8;
     if (producedBits < 0) producedBits = 0;
 
     int newLevel = f.mainDataBegin * 8 + producedBits - f.part23Bits;
@@ -118,7 +118,8 @@ static bool advanceReservoirChunk(int& level,
     if (prevMeta != nullptr && prevMeta->tailPartialLen > 0) {
         const SideInfoResult side = decodeSplitFrameSideInfo(*prevMeta, metaBytes);
         if (side.valid) {
-            const FrameSlice splitFrame{-1, prevMeta->tailPartialLen, 0, side.mainDataBegin, side.part23Bits};
+            FrameSlice splitFrame{-1, prevMeta->tailPartialLen, 0, side.mainDataBegin, side.part23Bits};
+            splitFrame.crcBytes = (prevMeta->tailBytes[1] & 1) ? 0 : 2;
             if (!advanceReservoirFrame(level, splitFrame, sideInfo, maxReservoir)) return false;
             creditedExactly = true;
         }
@@ -1244,6 +1245,7 @@ int main(int argc, char* argv[]) {
                     if (!advanceReservoirChunk(level, prev, origMetas[i], chunks[i], sideInfo0, maxReservoir0)) {
                         cout << "  RESERVOIR BREAK at chunk " << i << "\n";
                         ++reservoirBreaks;
+                        level = maxReservoir0 * 8;   // like the DFS/repair: one break mustn't cascade
                     }
                 }
                 preShuffleResvBreaks = reservoirBreaks;
@@ -1292,7 +1294,8 @@ int main(int argc, char* argv[]) {
          << " layerID=" << static_cast<int>(profile.layerID)
          << " sampleRate=" << profile.sampleRate
          << " mono=" << profile.isMono()
-         << (profile.isCBR ? (" cbr=" + std::to_string(profile.bitrateKbps) + "kbps") : string(" vbr")) << "\n";
+         << (profile.isCBR ? (" cbr=" + std::to_string(profile.bitrateKbps) + "kbps") : string(" vbr"))
+         << (profile.hasCrc ? " crc" : "") << "\n";
 
     // Compute per-chunk metadata
     vector<ChunkMeta> metas;

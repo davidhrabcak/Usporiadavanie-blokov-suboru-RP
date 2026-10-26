@@ -148,3 +148,4 @@ uint8_t Header::getSampleRateIdx() const{ return sampleRateIdx_raw; }
 uint8_t Header::getChannelIdx() const   { return channelIdx_raw; }
 bool    Header::isMono() const          { return channelIdx_raw == 0b11; }
 bool    Header::isLayerIII() const      { return layerID_raw == 0b01; }
+bool    Header::hasCrc() const          { return ((raw >> 16) & 1) == 0; }

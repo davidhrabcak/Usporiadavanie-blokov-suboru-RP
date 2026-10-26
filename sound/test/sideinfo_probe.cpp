@@ -467,7 +467,7 @@ int main(int argc, char** argv) {
             bool ok; Header h(packHeaderBytes(&stream[soff]), ok);
             if (!ok || !profile.matches(h)) { res.clear(); continue; }
             const int sideSz = sideInfoSize(h.getVersionID(), h.isMono());
-            const long payStart = soff + 4 + sideSz;
+            const long payStart = soff + 4 + h.crcBytes() + sideSz;
             const long payEnd = (k + 1 < nf)
                 ? (static_cast<long>(frames[k + 1].position) - base) : (long)stream.size();
             if (payEnd <= payStart || payEnd > (long)stream.size()) { res.clear(); continue; }
@@ -524,7 +524,7 @@ int main(int argc, char** argv) {
             vector<int> payMdStart;                 // md offset of each frame's payload start
             for (const auto& fr : metas[i].frames) {
                 payMdStart.push_back((int)md.size());
-                const int ps = fr.offset + 4 + sideSz, pe = fr.offset + fr.length;
+                const int ps = fr.offset + 4 + fr.crcBytes + sideSz, pe = fr.offset + fr.length;
                 if (pe <= (int)chunks[i].size() && ps < pe)
                     md.insert(md.end(), chunks[i].begin() + ps, chunks[i].begin() + pe);
             }
@@ -661,7 +661,7 @@ int main(int argc, char** argv) {
             if (!ok || !profile.matches(h)) { res.clear(); continue; }
             const int sideSz = sideInfoSize(h.getVersionID(), h.isMono());
             const int flen = h.getFrameLength();
-            const long payStart = soff + 4 + sideSz;
+            const long payStart = soff + 4 + h.crcBytes() + sideSz;
             const long payEnd = soff + flen;
             if (flen <= 0 || payEnd > (long)stream.size()) { res.clear(); continue; }
 
