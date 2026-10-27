@@ -233,7 +233,7 @@ RESULT_COLS = ["run_id", "class", "binary", "config", "seed", "chunk_size", "inp
                "resv_breaks", "edges", "supernodes", "lock_attempts", "locks", "locks_correct",
                "matching", "exact", "exact_pct", "true_junctions", "junctions", "provenance",
                "repair_moves", "budget_exhausted", "partial_chunks", "partial_true_junctions",
-               "wall_s", "log"]
+               "wall_s", "log", "start_candidates", "start_xing", "start_correct"]
 
 
 def classify(r):
@@ -338,6 +338,12 @@ def cmd_run(args):
                                      args.threads, args.timeout))
     print(f"{len(rows)} inputs, {len(jobs)} runs to do ({len(done)} already in {results}), binary {binary}")
     new = not os.path.exists(results)
+    if not new:
+        with open(results) as f:
+            header = next(csv.reader(f), [])
+        if header != RESULT_COLS:   # appending rows under another header would shift the columns
+            sys.exit(f"{results} has other columns than this corpus.py writes (an older version?) - "
+                     "use a new --results file")
     with open(results, "a", newline="") as f, cf.ThreadPoolExecutor(args.jobs) as ex:
         w = csv.DictWriter(f, RESULT_COLS)
         if new:
