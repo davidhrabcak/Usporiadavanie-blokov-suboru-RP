@@ -1214,22 +1214,14 @@ int main(int argc, char* argv[]) {
         chunks.emplace_back(buf.begin(), buf.begin() + static_cast<long>(n));
     }
 
-    // Constant-bitrate detection (A3a): walk the first few chunks (still in true order here)
-    // and, if every frame shares one bitrate, enable the frame-header bitrate filter in
-    // StreamProfile::matches so false-positive syncs at other bitrates are rejected.
+    // Constant-bitrate detection (A3a): if every frame shares one bitrate, enable the
+    // frame-header bitrate filter in StreamProfile::matches so false-positive syncs at other
+    // bitrates are rejected. Order-independent (detectCBRUnordered): the first chunk is unknown.
     bool cbr = false;
     int  cbrKbps = 0;
     {
         StreamProfile tmp{};
-        if (deriveProfile(chunks[0], tmp)) {
-            // Enough bytes for detectCBR's 8 frames even at the largest frame size: 6 chunks at
-            // 1 KB held only ~5.8 frames of 320 kbps / 44.1 kHz, so CBR was never detected there.
-            const size_t nHead = std::max<size_t>(6, static_cast<size_t>((10L * MAX_FRAME_LENGTH + chunkSize - 1) / chunkSize));
-            vector<uint8_t> head;
-            for (size_t i = 0; i < chunks.size() && i < nHead; ++i)
-                head.insert(head.end(), chunks[i].begin(), chunks[i].end());
-            cbr = detectCBR(head, tmp, cbrKbps);
-        }
+        if (voteProfile(chunks, tmp)) cbr = detectCBRUnordered(chunks, tmp, cbrKbps);
     }
     if (const char* s = std::getenv("RP_CBR")) if (s[0] == '0') cbr = false; // A/B toggle for A3a
     if (cbr)
@@ -1247,17 +1239,24 @@ int main(int argc, char* argv[]) {
     vector<int> keptFull;           // full-stream index of each remaining chunk (true order); empty = no pool
     int splitTailsPre = 0;          // split-tail chunks promoted on the true order (promoteSplitTails)
     {
+        // The pool is an input to the search, so nothing here may use the true first chunk:
+        // the vote profile (differs from chunk 0's at most in channelIdx, which matches()
+        // ignores - musiclib) and, as promoteSplitTails' `proto`, the header of any chunk that
+        // can be the start (only its constant bytes 0-1 and byte 3 are read).
         StreamProfile prof0{};
-        if (deriveProfile(chunks[0], prof0)) {
+        vector<StartCandidate> protoCands;
+        if (voteProfile(chunks, prof0)) protoCands = findStartCandidates(chunks, prof0);
+        if (!protoCands.empty()) {
             if (cbr) { prof0.isCBR = true; prof0.bitrateKbps = cbrKbps; }
+            const uint8_t* proto = chunks[protoCands[0].index].data();
             vector<ChunkMeta> origMetas;
             origMetas.reserve(chunks.size());
             for (int i = 0; i < static_cast<int>(chunks.size()); ++i)
-                origMetas.push_back(computeChunkMeta(i, chunks[i], prof0, chunks[i].size() < chunks[0].size()));
+                origMetas.push_back(computeChunkMeta(i, chunks[i], prof0, static_cast<long>(chunks[i].size()) < chunkSize));
 
             const char* gapEnv = std::getenv("RP_GAP");
-            if (!(gapEnv && gapEnv[0] == '0') && chunks[0].size() >= 4) {
-                const SplitTails st = promoteSplitTails(origMetas, chunks, chunkSize, prof0, chunks[0].data());
+            if (!(gapEnv && gapEnv[0] == '0')) {
+                const SplitTails st = promoteSplitTails(origMetas, chunks, chunkSize, prof0, proto);
                 splitTailsPre = st.promoted[1] + st.promoted[2] + st.promoted[3];
                 if (splitTailsPre > 0 || st.expected[1] + st.expected[2] + st.expected[3] > 0) {
                     cout << "Split-tail chunks (frame end + 1-3 header bytes): promoted / expected by t:";
@@ -1268,7 +1267,7 @@ int main(int argc, char* argv[]) {
                 }
                 vector<int> keep;
                 for (int i = 0; i < static_cast<int>(chunks.size()); ++i)
-                    (i > 0 && isHeaderless(origMetas[i], chunks[i].size(), chunkSize) ? poolFull : keep).push_back(i);
+                    (isHeaderless(origMetas[i], chunks[i].size(), chunkSize) ? poolFull : keep).push_back(i);
                 if (!poolFull.empty()) {
                     vector<vector<uint8_t>> kept;
                     vector<ChunkMeta> keptMetas;
@@ -1371,13 +1370,62 @@ int main(int argc, char* argv[]) {
     shuffle(pool.begin(), pool.end(), default_random_engine(seed + 1));
     shuffle(poolFull.begin(), poolFull.end(), default_random_engine(seed + 1));
 
+    // The first chunk is not known either: move it to a random position too. Done as one swap
+    // after the shuffle above, so a correctly found start restores exactly the layout the
+    // pipeline had when chunk 0 was pinned. RP_START=pinned keeps chunk 0 in place (A/B).
+    const char* startEnv = std::getenv("RP_START");
+    const bool startPinned = startEnv && std::string(startEnv) == "pinned";
+    if (!startPinned && chunks.size() > 1) {
+        std::uniform_int_distribution<size_t> pick(0, chunks.size() - 1);
+        std::mt19937 rngStart(seed + 2);   // not minstd: its first draw from a small seed is ~0
+        const size_t k = pick(rngStart);
+        std::swap(chunks[0], chunks[k]);
+        std::swap(origIndexOf[0], origIndexOf[k]);
+    }
+
+    // Find the first chunk from content alone (findStartCandidates): a header at offset 0 and,
+    // for Layer III, main_data_begin == 0. Several candidates: prefer a Xing/Info/VBRI frame,
+    // then the lowest index (arbitrary; reported). The start is then swapped to index 0, and
+    // everything below treats index 0 as the start, as before.
+    if (!startPinned) {
+        StreamProfile vote{};
+        if (!voteProfile(chunks, vote)) {
+            cerr << "Could not derive stream profile from any chunk\n";
+            RunReport::set("error", "could not derive stream profile");
+            return 1;
+        }
+        const vector<StartCandidate> cands = findStartCandidates(chunks, vote);
+        int nXing = 0;
+        for (const auto& c : cands) nXing += c.xing;
+        if (cands.empty()) {
+            cerr << "No chunk can be the first (no header at offset 0 with main_data_begin == 0)\n";
+            RunReport::set("error", "no start candidate");
+            return 1;
+        }
+        int start = cands[0].index;
+        for (const auto& c : cands) if (c.xing) { start = c.index; break; }
+        int trueCands = 0;
+        for (const auto& c : cands) trueCands += origIndexOf[c.index] == 0;
+        cout << "Start chunk: " << cands.size() << " candidate(s)"
+             << (nXing ? " (" + std::to_string(nXing) + " with a Xing/Info/VBRI frame)" : string())
+             << ", chose index " << start
+             << (cands.size() > 1 && !(nXing == 1) ? " - AMBIGUOUS" : "")
+             << " [vs source: " << (origIndexOf[start] == 0 ? "correct" : "WRONG")
+             << (trueCands ? "" : ", true start not among the candidates") << "]\n";
+        RunReport::set("start_candidates", cands.size());
+        RunReport::set("start_xing", nXing);
+        RunReport::set("start_correct", origIndexOf[start] == 0);
+        std::swap(chunks[0], chunks[start]);
+        std::swap(origIndexOf[0], origIndexOf[start]);
+    }
+
     cout << "Total chunks: " << chunks.size() << "\n";
     RunReport::set("chunk_size", static_cast<long long>(chunkSize));
     RunReport::set("seed", static_cast<long long>(seed));
     RunReport::set("chunks", chunks.size());
     cout << "Shuffle seed: " << seed << (randomSeed ? " (random)" : " (fixed default; RP_SEED to override)") << "\n";
 
-    // Derive stream profile from chunk 0 (pinned, never shuffled)
+    // Derive stream profile from chunk 0 (the start found above, or pinned with RP_START=pinned)
     StreamProfile profile{};
     if (!deriveProfile(chunks[0], profile)) {
         cerr << "Could not derive stream profile from first chunk\n";

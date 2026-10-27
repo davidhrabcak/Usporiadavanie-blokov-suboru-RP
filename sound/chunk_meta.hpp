@@ -158,6 +158,23 @@ bool deriveProfile(const std::vector<uint8_t>& chunk, StreamProfile& out);
 bool detectCBR(const std::vector<uint8_t>& stream, const StreamProfile& prof,
                int& kbpsOut, int minFrames = 8);
 
+// deriveProfile on every chunk, majority vote. Uses no chunk's position, so it works when the
+// first chunk is unknown. Returns false if no chunk holds a valid header.
+bool voteProfile(const std::vector<std::vector<uint8_t>>& chunks, StreamProfile& out);
+
+// Chunks that can be the stream's first: a profile-matching header at offset 0 and, for
+// Layer III, main_data_begin == 0 (the bit reservoir is empty at the start). `xing`: that frame
+// is a Xing/Info/VBRI frame, which only the first frame of a stream is.
+struct StartCandidate { int index; bool xing; };
+std::vector<StartCandidate> findStartCandidates(const std::vector<std::vector<uint8_t>>& chunks,
+                                                const StreamProfile& prof);
+
+// detectCBR without the chunk order: true if >= 99% of the chunks' first headers (at their
+// chosen alignment, >= 8 chunks) share one bitrate, no chunk starts with a "Xing" (VBR) tag frame
+// and no chunk starts with an Info/VBRI frame at another bitrate.
+bool detectCBRUnordered(const std::vector<std::vector<uint8_t>>& chunks, const StreamProfile& prof,
+                        int& kbpsOut);
+
 // Decodes the real main_data_begin/part2_3_length of a Case-1 split frame (one whose 4-byte
 // header and start of payload are in `a`'s tail, continuing into successor chunk `b`), by
 // reconstructing its side-info block from both chunks' raw bytes. See chunk_meta.cpp for the

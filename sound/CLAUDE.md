@@ -4,7 +4,7 @@
 
 Research prototype for **file carving**: given an MP3 file that has been split into equal-sized chunks (1024 bytes) and shuffled, reconstruct the original chunk order using only MP3 structural heuristics — no filename, no metadata, no external state.
 
-Chunk 0 is always pinned (never shuffled); it serves as the anchor for stream profile derivation and the DFS start.
+The first chunk is not known (2026-10-27; before that chunk 0 was pinned). `rp` moves it to a random position like the rest and finds it from content alone (`findStartCandidates`): a profile-matching header at offset 0 and, for Layer III, `main_data_begin == 0` (the bit reservoir is empty at the start); among several, one with a Xing/Info/VBRI frame wins. The found chunk is swapped to index 0, and the rest of the pipeline treats index 0 as the start (profile derivation, DFS start, AC-3's "nothing precedes the start", the matching's END slot) exactly as before. When the start is found, results are byte-identical to the pinned version (all 6 fixtures at 1 and 4 KB). `musiclib` (all 215 files, 1 and 4 KB, `start_probe`, scratch): the true start is always a candidate; unique or settled by the Xing frame on 205/215 files at 4 KB and 204/215 at 1 KB. The rest come from encoders without a Xing frame that leave `main_data_begin == 0` on many frames (2-385 candidates); there the lowest-index candidate is taken (effectively random) and the log says `AMBIGUOUS`. Open: a tie-break for those, e.g. the candidate with no good-sounding structural predecessor (min PCM flux over its predecessors). `RP_START=pinned` restores the old behaviour.
 
 ---
 
@@ -31,7 +31,7 @@ Chunk 0 is always pinned (never shuffled); it serves as the anchor for stream pr
 Runs `computeChunkMeta` on the original (unshuffled) chunks and verifies that every consecutive pair satisfies `canFollow`. Diagnostic only; output is discarded.
 
 ### Phase 2 — Stream profile derivation
-`deriveProfile()` reads the first valid, non-Xing frame from chunk 0 and records: MPEG version, layer, sample rate, channel mode. All subsequent frame validation uses this profile. If chunk 0 holds no frame other than the Xing/Info/VBRI frame, that frame's header is used (2026-10-26): a 320 kbps / 44.1 kHz Info frame is 1044-1045 bytes, so skipping it ran past a 1024-byte chunk and `rp` exited with "Could not derive stream profile" (35 of 107 `musiclib` tracks). On all 107 the fallback profile equals the one taken from a real frame at 4 KB chunks.
+First `voteProfile()` (`deriveProfile` on every chunk, majority vote) gives a profile for finding the start chunk (see Project Goal) and for CBR detection, which is now order-independent too (`detectCBRUnordered`: >= 99% of the chunks' first headers at one bitrate - CBR files >= 99.75%, VBR <= 80.4% on `musiclib` - no `Xing`-tagged frame at a chunk start, and no Info/VBRI frame at another bitrate, e.g. the 64 kbps Info frame of the 32 kbps `bohemoan-rhapsody-*` fixtures; same verdict as the old ordered check, with its exact head length, on all 430 `musiclib` file x chunk-size runs and all 20 fixture runs). The pre-shuffle block that takes headerless chunks out into the pool uses the vote profile too, and any start candidate's header as `promoteSplitTails`' `proto` (only its stream-constant bytes are read), so the pool no longer depends on the true chunk 0. The vote profile differs from chunk 0's on 17 `musiclib` files at 1 KB, only in `channelIdx` (stereo vs joint stereo), which `matches()` ignores. Then `deriveProfile()` reads the first valid, non-Xing frame from chunk 0 (the found start) and records: MPEG version, layer, sample rate, channel mode. All subsequent frame validation uses this profile. If chunk 0 holds no frame other than the Xing/Info/VBRI frame, that frame's header is used (2026-10-26): a 320 kbps / 44.1 kHz Info frame is 1044-1045 bytes, so skipping it ran past a 1024-byte chunk and `rp` exited with "Could not derive stream profile" (35 of 107 `musiclib` tracks). On all 107 the fallback profile equals the one taken from a real frame at 4 KB chunks.
 
 ### Phase 3 — Per-chunk metadata (`ChunkMeta`)
 `computeChunkMeta()` scans each chunk from offset 0 to `min(chunk_size-4, MAX_FRAME_LENGTH-1)`, trying every position as a potential frame start. For each position that passes `isValidHeader` and profile matching:
@@ -424,13 +424,14 @@ cmake -B cmake-build-debug && cmake --build cmake-build-debug
 
 `input.mp3` defaults to the `FILENAME` macro in `main.cpp` if omitted (2026-07-18: this CLI override was previously undocumented-but-broken - `main()` ignored `argv` entirely despite this doc already showing the `[input.mp3]` usage; fixed alongside Milestone 1 so the two now actually agree).
 
-Output is written to `output.mp3` in the current directory. Chunk 0 of the input file is always treated as pinned (first in the output). `rp` also prints, after a successful reconstruction, how many chunks landed in their original position and whether the output is byte-identical to the source (C2).
+Output is written to `output.mp3` in the current directory. The first chunk is found from content and placed first (see Project Goal; `RP_START=pinned` keeps chunk 0 first instead). `rp` also prints, after a successful reconstruction, how many chunks landed in their original position and whether the output is byte-identical to the source (C2).
 
 **Environment variables** (all optional; defaults give deterministic, first-valid behaviour):
 
 | var | default | effect |
 |---|---|---|
 | `RP_SEED` | `1` (fixed) | shuffle RNG seed. `RP_SEED=random` draws from the clock. Before 2026-09-07 the default *was* the clock; it is now fixed so runs are reproducible (C1). |
+| `RP_START` | found | `RP_START=pinned`: chunk 0 is not moved and not searched for (the behaviour before 2026-10-27). Otherwise the start is swapped to a random position (`mt19937(seed+2)`) and found from content; log line `Start chunk: N candidate(s) ...`, report fields `start_candidates`, `start_xing`, `start_correct`. |
 | `RP_RANK` | on | `RP_RANK=0` disables the `global_gain` continuity ranking of DFS candidates. |
 | `RP_CBR` | on | `RP_CBR=0` disables the constant-bitrate frame-header filter (A3a) even when the stream is detected as CBR. |
 | `RP_AC3` | auto | arc-consistency prune (A4). Auto = on when the pre-shuffle check found 0 breaks. `RP_AC3=1` forces on, `=0` off. |

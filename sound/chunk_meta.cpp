@@ -553,3 +553,89 @@ bool deriveProfile(const vector<uint8_t>& chunk, StreamProfile& out) {
     if (haveXing) { out = xing; return true; }
     return false;
 }
+
+bool voteProfile(const vector<vector<uint8_t>>& chunks, StreamProfile& out) {
+    // deriveProfile on every chunk; a chunk can latch onto a false sync, but most land on a real
+    // frame, so the most common profile is the stream's. No chunk's position is used.
+    vector<pair<StreamProfile, int>> votes;
+    for (const auto& c : chunks) {
+        StreamProfile p{};
+        if (!deriveProfile(c, p)) continue;
+        bool found = false;
+        for (auto& v : votes) {
+            const StreamProfile& q = v.first;
+            if (q.versionID == p.versionID && q.layerID == p.layerID && q.channelIdx == p.channelIdx
+                && q.sampleRate == p.sampleRate && q.hasCrc == p.hasCrc) { ++v.second; found = true; break; }
+        }
+        if (!found) votes.push_back({p, 1});
+    }
+    if (votes.empty()) return false;
+    out = std::max_element(votes.begin(), votes.end(),
+                           [](const pair<StreamProfile, int>& a, const pair<StreamProfile, int>& b) {
+                               return a.second < b.second; })->first;
+    return true;
+}
+
+vector<StartCandidate> findStartCandidates(const vector<vector<uint8_t>>& chunks, const StreamProfile& prof) {
+    const bool mpeg1 = prof.versionID == 0b11;
+    vector<StartCandidate> out;
+    for (int i = 0; i < static_cast<int>(chunks.size()); ++i) {
+        const auto& c = chunks[i];
+        if (c.size() < 4) continue;
+        const uint32_t raw = computeChunkHeader(c, 0);
+        if (!Mp3FrameScanner::isValidHeader(raw)) continue;
+        bool ok;
+        Header h(raw, ok);
+        if (!ok || !prof.matches(h) || h.getFrameLength() <= 0) continue;
+        StartCandidate sc{i, isXingFrame(c, 0, h)};
+        if (prof.isLayerIII()) {
+            const FrameSideInfo si = parseFrameSideInfoAt(c, 0, mpeg1, prof.isMono());
+            if (!si.valid || si.mainDataBegin != 0) continue;   // reservoir is empty at the start
+        }
+        out.push_back(sc);
+    }
+    return out;
+}
+
+bool detectCBRUnordered(const vector<vector<uint8_t>>& chunks, const StreamProfile& prof, int& kbpsOut) {
+    vector<pair<int, int>> counts;   // (kbps, frames)
+    vector<int> infoKbps;            // bitrates of Info/VBRI frames at a chunk start
+    int total = 0;
+    for (int i = 0; i < static_cast<int>(chunks.size()); ++i) {
+        const auto& c = chunks[i];
+        // A "Xing" (not "Info") tag at a chunk start can only be the stream's first frame and
+        // marks the stream as VBR, as in detectCBR.
+        if (c.size() >= 4 && Mp3FrameScanner::isValidHeader(computeChunkHeader(c, 0))) {
+            bool ok;
+            Header h(computeChunkHeader(c, 0), ok);
+            if (ok && prof.matches(h) && isXingFrame(c, 0, h)) {
+                const int tag = 4 + h.crcBytes() + sideInfoSize(h.getVersionID(), h.isMono());
+                if (std::memcmp(&c[tag], "Xing", 4) == 0) return false;
+                infoKbps.push_back(h.getBitrate());
+            }
+        }
+        // One vote per chunk: the bitrate of the header at its chosen alignment. Complete frames
+        // don't work here: a 320 kbps frame doesn't fit in a 1 KB chunk.
+        const ChunkMeta m = computeChunkMeta(i, c, prof);
+        if (!m.valid || m.headOffset + 4 > static_cast<int>(c.size())) continue;
+        const uint32_t raw = computeChunkHeader(c, m.headOffset);
+        if (!Mp3FrameScanner::isValidHeader(raw)) continue;
+        bool ok;
+        Header h(raw, ok);
+        if (!ok) continue;
+        auto it = std::find_if(counts.begin(), counts.end(), [&](const pair<int, int>& p) { return p.first == h.getBitrate(); });
+        if (it == counts.end()) counts.push_back({h.getBitrate(), 1}); else ++it->second;
+        ++total;
+    }
+    if (total < 8) return false;
+    const auto best = *std::max_element(counts.begin(), counts.end(),
+                                        [](const pair<int, int>& a, const pair<int, int>& b) { return a.second < b.second; });
+    // A chunk can pick a false alignment, so allow 1% others. musiclib (107 tracks, 1 and 4 KB):
+    // CBR files >= 99.75%, VBR <= 80.4%.
+    if (best.first <= 0 || best.second * 100 < total * 99) return false;
+    // An Info frame at another bitrate (e.g. 64 kbps to fit the tag in a 32 kbps stream) made
+    // the ordered detectCBR see two bitrates; keep that verdict, or the filter rejects it.
+    for (int k : infoKbps) if (k != best.first) return false;
+    kbpsOut = best.first;
+    return true;
+}

@@ -21,7 +21,7 @@ one picture), chapter 6 (results) and chapter 8 (the keep-or-roll-back decision)
 2. Words you need (a small glossary)
 3. The pipeline in one picture
 4. Stage by stage
-   - 4.1 Cutting, pinning chunk 0, shuffling
+   - 4.1 Cutting, shuffling, finding the first chunk
    - 4.2 Reading each chunk on its own (`ChunkMeta`)
    - 4.3 Which chunk can follow which: the structural graph
    - 4.4 The bit reservoir: a second, stricter rule
@@ -217,12 +217,22 @@ view gets past it.
 
 ## 4. Stage by stage
 
-### 4.1 Cutting, pinning chunk 0, shuffling
+### 4.1 Cutting, shuffling, finding the first chunk
 
 **What happens.** The file is read and cut into chunks of `RP_CHUNK_SIZE` bytes (default
-1024). Chunk 0 stays first. The other chunks are shuffled with a random generator seeded
-with `RP_SEED` (default 1). Alongside the shuffle, the program keeps a hidden list of where
-each chunk *really* came from (`origIndexOf`).
+1024). All chunks are shuffled with a random generator seeded with `RP_SEED` (default 1).
+Alongside the shuffle, the program keeps a hidden list of where each chunk *really* came
+from (`origIndexOf`).
+
+**Finding the first chunk (since 2026-10-27; before, chunk 0 was simply kept first).** The
+first chunk must start exactly on a frame header, and its first frame must have
+`main_data_begin == 0`: nothing came before it, so the bit reservoir is empty. Mid-stream
+chunks rarely meet both. If several do, one whose first frame is a Xing/Info/VBRI frame wins,
+because only a stream's first frame is one. The chunk found is moved to the front, and every
+later stage treats it as the start, as before. On the fixtures this always finds the right
+chunk. On the `musiclib` corpus it fails to decide on about 5% of the files: their encoders
+write no Xing frame and often leave `main_data_begin` at 0. Then the choice is a guess, and
+the log says `AMBIGUOUS` (`CLAUDE.md`, Project Goal).
 
 **Why a fixed seed.** Early in the project the seed came from the clock, so two runs of the
 same file gave different results and claims in the notes could not be re-checked (the
