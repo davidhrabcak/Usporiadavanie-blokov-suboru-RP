@@ -45,6 +45,7 @@ one picture), chapter 6 (results) and chapter 8 (the keep-or-roll-back decision)
 9. Honest caveats
 10. What comes next
 11. Quick reference: the switches
+12. Where the ideas come from
 
 ---
 
@@ -1072,3 +1073,176 @@ Unchanged but central: `RP_SEED` (1), `RP_CHUNK_SIZE` (1024), `RP_LOCK_TAU` (1.5
 - `test/left_context_check.cpp` - proves `LeftContext` is bit-identical.
 - Benchmark data and scripts: `tmp/bench/runs.csv`, `tmp/bench/move_study.txt`,
   `tmp/scripts/` (not committed).
+
+---
+
+## 12. Where the ideas come from
+
+Added 2026-10-27. This chapter says, for each idea in this document, where it came from.
+There are three kinds:
+
+- **A. Published specifications and code** that the program follows or includes.
+- **B. Known, published methods** that the program uses, sometimes in a changed form.
+- **C. Ideas worked out in this project.** For these, the chapter names the plan, commit or
+  measurement where each one first appears. Where a published method is close to one of
+  them, that method is named as *related*. That does not mean the idea was taken from it.
+
+The references were checked on 2026-10-27, but only the bibliographic data (authors,
+title, venue, year). This is not a literature survey. In particular, published work on
+carving MP3 files specifically was not searched, so an earlier paper may already describe
+one of the C ideas.
+
+### A. Specifications and code the program builds on
+
+- **MP3 frame structure** (4.2, 4.3): the frame header, the bitrate and sample-rate tables,
+  the frame-length formula, the padding bit and the protection bit. Source: ISO/IEC 11172-3
+  (MPEG-1 Audio, 1993), and for the lower sample rates ISO/IEC 13818-3 (MPEG-2 Audio).
+  "MPEG 2.5" (8-11 kHz) is not part of any ISO standard. It is an extension by Fraunhofer IIS
+  that decoders support by convention.
+- **Layer III side info and the bit reservoir** (4.4, 4.5): `main_data_begin`,
+  `part2_3_length`, `global_gain`, `big_values`, scalefactors, granules. Source: ISO/IEC
+  11172-3, clause 2.4.1.7 and the Layer III decoding clauses. One detail comes from the
+  minimp3 code, not the standard text: the exact rule for updating the reservoir level,
+  `level_after = main_data_begin x 8 + produced - part2_3_length`. It was checked frame by
+  frame against minimp3's `L3_restore_reservoir` / `L3_save_reservoir` (commit `823b173`,
+  2026-07-11).
+- **The 16-bit CRC after the header** (CLAUDE.md item 9, added after this document was
+  written): ISO/IEC 11172-3. The idea that the protection bit can never change inside one
+  stream also follows from the standard. Using a changed bit to detect false headers is
+  this project's (commit `d432335`).
+- **Xing / Info / VBRI headers** (4.2): these are not standardised. Xing Technology's
+  encoder introduced the Xing header, the LAME encoder writes the same structure as "Info"
+  in CBR files, and VBRI comes from Fraunhofer's encoder. The layouts are known from those
+  encoders and their documentation.
+- **minimp3** (https://github.com/lieff/minimp3, by lieff, CC0): the Huffman tables
+  (`huffman_tables.cpp`, copied unchanged), the full decoder used for the PCM flux (4.7), and
+  the reference decoder used to cross-check the reservoir model.
+
+### B. Known methods the program uses
+
+**Framing the problem.**
+
+- **File fragments in order = a Hamiltonian path in a graph whose arrows are weighted by how
+  well two fragments fit together.** K. Shanmugasundaram, N. Memon, "Automatic reassembly
+  of document fragments via context based statistical models", ACSAC 2003; N. Memon,
+  A. Pal, "Automated reassembly of file fragmented images using greedy algorithms",
+  IEEE Trans. Image Processing 15(2), 2006. Survey: A. Pal, N. Memon, "The evolution of file
+  carving", IEEE Signal Processing Magazine 26(2), 2009. `rp` uses the same model (chunks =
+  nodes, possible successors = arrows). The weights come from MP3 structure and decoded
+  sound. Those papers use statistical models of the bytes.
+- **Checking a candidate order by parsing the file format** (the structural graph 4.3, the
+  reservoir check 4.4). S. Garfinkel, "Carving contiguous and fragmented files with fast
+  object validation", Digital Investigation 4S (DFRWS 2007). That paper validates whole
+  objects. `rp` applies the same principle to every junction separately. The same paper
+  measured how fragmented real disks are, which is the background for the note in CLAUDE.md
+  item 9 that real fragmentation is milder than this test model.
+- Related, not used: A. Pal, H. T. Sencar, N. Memon, "Detecting file fragmentation point
+  using sequential hypothesis testing", Digital Investigation 5 (DFRWS 2008). It finds where
+  a file breaks. `rp` instead assumes every chunk boundary may be a break.
+
+**Signal processing (4.7).**
+
+- **Spectral flux**: the change between the spectra of consecutive short windows. It is a
+  standard measure for detecting where notes start (onsets). J. P. Bello, L. Daudet,
+  S. Abdallah, C. Duxbury, M. Davies, M. Sandler, "A tutorial on onset detection in music
+  signals", IEEE Trans. Speech and Audio Processing 13(5), 2005. That paper also covers
+  dividing by a local median, which is close to how `rp` divides by the median flux before the
+  junction. Using a flux spike to judge whether a *splice* is real is this project's idea
+  (C).
+- **FFT and the Hann window**: J. W. Cooley, J. W. Tukey, "An algorithm for the machine
+  calculation of complex Fourier series", Math. Comp. 19, 1965; F. J. Harris, "On the use
+  of windows for harmonic analysis with the discrete Fourier transform", Proc. IEEE 66(1),
+  1978.
+
+**Graphs and search.**
+
+- **Arc consistency (AC-3)** (4.6): A. K. Mackworth, "Consistency in networks of
+  relations", Artificial Intelligence 8(1), 1977. `rp`'s rules are degree rules for a
+  Hamiltonian path: a chunk with one possible successor must take it, and a chunk with one
+  possible predecessor must be taken by it. They are run to a fixpoint the way AC-3 runs.
+- **Gluing forced chains into supernodes** (4.10): standard graph contraction. No single
+  source.
+- **Backtracking depth-first search** (4.11): S. W. Golomb, L. D. Baumert, "Backtrack
+  programming", J. ACM 12(4), 1965.
+- **Beam search** (4.11): B. T. Lowerre, "The Harpy speech recognition system", PhD thesis,
+  Carnegie Mellon University, 1976.
+- **Iterative broadening** (4.11): M. L. Ginsberg, W. D. Harvey, "Iterative broadening",
+  Artificial Intelligence 55(2-3), 1992. `rp` follows it directly: retry with the
+  breadth limit K = 1, 2, 3, 4, 6, 9, unlimited.
+- **Branch and bound** (the "best-of" search, `RP_BESTOF`): A. H. Land, A. G. Doig, "An
+  automatic method of solving discrete programming problems", Econometrica 28(3), 1960.
+
+**Global matching (4.12).**
+
+- **The assignment problem**: H. W. Kuhn, "The Hungarian method for the assignment
+  problem", Naval Research Logistics Quarterly 2, 1955; J. Munkres, "Algorithms for the
+  assignment and transportation problems", J. SIAM 5(1), 1957.
+- **Successive shortest paths with Dijkstra and potentials**, which is how `globalMatch`
+  solves it: J. Edmonds, R. M. Karp, "Theoretical improvements in algorithmic efficiency for
+  network flow problems", J. ACM 19(2), 1972 (independently N. Tomizawa, Networks 1, 1971);
+  E. W. Dijkstra, "A note on two problems in connexion with graphs", Numerische Mathematik
+  1, 1959. The slot assignment (`slot_fill.cpp`) follows the O(n^3) form described on
+  e-maxx / cp-algorithms ("Hungarian algorithm").
+- **The assignment as a relaxation of the path problem, followed by patching the cycles
+  into one tour**: R. M. Karp, "A patching algorithm for the nonsymmetric
+  traveling-salesman problem", SIAM J. Computing 8(4), 1979. `rp`'s cycle splicing is a
+  version of this. It only allows real arrows of the graph and inserts each cycle at its
+  cheapest place in the path.
+- Named in `PLAN_probabilistic_hamiltonian_path.md` but not used yet: assignment-based
+  branch and bound for the asymmetric TSP (G. Carpaneto, M. Dell'Amico, P. Toth, ACM Trans.
+  Math. Software 21(4), 1995), LKH-3 (K. Helsgaun, Roskilde University, 2017) and Concorde.
+
+**Repair (4.13).**
+
+- **Block move** = *Or-opt*: I. Or, PhD thesis, Northwestern University, 1976.
+- **Block swap** belongs to the family of 2-opt / 3-opt exchanges: G. A. Croes, "A method
+  for solving traveling-salesman problems", Operations Research 6(6), 1958; S. Lin,
+  "Computer solutions of the traveling salesman problem", Bell System Technical Journal
+  44(10), 1965.
+- **Best-improvement local search, and re-scoring a move incrementally with prefix sums**:
+  standard local-search practice. No single source.
+
+**Measuring.**
+
+- **AUC** (how often a true junction scores better than a wrong one): H. B. Mann, D. R.
+  Whitney, Annals of Mathematical Statistics 18(1), 1947; J. A. Hanley, B. J. McNeil,
+  Radiology 143(1), 1982, which shows this equals the area under the ROC curve.
+- **Kendall's tau** (how close a found order is to the true one): M. G. Kendall, "A new
+  measure of rank correlation", Biometrika 30(1/2), 1938.
+- **A held-out set** that is not used to tune the program: standard practice in experiment
+  design. Chapter 9 explains where this project broke that rule (the choice of
+  `RP_REPAIR_MIN_GAIN`).
+
+### C. Ideas worked out in this project
+
+The commit or plan where each idea first appears. Dates are those of the commits.
+
+| idea | section | first appears | related published work |
+|---|---|---|---|
+| Test model: equal chunks shuffled, chunk 0 pinned | 4.1 | project start (`dc7b392`, 2025-11-20) | - |
+| Chunk-local frame scan; Case 1 / Case 2 successor rules (`canFollow`) | 4.2, 4.3 | `72d89ff` (2026-04-17); `frameStarts` index `5c6a045` (2026-04-29) | Garfinkel 2007 (validation by parsing) |
+| Choosing a chunk's alignment by tail quality before frame count | 4.2 | `27988a6` (2026-07-08) | - |
+| Reservoir check per placement during the search; real `part2_3_length` consumption | 4.4 | `823b173` (2026-07-11) | ISO 11172-3 + minimp3 (the rule itself, A) |
+| Decoding a split frame's side info from both chunks of a candidate edge | 4.4 | `9aeace0` (2026-07-18), `PLAN_sideinfo_mainbits.md` M1 | - |
+| Ranking candidates by `global_gain` continuity | 4.11 | `f059553` (2026-09-04), measured with `sideinfo_probe` | - |
+| Beam limit + iterative broadening for large graphs | 4.11 | `949d331` (2026-09-07) | Lowerre 1976; Ginsberg & Harvey 1992 |
+| "Best-of" search (measured worse, kept off) | 4.11 | `95dcc3a` (2026-09-07) | Land & Doig 1960 |
+| Degree-based arc consistency before the search | 4.6 | `b0f5eaa` (2026-09-09) | Mackworth 1977 |
+| Partial spectral decode as a junction signal ("Milestone 2") | 4.11 | `6fbd6bd`, `44c6ab6` (2026-09-10); listed earlier in CLAUDE.md "Alternative approaches" | - |
+| Checking the straddling frame's Huffman bits (measured, rejected) | - | `656dca1` (2026-09-10), `PLAN_huffman_junction_filter.md` | - |
+| Judging a junction by the PCM flux spike divided by the median flux before it | 4.7 | `PLAN_full_pcm_decode.md` (`8789498`, 2026-10-08), `494063e` | Bello et al. 2005 (the flux measure) |
+| Confident-edge locking: lock `a -> b` when it beats every rival on both sides by `tau` | 4.9 | `be2de45` (2026-10-09) | closest analogue: "best buddies" (mutually best pieces) in D. Pomeranz, M. Shemesh, O. Ben-Shahar, "A fully automated greedy square jigsaw puzzle solver", CVPR 2011 |
+| Median over predecessor contexts for a context-dependent edge score | 4.9 | `be2de45` | - |
+| Lock-threshold schedule with restart from the unlocked graph | 4.9 | `89ebcba` (2026-10-09) | - |
+| Repair on the graph from before locking, so wrong locks can be undone | 4.13 | `89ebcba` | Or 1976; Croes 1958 (the moves) |
+| Decode caps that count decodes instead of measuring time, so the result is the same on every machine | 4.9, 4.12 | `ef55e44`, `f9ad99c` (2026-10-12) | - |
+| Global min-cost successor matching with a virtual END slot | 4.12 | `9d705fe` (2026-10-12); the idea was first listed as "Hungarian" in CLAUDE.md "Alternative approaches" and `PLAN_huffman_junction_filter.md` | Kuhn 1955; Karp 1979 |
+| Repair cost in a fixed order: breaks, then unmeasured junctions, then flux; "suspects first"; reservoir re-sync | 4.13 | `9d705fe`, `7fee039` (2026-10-18) | - |
+| Provenance label and stability gap | 4.17 | `eac8255` (2026-10-17) | - |
+| Reservoir arc filter, sound because the check is monotone in the starting level | 4.5 | argument in `c3732a1` (2026-10-17), code in `7fee039` (2026-10-18) | - |
+| AC-3 forces a last remaining successor only once the stream's end is known | 4.6 | `844fe4b` (2026-10-18) | - |
+| `LeftContext`: decode the left side once, copy the decoder state for each candidate | 4.8 | `7fee039` | - |
+| Minimum-gain rule for flux-only repair moves | 4.14 | `7fee039`; threshold from `tmp/bench/move_study.txt` | - |
+| Iterated matching (forbid arcs at breaks, solve again; measured, off) | 4.16 | `7fee039` | related to adding constraints only when they are violated in branch and bound (`PLAN_probabilistic_hamiltonian_path.md`) |
+| *After this document:* PCM left side sized by frame length | CLAUDE.md item 9 | `b115cae` (2026-10-26) | - |
+| *After this document:* headerless chunks as a pool placed into gap slots by assignment on flux + CRC | CLAUDE.md item 9 | `PLAN_headerless_chunks.md`, `5c3e370` (2026-10-26) | Kuhn 1955 (the assignment) |
