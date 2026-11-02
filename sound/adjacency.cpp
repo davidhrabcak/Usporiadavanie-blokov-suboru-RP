@@ -49,7 +49,8 @@ bool canFollow(const ChunkMeta& a, const ChunkMeta& b) {
 
     const int rem = tailRemaining(a);
 
-    // Case 1: tailOverflow is 0, the next frame's header is fully contained in b.
+    // Case 1: the tail frame's header is inside a (or a ends on a frame boundary), so its
+    // length is known and b must have a frame start exactly where that frame ends.
     if (rem >= 0) {
         // Accept if rem is any known valid frame start in b, not just the
         // "best" headOffset that computeChunkMeta picked.
@@ -90,8 +91,9 @@ vector<vector<int>> buildAdjacency(const vector<ChunkMeta>& metas) {
     unordered_map<int, vector<int>> byFrameStart;
     byFrameStart.reserve(n * 4);
     for (int i = 0; i < n; ++i)
-        for (int pos : metas[i].frameStarts)
-            byFrameStart[pos].push_back(i);
+        if (metas[i].valid)
+            for (int pos : metas[i].frameStarts)
+                byFrameStart[pos].push_back(i);
 
     // Index for Case 2 (only 1-3 bytes of header is in chunk a): for each possible tov (1..3), group valid chunks by the
     // (4-tov)-byte chunk header prefix that a reconstructed header would need from them.
@@ -106,7 +108,9 @@ vector<vector<int>> buildAdjacency(const vector<ChunkMeta>& metas) {
     }
 
     for (int i = 0; i < n; ++i) {
-        if (metas[i].finalFragment) continue; // end of stream - nothing follows
+        // Same rules as canFollow (test/graph_check checks it): an invalid chunk connects to
+        // nothing - its tailRemaining is 0, which would link it to every chunk with a frame at 0.
+        if (!metas[i].valid || metas[i].finalFragment) continue; // (finalFragment: end of stream)
         int rem = tailRemaining(metas[i]);
         if (rem >= 0) {
             auto it = byFrameStart.find(rem);

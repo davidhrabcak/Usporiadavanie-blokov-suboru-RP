@@ -53,7 +53,7 @@ The offset with the most consecutive frames becomes `headOffset`. Tail metadata 
 **Case 2** (`tailOverflow` ∈ {1,2,3}): the tail frame's 4-byte header is split across chunks.
 Reconstructs the header from `a.tailHeadBytes[0..tov-1]` + `b.chunkHead[0..3-tov]`, validates it, and checks that `b` has a frame at `frameLen - tov`.
 
-`buildAdjacency()` uses a `byFrameStart` hash map (frameStart position → list of chunk indices) for O(1) Case-1 lookups. Case-2 chunks still require an O(n) scan.
+`buildAdjacency()` uses a `byFrameStart` hash map (frameStart position → list of chunk indices) for O(1) Case-1 lookups, and groups chunks by their first 1-3 bytes for Case 2 (Known Limitations item 4). Invalid chunks get no arcs, as in `canFollow` (2026-11-03: before, an invalid chunk's `tailRemaining` of 0 linked it to every chunk with a frame at offset 0 - found by `graph_check` on 320 kbps clips at 1 KB).
 
 **Reservoir arc filter (2026-10-18, `RP_RESV_FILTER`)**: after `buildAdjacency`, arcs a→b that fail the bit-reservoir check even with `a` entered on a full reservoir are dropped. Sound because the check is monotone in the entry level (`advanceReservoirFrame`: the only level-dependent test is `mainDataBegin > level/8`, and a frame's output level does not depend on the entry level). Gated on the reservoir model passing the true order, like AC-3. Removes 40-85% of CBR arcs (0 true arcs on every fixture) and lets AC-3 cascade (cbr128_30s 1 KB: 11003 → 1437 arcs). It exposed a latent AC-3 bug: the successor-side rule forced a chunk's single remaining arc even for the stream's last chunk (no true successor); now that rule applies only once the end is known.
 
@@ -469,7 +469,7 @@ Output is written to `output.mp3` in the current directory. The first chunk is f
 | `RP_PROGRESS` | ~10M | print a `[nodes=… depth=… elapsed=…]` line every N placements. |
 
 **Verification scripts** (in `sound/`, run from there):
-- `test/ci_sanity.sh build` - end-to-end pipeline check on the committed synthetic fixture (also run by CI).
+- `test/ci_sanity.sh build` - end-to-end pipeline check on the committed synthetic fixture (also run by CI). It also runs `graph_check` (`test/graph_check.cpp`): `buildAdjacency`'s indexed graph must equal `canFollow` over every ordered pair, at 1 and 4 KB. `build/graph_check FILE...` runs it on any file.
 - `test/measurements.sh build` - regenerate this doc's quantitative claims (C3).
 - `test/regression.sh [--update] build` - local accuracy regression vs `test/regression_baseline.tsv` (C4; needs the fixtures).
 - `test/corpus.py` - corpus tests (`PLAN_test_automation.md`; Python stdlib only; run from `sound/`):

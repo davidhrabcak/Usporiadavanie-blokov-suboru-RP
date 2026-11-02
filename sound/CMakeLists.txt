@@ -84,3 +84,12 @@ add_executable(left_context_check
         pcm_decoder_impl.cpp)
 target_include_directories(left_context_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_features(left_context_check PRIVATE cxx_std_17)
+
+# buildAdjacency agrees with canFollow on every pair (run by test/ci_sanity.sh).
+add_executable(graph_check
+        test/graph_check.cpp
+        frame_scanner.cpp
+        Header.cpp
+        chunk_meta.cpp
+        adjacency.cpp)
+target_include_directories(graph_check PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
