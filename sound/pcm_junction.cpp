@@ -6,7 +6,7 @@
 #include <cstring>
 
 #include "Header.hpp"
-#include "frame_scanner.hpp"   // packHeaderBytes
+#include "Header.hpp"
 
 #define MINIMP3_FLOAT_OUTPUT
 #include "third_party/minimp3.h"
@@ -26,11 +26,8 @@ Window decodeWindow(const std::vector<const std::vector<uint8_t>*>& segs, int bo
     // around the boundary instead of whole chunks - see PRE_BYTES/POST_BYTES in the header.
     std::vector<std::pair<long, int>> walk; // (frame start, frame length)
     for (long pos = startOffset; pos + 4 <= (long)buf.size();) {
-        const uint32_t raw = packHeaderBytes(&buf[pos]);
-        if (!Mp3FrameScanner::isValidHeader(raw)) break; // (Header's ctor would log to stderr)
-        bool ok = false;
-        Header h(raw, ok);
-        if (!ok) break;
+        Header h;
+        if (!Header::parse(&buf[pos], h)) break;
         const int len = h.getFrameLength();
         if (len <= 4 || pos + len > (long)buf.size()) break;
         walk.push_back({pos, len});
@@ -59,8 +56,8 @@ Window decodeWindow(const std::vector<const std::vector<uint8_t>*>& segs, int bo
     for (size_t wi = first; wi < last; ++wi) {
         const long pos = walk[wi].first;
         const int  len = walk[wi].second;
-        bool ok = false;
-        Header h(packHeaderBytes(&buf[pos]), ok);
+        Header h;
+        Header::parse(&buf[pos], h);   // the walk above already accepted this frame
 
         // Feed exactly one frame: minimp3's `frame_size == mp3_bytes` path, so it never has to
         // resync on the following header (which would reset the reservoir/overlap state).
@@ -293,11 +290,8 @@ LeftContext::LeftContext(const std::vector<const std::vector<uint8_t>*>& left, i
     std::vector<std::pair<long, int>> walk;
     long pos = startOffset;
     while (pos + 4 <= Lb) {
-        const uint32_t raw = packHeaderBytes(&buf[pos]);
-        if (!Mp3FrameScanner::isValidHeader(raw)) { I.dead = true; break; }
-        bool ok = false;
-        Header h(raw, ok);
-        if (!ok) { I.dead = true; break; }
+        Header h;
+        if (!Header::parse(&buf[pos], h)) { I.dead = true; break; }
         const int len = h.getFrameLength();
         if (len <= 4) { I.dead = true; break; }
         if (pos + len > Lb) break;          // the junction frame: straddles the boundary
@@ -319,8 +313,8 @@ LeftContext::LeftContext(const std::vector<const std::vector<uint8_t>*>& left, i
     for (size_t wi = first; wi < jf; ++wi) {
         const long fp = walk[wi].first;
         const int len = walk[wi].second;
-        bool ok = false;
-        Header h(packHeaderBytes(&buf[fp]), ok);
+        Header h;
+        Header::parse(&buf[fp], h);   // the walk above already accepted this frame
         mp3dec_frame_info_t info;
         std::memset(&info, 0, sizeof(info));
         const int ns = mp3dec_decode_frame(&I.dec, &buf[fp], len, pcm.data(), &info);
@@ -373,11 +367,8 @@ Metrics LeftContext::score(const std::vector<uint8_t>& cand) const {
     // header walk from the junction frame on, with the post-side stop rule
     std::vector<std::pair<long, int>> walk;
     for (long pos = 0; pos + 4 <= (long)buf.size();) {
-        const uint32_t raw = packHeaderBytes(&buf[pos]);
-        if (!Mp3FrameScanner::isValidHeader(raw)) break;
-        bool ok = false;
-        Header h(raw, ok);
-        if (!ok) break;
+        Header h;
+        if (!Header::parse(&buf[pos], h)) break;
         const int len = h.getFrameLength();
         if (len <= 4 || pos + len > (long)buf.size()) break;
         walk.push_back({pos, len});
@@ -397,8 +388,8 @@ Metrics LeftContext::score(const std::vector<uint8_t>& cand) const {
     for (size_t wi = 0; wi < last; ++wi) {
         const long fp = walk[wi].first;
         const int len = walk[wi].second;
-        bool ok = false;
-        Header h(packHeaderBytes(&buf[fp]), ok);
+        Header h;
+        Header::parse(&buf[fp], h);   // the walk above already accepted this frame
         mp3dec_frame_info_t info;
         std::memset(&info, 0, sizeof(info));
         const int ns = mp3dec_decode_frame(&dec, &buf[fp], len, pcm.data(), &info);

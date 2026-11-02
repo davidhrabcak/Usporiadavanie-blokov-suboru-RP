@@ -31,11 +31,8 @@ static int reconstructTailHeaderOffset(const uint8_t* tailHead, const int tov,
     for (int j = 0; j < tov; ++j) hdr[j] = tailHead[j];
     for (int j = tov; j < 4; ++j) hdr[j] = rest[j - tov];
 
-    const uint32_t raw = packHeaderBytes(hdr);
-
-    bool ok;
-    const Header h(raw, ok);
-    if (!ok || !profile.matches(h)) return -1;
+    Header h;
+    if (!Header::parse(hdr, h) || !profile.matches(h)) return -1;
 
     const int frameLen = h.getFrameLength();
     if (frameLen <= 0) return -1;
@@ -313,10 +310,9 @@ SplitTails promoteSplitTails(vector<ChunkMeta>& metas, const vector<vector<uint8
             if (!st.expected[tt]) continue;
             uint8_t hdr[4];
             for (int k = 0; k < 4; ++k) hdr[k] = k < tt ? ch[C - tt + k] : proto[k];
-            
-            bool ok;
-            Header h(packHeaderBytes(hdr), ok);
-            if (ok && prof.matches(h) && h.getFrameLength() > 0) t = tt;
+
+            Header h;
+            if (Header::parse(hdr, h) && prof.matches(h) && h.getFrameLength() > 0) t = tt;
         }
         if (!t) continue;
         bool headCompletes = false;
@@ -325,9 +321,8 @@ SplitTails promoteSplitTails(vector<ChunkMeta>& metas, const vector<vector<uint8
             uint8_t hdr[4];
             for (int k = 0; k < 4; ++k) hdr[k] = k < tt ? proto[k] : ch[k - tt];
 
-            bool ok;
-            Header h(packHeaderBytes(hdr), ok);
-            headCompletes = ok && prof.matches(h) && h.getFrameLength() > 0;
+            Header h;
+            headCompletes = Header::parse(hdr, h) && prof.matches(h) && h.getFrameLength() > 0;
         }
         if (headCompletes) continue;
         m.valid          = true;

@@ -3,7 +3,6 @@
 
 #include <cstdint>
 #include <vector>
-#include "chunk_meta.hpp"
 #include "Header.hpp"
 
 /**
@@ -136,6 +135,10 @@ inline int tailRemaining(const ChunkMeta& m) {
 
 // MAX_FRAME_LENGTH: MPEG1 Layer I @ 320kbps / 32kHz + padding = 1441 bytes
 static constexpr int MAX_FRAME_LENGTH = 1441;
+
+// The header at buf[off, off+4): true if it decodes (Header::parse) and matches `prof`.
+// Frame length is not checked (see Header::parse).
+bool readHeaderAt(const std::vector<uint8_t>& buf, int off, const StreamProfile& prof, Header& h);
 
 // Layer III side-info block size in bytes: MPEG1 32 (stereo) / 17 (mono), MPEG2/2.5 17 (stereo) / 9 (mono).
 int sideInfoSize(int versionID, bool isMono);

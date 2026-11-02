@@ -179,9 +179,8 @@ int main(int argc, char** argv) {
             if (!metas[i].valid) continue;
             for (int off : metas[i].frameStarts) {
                 if (off + 4 > (int)chunks[i].size()) continue;
-                bool ok = false;
-                Header h(packHeaderBytes(&chunks[i][off]), ok);
-                if (!ok) continue;
+                Header h;
+                if (!Header::parse(&chunks[i][off], h)) continue;
                 const int br = h.getBitrate();
                 ++total;
                 if (br != modalKbps) ++nonModal;
@@ -252,10 +251,8 @@ int main(int argc, char** argv) {
             // decoded frame length - shows whether computeChunkMeta latched a spurious sync.
             auto scanHeaders = [&](const char* where, const vector<uint8_t>& c, int from, int to) {
                 for (int k = from; k + 4 <= to && k + 4 <= (int)c.size(); k++) {
-                    const uint32_t raw = packHeaderBytes(&c[k]);
-                    if (!Mp3FrameScanner::isValidHeader(raw)) continue;
-                    bool ok; Header h(raw, ok);
-                    if (!ok || !profile.matches(h)) continue;
+                    Header h;
+                    if (!readHeaderAt(c, k, profile, h)) continue;
                     printf("    %s header @%d: %d kbps, len %d%s\n", where, k, h.getBitrate(), h.getFrameLength(),
                            (k + h.getFrameLength() > (int)c.size()) ? "  (spills past chunk end)" : "");
                 }
@@ -464,8 +461,8 @@ int main(int argc, char** argv) {
         for (int k = 0; k < nf; ++k) {
             const long soff = static_cast<long>(frames[k].position) - base;
             if (soff < 0 || soff + 4 > (long)stream.size()) break;
-            bool ok; Header h(packHeaderBytes(&stream[soff]), ok);
-            if (!ok || !profile.matches(h)) { res.clear(); continue; }
+            Header h;
+            if (!readHeaderAt(stream, (int)soff, profile, h)) { res.clear(); continue; }
             const int sideSz = sideInfoSize(h.getVersionID(), h.isMono());
             const long payStart = soff + 4 + h.crcBytes() + sideSz;
             const long payEnd = (k + 1 < nf)
@@ -515,8 +512,8 @@ int main(int argc, char** argv) {
         int clFirstOk = 0, clLastOk = 0, clChunks = 0;
         for (int i = 0; i < n; ++i) {
             if (!metas[i].valid || metas[i].frames.empty()) continue;
-            bool ok; Header h(packHeaderBytes(&chunks[i][metas[i].frames.front().offset]), ok);
-            if (!ok) continue;
+            Header h;
+            if (!Header::parse(&chunks[i][metas[i].frames.front().offset], h)) continue;
             const int sideSz = sideInfoSize(h.getVersionID(), h.isMono());
             ++clChunks;
             // chunk-local main-data stream: leading headOffset bytes + each complete frame's payload.
@@ -657,8 +654,8 @@ int main(int argc, char** argv) {
         for (int k = 0; k < nf; ++k) {
             const long soff = static_cast<long>(frames[k].position) - base;
             if (soff < 0 || soff + 4 > (long)stream.size()) break;
-            bool ok; Header h(packHeaderBytes(&stream[soff]), ok);
-            if (!ok || !profile.matches(h)) { res.clear(); continue; }
+            Header h;
+            if (!readHeaderAt(stream, (int)soff, profile, h)) { res.clear(); continue; }
             const int sideSz = sideInfoSize(h.getVersionID(), h.isMono());
             const int flen = h.getFrameLength();
             const long payStart = soff + 4 + h.crcBytes() + sideSz;

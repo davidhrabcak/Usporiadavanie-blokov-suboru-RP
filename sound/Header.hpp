@@ -4,9 +4,20 @@
 #include <cstdint>
 #include <string>
 
+// Packs 4 consecutive bytes (MSB-first) into the 32-bit value an MP3 frame header decodes from.
+inline uint32_t packHeaderBytes(const uint8_t* b) {
+    return (static_cast<uint32_t>(b[0]) << 24) | (static_cast<uint32_t>(b[1]) << 16)
+         | (static_cast<uint32_t>(b[2]) << 8)  |  static_cast<uint32_t>(b[3]);
+}
+
 class Header {
 public:
-    explicit Header(unsigned int input, bool &ok);
+    Header() = default;
+
+    // Decodes the 4 header bytes at `p` into `out`. False if they aren't a valid frame header
+    // (sync, version, layer, sample rate). The frame length is not checked: a free-format
+    // (bitrate index 0) or bitrate index 15 header decodes with getFrameLength() == -1.
+    static bool parse(const uint8_t* p, Header& out);
 
     int getBitrate() const;
     int getSampleRate() const;
@@ -24,7 +35,7 @@ public:
     int crcBytes() const { return hasCrc() ? 2 : 0; }
 
 private:
-    uint32_t raw;
+    uint32_t raw{};
     int bitrate{};
     int sampleRate{};
     bool padding{};

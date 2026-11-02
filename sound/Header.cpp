@@ -1,16 +1,10 @@
 #include "Header.hpp"
 
-#include <iostream>
 
-using namespace std;
-
-Header::Header(const unsigned int input, bool &ok) {
-    raw = input;
-    if (synchValid()) {
-        ok = decode();
-    } else {
-        ok = false;
-    }
+bool Header::parse(const uint8_t* p, Header& out) {
+    out = Header();
+    out.raw = packHeaderBytes(p);
+    return out.synchValid() && out.decode();
 }
 
 int Header::getBitrate() const { return bitrate; }
@@ -74,10 +68,7 @@ bool Header::decodeBitrate(const uint8_t bitrateIndex,
     static constexpr int v2All[16] = {0, 8, 16, 24, 32, 40, 48, 56,
                                  64, 80, 96, 112, 128, 144, 160, -1};
 
-    if (bitrateIndex > 15) {
-        cerr << "Invalid bitrate index" << endl;
-        return false;
-    }
+    if (bitrateIndex > 15) return false;
 
     switch (layerIndex) {
         case 0b01:
@@ -95,10 +86,8 @@ bool Header::decodeBitrate(const uint8_t bitrateIndex,
             else bitrate = v2L1[bitrateIndex];
             return true;
 
-        default: {
-            cerr << "decodeBitrate: Unknown layer index " << static_cast<int>(layerIndex) << endl;
+        default:
             return false;
-        }
     }
 }
 

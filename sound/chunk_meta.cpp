@@ -61,9 +61,8 @@ static bool isXingFrame(const vector<uint8_t>& chunk, const int off, const Heade
        std::memcmp(ptr, "VBRI", 4) == 0;
 }
 
-// Caller must first check the chunk has at least 4 bytes remaining from `index`.
-static uint32_t computeChunkHeader(const vector<uint8_t>& chunk, const int index) {
-    return packHeaderBytes(&chunk[index]);
+bool readHeaderAt(const vector<uint8_t>& buf, const int off, const StreamProfile& prof, Header& h) {
+    return off >= 0 && off + 4 <= static_cast<int>(buf.size()) && Header::parse(&buf[off], h) && prof.matches(h);
 }
 
 /**
@@ -314,13 +313,8 @@ static int tryParse(const vector<uint8_t>& chunk,
     tailPartialLen  = 0;
 
     while (i + 4 <= static_cast<int>(chunk.size())) {
-        const uint32_t raw = computeChunkHeader(chunk, i);
-        if (!Mp3FrameScanner::isValidHeader(raw)) break;
-
-        bool ok;
-        Header h(raw, ok);
-        if (!ok) break;
-        if (!expected.matches(h)) break;
+        Header h;
+        if (!readHeaderAt(chunk, i, expected, h)) break;
 
         const int len = h.getFrameLength();
         if (len <= 0) break;
@@ -404,14 +398,8 @@ ChunkMeta computeChunkMeta(const int chunkIndex,
     const int limit = min(static_cast<int>(chunk.size()) - 4, MAX_FRAME_LENGTH - 1);
 
     for (int off = 0; off <= limit; ++off) {
-        const uint32_t raw = computeChunkHeader(chunk, off);
-
-        if (!Mp3FrameScanner::isValidHeader(raw)) continue;
-
-        bool ok;
-        Header h(raw, ok);
-        if (!ok) continue;
-        if (!expected.matches(h)) continue;
+        Header h;
+        if (!readHeaderAt(chunk, off, expected, h)) continue;
 
         meta.frameStarts.push_back(off);
 
@@ -486,11 +474,8 @@ ChunkMeta computeChunkMeta(const int chunkIndex,
 bool detectCBR(const vector<uint8_t>& stream, const StreamProfile& prof, int& kbpsOut, const int minFrames) {
     int i = 0, frames = 0, kbps = -1;
     while (i + 4 <= static_cast<int>(stream.size())) {
-        const uint32_t raw = computeChunkHeader(stream, i);
-        if (!Mp3FrameScanner::isValidHeader(raw)) break;
-        bool ok;
-        Header h(raw, ok);
-        if (!ok || !prof.matches(h)) break;
+        Header h;
+        if (!readHeaderAt(stream, i, prof, h)) break;
         const int len = h.getFrameLength();
         if (len <= 0) break;
         const int br = h.getBitrate();
@@ -520,13 +505,8 @@ bool deriveProfile(const vector<uint8_t>& chunk, StreamProfile& out) {
     bool haveXing = false;
     StreamProfile xing{};
     for (int i = 0; i + 4 <= static_cast<int>(chunk.size()); ++i) {
-        const uint32_t raw = computeChunkHeader(chunk, i);
-
-        if (!Mp3FrameScanner::isValidHeader(raw)) continue;
-
-        bool ok;
-        Header h(raw, ok);
-        if (!ok) continue;
+        Header h;
+        if (!Header::parse(&chunk[i], h)) continue;
         const int frameLen = h.getFrameLength();
         if (frameLen <= 0) continue;
 
@@ -581,12 +561,8 @@ vector<StartCandidate> findStartCandidates(const vector<vector<uint8_t>>& chunks
     vector<StartCandidate> out;
     for (int i = 0; i < static_cast<int>(chunks.size()); ++i) {
         const auto& c = chunks[i];
-        if (c.size() < 4) continue;
-        const uint32_t raw = computeChunkHeader(c, 0);
-        if (!Mp3FrameScanner::isValidHeader(raw)) continue;
-        bool ok;
-        Header h(raw, ok);
-        if (!ok || !prof.matches(h) || h.getFrameLength() <= 0) continue;
+        Header h;
+        if (!readHeaderAt(c, 0, prof, h) || h.getFrameLength() <= 0) continue;
         StartCandidate sc{i, isXingFrame(c, 0, h)};
         if (prof.isLayerIII()) {
             const FrameSideInfo si = parseFrameSideInfoAt(c, 0, mpeg1, prof.isMono());
@@ -605,24 +581,18 @@ bool detectCBRUnordered(const vector<vector<uint8_t>>& chunks, const StreamProfi
         const auto& c = chunks[i];
         // A "Xing" (not "Info") tag at a chunk start can only be the stream's first frame and
         // marks the stream as VBR, as in detectCBR.
-        if (c.size() >= 4 && Mp3FrameScanner::isValidHeader(computeChunkHeader(c, 0))) {
-            bool ok;
-            Header h(computeChunkHeader(c, 0), ok);
-            if (ok && prof.matches(h) && isXingFrame(c, 0, h)) {
-                const int tag = 4 + h.crcBytes() + sideInfoSize(h.getVersionID(), h.isMono());
-                if (std::memcmp(&c[tag], "Xing", 4) == 0) return false;
-                infoKbps.push_back(h.getBitrate());
-            }
+        Header h0;
+        if (readHeaderAt(c, 0, prof, h0) && isXingFrame(c, 0, h0)) {
+            const int tag = 4 + h0.crcBytes() + sideInfoSize(h0.getVersionID(), h0.isMono());
+            if (std::memcmp(&c[tag], "Xing", 4) == 0) return false;
+            infoKbps.push_back(h0.getBitrate());
         }
         // One vote per chunk: the bitrate of the header at its chosen alignment. Complete frames
         // don't work here: a 320 kbps frame doesn't fit in a 1 KB chunk.
         const ChunkMeta m = computeChunkMeta(i, c, prof);
         if (!m.valid || m.headOffset + 4 > static_cast<int>(c.size())) continue;
-        const uint32_t raw = computeChunkHeader(c, m.headOffset);
-        if (!Mp3FrameScanner::isValidHeader(raw)) continue;
-        bool ok;
-        Header h(raw, ok);
-        if (!ok) continue;
+        Header h;
+        if (!Header::parse(&c[m.headOffset], h)) continue;
         auto it = std::find_if(counts.begin(), counts.end(), [&](const pair<int, int>& p) { return p.first == h.getBitrate(); });
         if (it == counts.end()) counts.push_back({h.getBitrate(), 1}); else ++it->second;
         ++total;
