@@ -150,8 +150,8 @@ int main(int argc, char** argv) {
     vector<ChunkSI> si(n);
     for (int i = 0; i < n; ++i) {
         if (!metas[i].valid || metas[i].frames.empty()) continue;
-        const FrameSideInfo f0 = parseFrameSideInfoAt(chunks[i], metas[i].frames.front().offset, mpeg1, mono);
-        const FrameSideInfo f1 = parseFrameSideInfoAt(chunks[i], metas[i].frames.back().offset,  mpeg1, mono);
+        const FrameSideInfo f0 = parseFrameSideInfoAt(chunks[i], metas[i].frames.front().offset);
+        const FrameSideInfo f1 = parseFrameSideInfoAt(chunks[i], metas[i].frames.back().offset);
         if (!f0.valid || !f1.valid) continue;
         si[i].ok = true;
         si[i].first = toFeat(f0.gr[0][0]);
@@ -469,7 +469,7 @@ int main(int argc, char** argv) {
                 ? (static_cast<long>(frames[k + 1].position) - base) : (long)stream.size();
             if (payEnd <= payStart || payEnd > (long)stream.size()) { res.clear(); continue; }
 
-            const FrameSideInfo fsi = parseFrameSideInfoAt(stream, static_cast<int>(soff), mpeg1, mono);
+            const FrameSideInfo fsi = parseFrameSideInfoAt(stream, static_cast<int>(soff));
             if (fsi.valid && fsi.mainDataBegin <= res.size()) {
                 vector<uint8_t> asm_;
                 asm_.insert(asm_.end(), res.end() - fsi.mainDataBegin, res.end());
@@ -527,7 +527,7 @@ int main(int argc, char** argv) {
             }
             auto decodeAt = [&](int frameIdx) -> FrameSpectra {
                 const int off = metas[i].frames[frameIdx].offset;
-                const FrameSideInfo fsi = parseFrameSideInfoAt(chunks[i], off, mpeg1, mono);
+                const FrameSideInfo fsi = parseFrameSideInfoAt(chunks[i], off);
                 if (!fsi.valid) return {};
                 const int startBit = (payMdStart[frameIdx] - (int)fsi.mainDataBegin) * 8;
                 if (startBit < 0) return {};          // main data reaches into the previous chunk
@@ -537,7 +537,7 @@ int main(int argc, char** argv) {
             const FrameSpectra sl = decodeAt((int)metas[i].frames.size() - 1);
             if (sf.valid) { clFirst[i] = sf.gr[0][0]; if (clFirst[i].valid) ++clFirstOk; }
             if (sl.valid) {
-                const int ng = parseFrameSideInfoAt(chunks[i], metas[i].frames.back().offset, mpeg1, mono).numGranules;
+                const int ng = parseFrameSideInfoAt(chunks[i], metas[i].frames.back().offset).numGranules;
                 clLast[i] = sl.gr[ng - 1][0];
                 if (clLast[i].valid) ++clLastOk;
             }
@@ -669,7 +669,7 @@ int main(int argc, char** argv) {
                 const long bnd = (soff / CHUNK_SIZE + 1) * CHUNK_SIZE;
                 const int  rem = static_cast<int>(soff + flen - bnd);   // F bytes after the boundary
                 const int  bChunk = static_cast<int>(bnd / CHUNK_SIZE); // the true successor chunk index
-                const FrameSideInfo fsi = parseFrameSideInfoAt(stream, static_cast<int>(soff), mpeg1, mono);
+                const FrameSideInfo fsi = parseFrameSideInfoAt(stream, static_cast<int>(soff));
 
                 if (!fsi.valid || (int)fsi.mainDataBegin > (int)res.size()) { ++resvSkip; }
                 else if (rem <= 0 || bnd + rem > (long)stream.size()) { ++onBoundary; }

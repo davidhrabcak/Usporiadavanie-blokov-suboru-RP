@@ -15,7 +15,7 @@ int sideInfoSize(const int versionID, const bool isMono) {
 /**
  * A side-info bit source backed by up to two logically-concatenated byte ranges: `first`
  * immediately followed by `second`. Lets the same MSB-first bit-reading logic
- * (readBitsMsb/computeSideInfoFields below) serve both the ordinary case (a frame's side info
+ * (readBitsMsb/parseFrameSideInfo below) serve both the ordinary case (a frame's side info
  * fully inside one chunk - `second` unused) and the cross-chunk case (a Case-1 split frame's
  * side info spanning the tail of chunk a and the head of chunk b - see decodeSplitFrameSideInfo),
  * instead of maintaining two separate copies of the bit-layout logic that could drift apart.
@@ -66,25 +66,6 @@ bool readHeaderAt(const vector<uint8_t>& buf, const int off, const StreamProfile
 }
 
 /**
- * Extracts `main_data_begin` and the sum of `part2_3_length` (actual main-data bits this frame
- * consumes from the bit reservoir) across every granule/channel, from a side-info block starting
- * at bit 0 of `sideBuf` (i.e. immediately after the frame's 4-byte header and CRC, if any).
- *
- * part2_3_length is returned in BITS, not bytes, and must stay that way: it's a bit-granular
- * quantity, and rounding it up to bytes on every frame compounds into a large false reservoir
- * deficit over a whole file. Only `mainDataBegin` is a byte-granular bitstream field.
- *
- * Side-info layout (ISO/IEC 11172-3 / 13818-3), all fields MSB-first. It starts right after the
- * header, or 2 bytes later when the header's protection bit is 0 (16-bit CRC) - callers skip it:
- *   MPEG1:      main_data_begin(9) + private_bits(mono:5/stereo:3) + scfsi(4 bits/channel),
- *               then 2 granules x numChannels blocks of 59 bits (leading 12 = part2_3_length).
- *   MPEG2/2.5:  main_data_begin(8) + private_bits(mono:1/stereo:2), no scfsi,
- *               then 1 granule x numChannels blocks of 63 bits (leading 12 = part2_3_length).
- *
- * @param sideBuf Bit source positioned at the start of the side-info block.
- * @return .valid is false if the side-info block doesn't fully fit in `sideBuf`.
- */
-/**
  * Parses one granule/channel side-info block (59 bits MPEG1, 63 bits MPEG2/2.5 LSF) starting at
  * `bitPos`. Field order/widths per ISO/IEC 11172-3 2.4.1.7 (MPEG1) and 13818-3 (LSF: 9-bit
  * scalefac_compress, no preflag). Advances `bitPos` past the whole block.
@@ -123,8 +104,18 @@ static GranuleSideInfo parseGranuleSideInfo(const SideInfoBitSource& src, int& b
 
 /**
  * Parses a full Layer III side-info block starting at bit 0 of `sideBuf` (immediately after the
- * frame's 4-byte header and its CRC, if any). See computeSideInfoFields's old comment (now below) for the
- * top-level layout. `.valid` is false if the block doesn't fully fit in `sideBuf`.
+ * frame's 4-byte header and its CRC, if any). `.valid` is false if the block doesn't fully fit.
+ *
+ * part2_3_length is summed in BITS (part23BitsTotal), not bytes, and must stay that way: it's a
+ * bit-granular quantity, and rounding it up to bytes on every frame compounds into a large false
+ * reservoir deficit over a whole file. Only `mainDataBegin` is a byte-granular bitstream field.
+ *
+ * Side-info layout (ISO/IEC 11172-3 / 13818-3), all fields MSB-first. It starts right after the
+ * header, or 2 bytes later when the header's protection bit is 0 (16-bit CRC) - callers skip it:
+ *   MPEG1:      main_data_begin(9) + private_bits(mono:5/stereo:3) + scfsi(4 bits/channel),
+ *               then 2 granules x numChannels blocks of 59 bits (leading 12 = part2_3_length).
+ *   MPEG2/2.5:  main_data_begin(8) + private_bits(mono:1/stereo:2), no scfsi,
+ *               then 1 granule x numChannels blocks of 63 bits (leading 12 = part2_3_length).
  */
 static FrameSideInfo parseFrameSideInfo(const SideInfoBitSource& sideBuf, const bool mpeg1, const bool mono) {
     FrameSideInfo out;
@@ -167,56 +158,19 @@ static FrameSideInfo parseFrameSideInfo(const SideInfoBitSource& sideBuf, const 
     return out;
 }
 
-/**
- * Extracts `main_data_begin` and the sum of `part2_3_length` (actual main-data bits this frame
- * consumes from the bit reservoir) across every granule/channel, from a side-info block starting
- * at bit 0 of `sideBuf` (i.e. immediately after the frame's 4-byte header and CRC, if any).
- *
- * part2_3_length is returned in BITS, not bytes, and must stay that way: it's a bit-granular
- * quantity, and rounding it up to bytes on every frame compounds into a large false reservoir
- * deficit over a whole file. Only `mainDataBegin` is a byte-granular bitstream field.
- *
- * Side-info layout (ISO/IEC 11172-3 / 13818-3), all fields MSB-first. It starts right after the
- * header, or 2 bytes later when the header's protection bit is 0 (16-bit CRC) - callers skip it:
- *   MPEG1:      main_data_begin(9) + private_bits(mono:5/stereo:3) + scfsi(4 bits/channel),
- *               then 2 granules x numChannels blocks of 59 bits (leading 12 = part2_3_length).
- *   MPEG2/2.5:  main_data_begin(8) + private_bits(mono:1/stereo:2), no scfsi,
- *               then 1 granule x numChannels blocks of 63 bits (leading 12 = part2_3_length).
- *
- * Thin wrapper over parseFrameSideInfo - kept as the reservoir path's entry point so that code
- * doesn't carry the full per-granule struct it doesn't use.
- *
- * @param sideBuf Bit source positioned at the start of the side-info block.
- * @return .valid is false if the side-info block doesn't fully fit in `sideBuf`.
- */
-static SideInfoResult computeSideInfoFields(const SideInfoBitSource& sideBuf, const bool mpeg1, const bool mono) {
-    const FrameSideInfo f = parseFrameSideInfo(sideBuf, mpeg1, mono);
-    SideInfoResult result;
-    result.mainDataBegin = f.mainDataBegin;
-    result.part23Bits    = static_cast<uint16_t>(f.part23BitsTotal);
-    result.valid         = f.valid;
-    return result;
-}
-
-/**
- * Reads `main_data_begin` and part2_3_length for a frame whose side info is fully contained in
- * one chunk (the ordinary case - `off` points at the frame's 4-byte header within `chunk`).
- * @return .valid is false if not Layer III or the side-info block doesn't fully fit in `chunk`.
- */
-static SideInfoResult readFrameSideInfo(const vector<uint8_t>& chunk, const int off, const Header& h) {
+// Side info of the frame whose header `h` is at `off`, read with that header's layout and CRC.
+static FrameSideInfo parseSideInfoAt(const vector<uint8_t>& buf, const int off, const Header& h) {
     if (!h.isLayerIII()) return {};
     const int sideStart = off + 4 + h.crcBytes();
-    if (sideStart >= static_cast<int>(chunk.size())) return {};
-    const SideInfoBitSource src{&chunk[sideStart], static_cast<int>(chunk.size()) - sideStart};
-    return computeSideInfoFields(src, h.getVersionID() == 0b11, h.isMono());
-}
-
-FrameSideInfo parseFrameSideInfoAt(const vector<uint8_t>& buf, const int off, const bool mpeg1, const bool mono) {
-    if (off < 0 || off + 4 > static_cast<int>(buf.size())) return {};
-    const int sideStart = off + 4 + ((buf[off + 1] & 1) ? 0 : 2);   // + CRC when protection bit is 0
     if (sideStart >= static_cast<int>(buf.size())) return {};
     const SideInfoBitSource src{&buf[sideStart], static_cast<int>(buf.size()) - sideStart};
-    return parseFrameSideInfo(src, mpeg1, mono);
+    return parseFrameSideInfo(src, h.getVersionID() == 0b11, h.isMono());
+}
+
+FrameSideInfo parseFrameSideInfoAt(const vector<uint8_t>& buf, const int off) {
+    Header h;
+    if (off < 0 || off + 4 > static_cast<int>(buf.size()) || !Header::parse(&buf[off], h)) return {};
+    return parseSideInfoAt(buf, off, h);
 }
 
 /**
@@ -252,7 +206,12 @@ SideInfoResult decodeSplitFrameSideInfo(const ChunkMeta& a, const vector<uint8_t
     }
 
     const SideInfoBitSource src{afterHeader, afterHeaderLen, bHead, bLen};
-    return computeSideInfoFields(src, a.profile.versionID == 0b11, a.profile.isMono());
+    const FrameSideInfo f = parseFrameSideInfo(src, a.profile.versionID == 0b11, a.profile.isMono());
+    SideInfoResult r;
+    r.mainDataBegin = f.mainDataBegin;
+    r.part23Bits    = static_cast<uint16_t>(f.part23BitsTotal);
+    r.valid         = f.valid;
+    return r;
 }
 
 
@@ -264,11 +223,7 @@ SideInfoResult decodeSplitFrameSideInfo(const ChunkMeta& a, const vector<uint8_t
  * A false sync carries random side info and fails ~80% of the time; a real frame never does.
  */
 static int sideInfoPlausible(const vector<uint8_t>& chunk, const int off, const Header& h) {
-    if (!h.isLayerIII()) return -1;
-    const int sideStart = off + 4 + h.crcBytes();
-    if (sideStart >= static_cast<int>(chunk.size())) return -1;
-    const SideInfoBitSource src{&chunk[sideStart], static_cast<int>(chunk.size()) - sideStart};
-    const FrameSideInfo f = parseFrameSideInfo(src, h.getVersionID() == 0b11, h.isMono());
+    const FrameSideInfo f = parseSideInfoAt(chunk, off, h);
     if (!f.valid) return -1;
     for (int g = 0; g < f.numGranules; ++g)
         for (int c = 0; c < f.numChannels; ++c) {
@@ -330,9 +285,9 @@ static int tryParse(const vector<uint8_t>& chunk,
         uint16_t mdb = 0;
         uint16_t part23 = 0;
         if (expected.isLayerIII()) {
-            const SideInfoResult side = readFrameSideInfo(chunk, i, h);
+            const FrameSideInfo side = parseSideInfoAt(chunk, i, h);
             mdb    = side.mainDataBegin;
-            part23 = side.part23Bits;
+            part23 = static_cast<uint16_t>(side.part23BitsTotal);
         }
         FrameSlice fs{i, len, h.getBitrate(), mdb, part23};
         fs.crcBytes = static_cast<uint8_t>(h.crcBytes());
@@ -557,7 +512,6 @@ bool voteProfile(const vector<vector<uint8_t>>& chunks, StreamProfile& out) {
 }
 
 vector<StartCandidate> findStartCandidates(const vector<vector<uint8_t>>& chunks, const StreamProfile& prof) {
-    const bool mpeg1 = prof.versionID == 0b11;
     vector<StartCandidate> out;
     for (int i = 0; i < static_cast<int>(chunks.size()); ++i) {
         const auto& c = chunks[i];
@@ -565,7 +519,7 @@ vector<StartCandidate> findStartCandidates(const vector<vector<uint8_t>>& chunks
         if (!readHeaderAt(c, 0, prof, h) || h.getFrameLength() <= 0) continue;
         StartCandidate sc{i, isXingFrame(c, 0, h)};
         if (prof.isLayerIII()) {
-            const FrameSideInfo si = parseFrameSideInfoAt(c, 0, mpeg1, prof.isMono());
+            const FrameSideInfo si = parseSideInfoAt(c, 0, h);
             if (!si.valid || si.mainDataBegin != 0) continue;   // reservoir is empty at the start
         }
         out.push_back(sc);

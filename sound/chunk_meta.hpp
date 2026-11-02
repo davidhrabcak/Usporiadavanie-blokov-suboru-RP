@@ -37,7 +37,7 @@ struct StreamProfile {
 };
 
 // Result of extracting main_data_begin/part2_3_length from a Layer III side-info block -
-// see computeSideInfoFields / decodeSplitFrameSideInfo in chunk_meta.cpp.
+// see decodeSplitFrameSideInfo in chunk_meta.cpp.
 struct SideInfoResult {
     uint16_t mainDataBegin = 0;
     uint16_t part23Bits    = 0;
@@ -86,7 +86,7 @@ struct FrameSlice {
                                // (Layer III only, else 0) - actual main-data bits this frame
                                // consumes from the reservoir. Kept bit-precise (not rounded
                                // to bytes) so per-frame rounding doesn't compound into a
-                               // systematic drift over many frames - see computeSideInfoFields.
+                               // systematic drift over many frames - see parseFrameSideInfo.
     uint8_t  crcBytes = 0;    // 2 when the header's protection bit asks for a CRC (side info
                                // and payload then start 2 bytes later), else 0
 };
@@ -187,9 +187,9 @@ bool detectCBRUnordered(const std::vector<std::vector<uint8_t>>& chunks, const S
 SideInfoResult decodeSplitFrameSideInfo(const ChunkMeta& a, const std::vector<uint8_t>& bBytes);
 
 // Parses the full Layer III side-info block of the frame whose 4-byte header starts at `off`
-// within `buf`. `mpeg1` = (versionID == 0b11); `mono` selects the 1- vs 2-channel layout.
-// Returns a result with .valid == false if the side-info block doesn't fully fit in `buf`.
-// Does not require `buf` to be a whole chunk - any byte range containing header + side info works.
-FrameSideInfo parseFrameSideInfoAt(const std::vector<uint8_t>& buf, int off, bool mpeg1, bool mono);
+// within `buf`, with that header's version, channel layout and CRC. `.valid` is false if the
+// header isn't a valid Layer III header or the side-info block doesn't fully fit in `buf`. Does
+// not require `buf` to be a whole chunk - any byte range containing header + side info works.
+FrameSideInfo parseFrameSideInfoAt(const std::vector<uint8_t>& buf, int off);
 
 #endif

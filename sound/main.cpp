@@ -1491,12 +1491,10 @@ int main(int argc, char* argv[]) {
     if (const char* v = std::getenv("RP_SPEC_SCALE")) g_specScale = atof(v);
     vector<BoundaryGain> boundaryGain(chunks.size());
     if (profile.isLayerIII()) {
-        const bool mpeg1 = profile.versionID == 0b11;
-        const bool mono  = profile.isMono();
         for (size_t i = 0; i < metas.size(); ++i) {
             if (!metas[i].valid || metas[i].frames.empty()) continue;
-            const FrameSideInfo f0 = parseFrameSideInfoAt(chunks[i], metas[i].frames.front().offset, mpeg1, mono);
-            const FrameSideInfo f1 = parseFrameSideInfoAt(chunks[i], metas[i].frames.back().offset,  mpeg1, mono);
+            const FrameSideInfo f0 = parseFrameSideInfoAt(chunks[i], metas[i].frames.front().offset);
+            const FrameSideInfo f1 = parseFrameSideInfoAt(chunks[i], metas[i].frames.back().offset);
             if (f0.valid) {
                 boundaryGain[i].ggFirst = f0.gr[0][0].globalGain;
                 boundaryGain[i].bvFirst = f0.gr[0][0].bigValues;

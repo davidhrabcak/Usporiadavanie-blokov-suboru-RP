@@ -284,9 +284,7 @@ FrameSpectra decodeChunkFrame(const ChunkMeta* prevMeta, const std::vector<uint8
     FrameSpectra fs;
     if (!chunkMeta.valid || chunkMeta.frames.empty()) return fs;
 
-    const bool mpeg1 = chunkMeta.profile.versionID == 0b11;
-    const bool mono  = chunkMeta.profile.isMono();
-    const int  sideSz = sideInfoSize(chunkMeta.profile.versionID, mono);
+    const int  sideSz = sideInfoSize(chunkMeta.profile.versionID, chunkMeta.profile.isMono());
 
     std::vector<int> payMdStart;
     std::vector<uint8_t> chunkMd = buildChunkMainData(chunk, chunkMeta, sideSz, payMdStart);
@@ -296,7 +294,7 @@ FrameSpectra decodeChunkFrame(const ChunkMeta* prevMeta, const std::vector<uint8
         if (chunkMeta.frames[k].offset == frameOffset) { frameIdx = (int)k; break; }
     if (frameIdx < 0) return fs;
 
-    const FrameSideInfo fsi = parseFrameSideInfoAt(chunk, frameOffset, mpeg1, mono);
+    const FrameSideInfo fsi = parseFrameSideInfoAt(chunk, frameOffset);
     if (!fsi.valid) return fs;
 
     // Prepend the predecessor's main-data stream so the reservoir back-pointer resolves.
