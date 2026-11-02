@@ -121,13 +121,11 @@ bool Header::decodeChannelMode(const uint8_t) {
 int Header::length(const uint8_t versionID) const {
     if (sampleRate <= 0 || bitrate <= 0) return -1;
 
-    const int coeff = (versionID == 0b11) ? 144 : 72;
-
-    int frameLen = (coeff * bitrate * 1000) / sampleRate;
-
-    if (padding) frameLen += 1;
-
-    return frameLen;
+    // Layer I: 4-byte slots, 384 samples/frame. Layer II: 1152 samples in every version.
+    // Layer III: 1152 samples in MPEG1, 576 in MPEG2/2.5.
+    if (layerID_raw == 0b11) return (12 * bitrate * 1000 / sampleRate + (padding ? 1 : 0)) * 4;
+    const int coeff = (layerID_raw == 0b10 || versionID == 0b11) ? 144 : 72;
+    return coeff * bitrate * 1000 / sampleRate + (padding ? 1 : 0);
 }
 
 uint8_t Header::getVersionID() const    { return versionID_raw; }
