@@ -16,13 +16,13 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <fstream>
 #include <functional>
 #include <map>
 #include <string>
 #include <vector>
 
 #include "frame_scanner.hpp"
+#include "probe_util.hpp"
 #include "chunk_meta.hpp"
 #include "adjacency.hpp"
 #include "main_data_decoder.hpp"
@@ -33,19 +33,6 @@ using namespace std;
 
 static int CHUNK_SIZE = 1024; // RP_CHUNK_SIZE overrides (as in rp)
 
-static double auc(vector<double> trueD, vector<double> wrongD) {
-    if (trueD.empty() || wrongD.empty()) return 0.5;
-    sort(wrongD.begin(), wrongD.end());
-    const double n = double(wrongD.size());
-    double acc = 0.0;
-    for (double t : trueD) {
-        const auto lo = lower_bound(wrongD.begin(), wrongD.end(), t);
-        const auto hi = upper_bound(wrongD.begin(), wrongD.end(), t);
-        const double eq = double(hi - lo);
-        acc += ((n - double(lo - wrongD.begin()) - eq) + 0.5 * eq) / n;
-    }
-    return acc / double(trueD.size());
-}
 
 int main(int argc, char** argv) {
     if (argc < 2) { fprintf(stderr, "usage: %s <fixture.mp3> [maxJunctions]\n", argv[0]); return 2; }
@@ -55,14 +42,7 @@ int main(int argc, char** argv) {
 
     Mp3FrameScanner scanner(filename);
     if (scanner.getFrameCount() == 0) { fprintf(stderr, "No frames found\n"); return 1; }
-    ifstream file(filename, ios::binary);
-    file.seekg(static_cast<long>(scanner.getFrames()[0].position), ios::beg);
-    vector<vector<uint8_t>> chunks;
-    {
-        vector<uint8_t> buf(CHUNK_SIZE);
-        while (file.read(reinterpret_cast<char*>(buf.data()), CHUNK_SIZE) || file.gcount() > 0)
-            chunks.emplace_back(buf.begin(), buf.begin() + static_cast<long>(file.gcount()));
-    }
+    vector<vector<uint8_t>> chunks = scanner.chunksFromFirstFrame(CHUNK_SIZE);
     const int n = static_cast<int>(chunks.size());
 
     StreamProfile profile{};

@@ -9,7 +9,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <string>
 #include <vector>
 
@@ -34,14 +33,7 @@ int main(int argc, char** argv) {
     if (const char* cs = getenv("RP_CHUNK_SIZE")) chunkSize = max(1024, atoi(cs));
     Mp3FrameScanner scanner(argv[1]);
     if (scanner.getFrameCount() == 0) { fprintf(stderr, "No frames found\n"); return 1; }
-    ifstream file(argv[1], ios::binary);
-    file.seekg(static_cast<long>(scanner.getFrames()[0].position), ios::beg);
-    vector<vector<uint8_t>> chunks;
-    {
-        vector<uint8_t> buf(chunkSize);
-        while (file.read(reinterpret_cast<char*>(buf.data()), chunkSize) || file.gcount() > 0)
-            chunks.emplace_back(buf.begin(), buf.begin() + static_cast<long>(file.gcount()));
-    }
+    const vector<vector<uint8_t>> chunks = scanner.chunksFromFirstFrame(chunkSize);
     const int n = (int)chunks.size();
     StreamProfile profile{};
     if (!deriveProfile(chunks[0], profile)) { fprintf(stderr, "no profile\n"); return 1; }

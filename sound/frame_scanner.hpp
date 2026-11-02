@@ -22,6 +22,9 @@ class Mp3FrameScanner {
     Mp3FrameScanner(const std::string& filename);
     const std::vector<FrameInfo>& getFrames();
     unsigned long getFrameCount() const;
+    /** The file from its first frame header on (leading tags skipped), cut into `chunkSize`-byte
+     *  chunks; the last one may be shorter. Empty if no frame was found. */
+    std::vector<std::vector<uint8_t>> chunksFromFirstFrame(long chunkSize) const;
     /** Returns each frame's raw bytes, in file order - one chunk per frame. */
     std::vector<std::vector<uint8_t>> getRawChunks() const;
     std::vector<FrameData> frame_data;

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <fstream>
 #include <vector>
 #include <cstdint>
@@ -17,6 +18,14 @@ using namespace std;
 
     unsigned long Mp3FrameScanner::getFrameCount() const {
         return frames.size();
+    }
+
+    vector<vector<uint8_t>> Mp3FrameScanner::chunksFromFirstFrame(const long chunkSize) const {
+        vector<vector<uint8_t>> chunks;
+        if (frames.empty() || chunkSize <= 0) return chunks;
+        for (size_t pos = frames[0].position; pos < data.size(); pos += chunkSize)
+            chunks.emplace_back(data.begin() + pos, data.begin() + min(data.size(), pos + chunkSize));
+        return chunks;
     }
 
     vector<vector<uint8_t>> Mp3FrameScanner::getRawChunks() const {

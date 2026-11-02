@@ -1202,21 +1202,12 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    long offset = static_cast<long>(scanner.getFrames()[0].position);
-    ifstream file(filename, ios::binary);
-    file.seekg(offset, ios::beg);
-
-
     // RP_CHUNK_SIZE overrides the default chunk size (bytes). Must be >= the largest frame so a
     // frame never spans more than one chunk boundary.
     long chunkSize = CHUNK_SIZE;
     if (const char* s = std::getenv("RP_CHUNK_SIZE")) chunkSize = std::max(1024L, std::strtol(s, nullptr, 10));
     if (chunkSize != CHUNK_SIZE) cout << "Chunk size: " << chunkSize << " bytes\n";
-    vector<uint8_t> buf(chunkSize);
-    while (file.read(reinterpret_cast<char*>(buf.data()), chunkSize) || file.gcount() > 0) {
-        size_t n = file.gcount();
-        chunks.emplace_back(buf.begin(), buf.begin() + static_cast<long>(n));
-    }
+    chunks = scanner.chunksFromFirstFrame(chunkSize);
 
     // Constant-bitrate detection (A3a): if every frame shares one bitrate, enable the
     // frame-header bitrate filter in StreamProfile::matches so false-positive syncs at other

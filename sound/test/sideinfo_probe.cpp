@@ -25,13 +25,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <functional>
 #include <random>
 #include <string>
 #include <vector>
 
 #include "frame_scanner.hpp"
+#include "probe_util.hpp"
 #include "chunk_meta.hpp"
 #include "adjacency.hpp"
 #include "main_data_decoder.hpp"
@@ -94,20 +94,6 @@ static double featDelta(const NamedFeature& f, const Feat& a, const Feat& b) {
 
 // AUC that `trueD` < `randD` (ties 0.5), i.e. P(a true junction's delta is smaller than a
 // random pair's). > 0.5 means true junctions are more "continuous" in this feature.
-static double auc(vector<double> trueD, vector<double> randD) {
-    if (trueD.empty() || randD.empty()) return 0.5;
-    sort(randD.begin(), randD.end());
-    const double n = double(randD.size());
-    double acc = 0.0;
-    for (double t : trueD) {
-        const auto lo = lower_bound(randD.begin(), randD.end(), t);
-        const auto hi = upper_bound(randD.begin(), randD.end(), t);
-        const double less = double(lo - randD.begin());        // randD strictly less than t
-        const double eq   = double(hi - lo);
-        acc += ( (n - (less + eq)) + 0.5 * eq ) / n;           // P(randD > t) + 0.5 P(==)
-    }
-    return acc / double(trueD.size());
-}
 
 // ---- per-chunk boundary side info -------------------------------------------------------
 
@@ -125,14 +111,7 @@ int main(int argc, char** argv) {
     Mp3FrameScanner scanner(filename);
     if (scanner.getFrameCount() == 0) { fprintf(stderr, "No frames found\n"); return 1; }
 
-    ifstream file(filename, ios::binary);
-    file.seekg(static_cast<long>(scanner.getFrames()[0].position), ios::beg);
-    vector<vector<uint8_t>> chunks;
-    {
-        vector<uint8_t> buf(CHUNK_SIZE);
-        while (file.read(reinterpret_cast<char*>(buf.data()), CHUNK_SIZE) || file.gcount() > 0)
-            chunks.emplace_back(buf.begin(), buf.begin() + static_cast<long>(file.gcount()));
-    }
+    vector<vector<uint8_t>> chunks = scanner.chunksFromFirstFrame(CHUNK_SIZE);
     const int n = static_cast<int>(chunks.size());
 
     StreamProfile profile{};
