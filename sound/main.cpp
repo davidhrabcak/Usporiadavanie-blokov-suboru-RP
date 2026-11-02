@@ -34,18 +34,14 @@ extern char** environ;
 
 using namespace std;
 
-// --------------------------------------------------------------------------
-// Bit-reservoir validator (Layer III only)
-// --------------------------------------------------------------------------
-
 vector<vector<uint8_t>> chunks; // moved for debugging
+
+// Bit-reservoir validator (Layer III only)
 
 /**
  * Advances the Layer III bit-reservoir level through a single frame and checks that
  * the frame's mainDataBegin is actually satisfiable by what has accumulated so far.
  *
- * `level` is tracked in BITS, not bytes (see below for why), even though callers treat it
- * as an opaque running total.
  *
  * level_after = clamp(f.mainDataBegin*8 + producedBits - f.part23Bits, 0, maxReservoir*8).
  * Cross-checked against minimp3's L3_restore_reservoir/L3_save_reservoir: the "history"
@@ -60,7 +56,7 @@ vector<vector<uint8_t>> chunks; // moved for debugging
  * per frame would add ~7 bits of phantom consumption per frame, compounding into false
  * rejections over a whole file.
  *
- * @param level  Current reservoir fill level in BITS; updated in place.
+ * @param level  Current reservoir fill level in bits; updated in place.
  * @param f      The frame to advance through.
  * @param sideInfo Side-information size in bytes for this stream (see sideInfoSize).
  * @param maxReservoir Reservoir capacity in bytes (511 for MPEG1, 255 for MPEG2/2.5).
@@ -1929,6 +1925,11 @@ int main(int argc, char* argv[]) {
             if (const char* b = std::getenv("RP_BROADEN")) broaden = (b[0] != '0');
             beamSchedule = broaden ? vector<int>{1, 2, 3, 4, 6, 9, 0} : vector<int>{0};
         }
+        // helper for readability when setting g_deadline for the search budget
+        auto make_deadline = [](double budget_secs) {
+            using namespace std::chrono;
+            return steady_clock::now() + duration_cast<steady_clock::duration>(duration<double>(budget_secs));
+        };
 
         auto search = [&]() {
             // Wall-clock budget for the whole search. Needed whenever the search is not a plain
@@ -1938,12 +1939,10 @@ int main(int argc, char* argv[]) {
             if (g_maxNodes == 0 && (broaden || g_bestOf)) {
                 double budget = broaden ? 45.0 : 30.0;
                 if (const char* t = std::getenv("RP_TIME_BUDGET")) budget = atof(t);
-                g_deadline = chrono::steady_clock::now() +
-                             chrono::duration_cast<chrono::steady_clock::duration>(chrono::duration<double>(budget));
+                g_deadline = make_deadline(budget);
                 g_haveDeadline = true;
             } else if (const char* t = std::getenv("RP_TIME_BUDGET")) {
-                g_deadline = chrono::steady_clock::now() +
-                             chrono::duration_cast<chrono::steady_clock::duration>(chrono::duration<double>(atof(t)));
+                g_deadline = make_deadline(atof(t));
                 g_haveDeadline = true;
             } else if (g_maxNodes == 0 && lockTaus.size() > 1) {
                 // With a lock schedule, no attempt may run an unbounded exhaustive DFS: locking can
@@ -1951,8 +1950,7 @@ int main(int argc, char* argv[]) {
                 // 108 supernodes, ran >500 s), which would drop rp's "always terminates" guarantee.
                 // 30 s per attempt with a fallback left, 45 s for the last one.
                 const double budget = (lockAttempt + 1 < lockTaus.size()) ? 30.0 : 45.0;
-                g_deadline = chrono::steady_clock::now() +
-                             chrono::duration_cast<chrono::steady_clock::duration>(chrono::duration<double>(budget));
+                g_deadline = make_deadline(budget);
                 g_haveDeadline = true;
             }
 

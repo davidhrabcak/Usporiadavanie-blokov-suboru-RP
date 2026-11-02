@@ -12,18 +12,18 @@ using namespace std;
  * @param rem Index of possible frame start.
  * @return True if position rem is a known valid frame start in chunk b.
  */
-static bool hasFrameAt(const ChunkMeta& b, const int rem) {
-    // frameStarts is sorted ascending (built in computeChunkMeta scan order).
+bool hasFrameAt(const ChunkMeta& b, const int rem) {
+    // frameStarts is sorted ascending
     const auto it = lower_bound(b.frameStarts.begin(), b.frameStarts.end(), rem);
     return it != b.frameStarts.end() && *it == rem;
 }
 
-/**
- * Reconstructs a Case-2 split frame's 4-byte header from its first `tov` bytes (`tailHead`,
- * held by the predecessor chunk) plus the following `4-tov` bytes (`rest`, from the candidate
- * successor), and validates it against `profile`.
+/** Handles case 2: tailOverflow 1-3 and the rest of the header is in the next chunk.
+ * Reconstructs a split frame's header from its first `tov` bytes (`tailHead`,
+ * held by the previous chunk) plus the following `4-tov` bytes (`rest`, from the candidate
+ * successor), validates against `profile`.
  * @return The byte offset within the successor chunk where the frame's remainder must start
- *         (frameLen - tov), or -1 if the reconstructed header is invalid/off-profile.
+ *         (frameLen - tov), or -1 if the reconstructed header is invalid or off-profile.
  */
 static int reconstructTailHeaderOffset(const uint8_t* tailHead, const int tov,
                                         const uint8_t* rest, const StreamProfile& profile) {
@@ -32,7 +32,6 @@ static int reconstructTailHeaderOffset(const uint8_t* tailHead, const int tov,
     for (int j = tov; j < 4; ++j) hdr[j] = rest[j - tov];
 
     const uint32_t raw = packHeaderBytes(hdr);
-    if (!Mp3FrameScanner::isValidHeader(raw)) return -1;
 
     bool ok;
     const Header h(raw, ok);
@@ -53,13 +52,14 @@ bool canFollow(const ChunkMeta& a, const ChunkMeta& b) {
 
     const int rem = tailRemaining(a);
 
+    // Case 1: tailOverflow is 0, the next frame's header is fully contained in b.
     if (rem >= 0) {
         // Accept if rem is any known valid frame start in b, not just the
         // "best" headOffset that computeChunkMeta picked.
         return hasFrameAt(b, rem);
     }
 
-    // tailOverflow is 1-3: header of partial tail frame is split across chunks.
+    // Case 2: tailOverflow is 1-3: header of partial tail frame is split across chunks.
     // Reconstruct the 4-byte header from a.tailBytes + first bytes of b.
     const int tail_ov = a.tailOverflow;
     if (tail_ov < 1 || tail_ov > 3) return false;
@@ -71,8 +71,7 @@ bool canFollow(const ChunkMeta& a, const ChunkMeta& b) {
 /**
  * Packs the first `len` bytes of `chunkHead` (len in 1..3) into an integer key, most
  * significant byte first. Used to group chunks by the exact bytes Case 2 needs from
- * their chunkHead, so lookup doesn't require scanning every chunk - see the
- * byChunkHeadPrefix index in buildAdjacency.
+ * their chunkHead, so lookup doesn't require scanning every chunk
  */
 static uint32_t packPrefix(const uint8_t chunkHead[4], const int len) {
     uint32_t key = 0;
@@ -81,7 +80,7 @@ static uint32_t packPrefix(const uint8_t chunkHead[4], const int len) {
 }
 
 /**
- * Constructs the full graph using a byFrameStart index for O(n) Case-1 lookups.
+ * Constructs the graph using a byFrameStart index for O(n) Case 1 lookups (at least the header is in chunk a)
  * @return Constructed adjacency list of output graph.
  *         adj[i] = list of chunk indices that can follow chunk i.
  */
@@ -90,18 +89,17 @@ vector<vector<int>> buildAdjacency(const vector<ChunkMeta>& metas) {
     vector<vector<int>> adj(n);
 
     // Index: frameStart position -> list of chunk indices that have a valid frame there.
-    // Allows O(1) lookup for Case 1: given tailRemaining(a) = rem, find all b with a frame at rem.
+    // Allows O(1) lookup for Case 1: if tailRemaining(a) = rem, find all b with a valid frame at rem.
     unordered_map<int, vector<int>> byFrameStart;
     byFrameStart.reserve(n * 4);
     for (int i = 0; i < n; ++i)
         for (int pos : metas[i].frameStarts)
             byFrameStart[pos].push_back(i);
 
-    // Index for Case 2: for each possible tov (1..3), group valid chunks by the
-    // (4-tov)-byte chunkHead prefix that a reconstructed header would need from them.
-    // Chunks sharing a prefix reconstruct to the *same* header, so isValidHeader/Header
-    // decoding/profile matching is done once per distinct prefix instead of once per
-    // candidate chunk - see CLAUDE.md TODO "Resolve Case-2 O(n) scan".
+    // Index for Case 2 (only 1-3 bytes of header is in chunk a): for each possible tov (1..3), group valid chunks by the
+    // (4-tov)-byte chunk header prefix that a reconstructed header would need from them.
+    // Chunks sharing a prefix reconstruct to the *same* header, so header decoding and
+    // profile matching is done once per distinct prefix.
     unordered_map<uint32_t, vector<int>> byChunkHeadPrefix[3]; // index 0 -> tov=1 (3-byte prefix), etc.
     for (int j = 0; j < n; ++j) {
         if (!metas[j].valid) continue;
@@ -128,7 +126,7 @@ vector<vector<int>> buildAdjacency(const vector<ChunkMeta>& metas) {
                 const uint32_t prefixKey = entry.first;
                 const vector<int>& members = entry.second;
 
-                // Unpack prefixKey's (4-tail_ov) bytes, MSB first, matching packPrefix above.
+                // Unpack prefixKey's (4-tail_ov) bytes, matching packPrefix above.
                 const int prefixLen = 4 - tail_ov;
                 uint8_t prefixBytes[3];
                 for (int k = 0; k < prefixLen; ++k)
@@ -169,7 +167,7 @@ long propagateArcConsistency(vector<vector<int>>& adj, const int n, const int st
         ++removed;
     };
 
-    // Nothing precedes the pinned first chunk.
+    // Nothing precedes the first chunk.
     for (const int u : vector<int>(pred[start])) removeEdge(u, start);
 
     bool changed = true;
@@ -182,10 +180,9 @@ long propagateArcConsistency(vector<vector<int>>& adj, const int n, const int st
             for (const int w : vector<int>(adj[u]))
                 if (w != v) { removeEdge(u, w); changed = true; }
         }
-        // Successor side: u -> v is forced only if u is known NOT to end the stream. Every chunk
+        // Successor side: u -> v is forced only if u is not the end of the stream. Every chunk
         // but the last has a true successor; the last one's arcs are all wrong, so a single
-        // surviving arc out of it proves nothing (with the reservoir arc filter that happened,
-        // and forcing it deleted the true arc into v - cbr32_10s 1 KB). The end is known once
+        // surviving arc out of it proves nothing. The end is known once
         // some chunk has no successors left (e.g. the final fragment).
         int knownEnd = -1;
         for (int x = 0; x < n; ++x) if (adj[x].empty()) { knownEnd = x; break; }
@@ -296,14 +293,6 @@ void addGapEdges(vector<vector<int>>& adj, const vector<ChunkMeta>& metas, const
     }
 }
 
-static bool headerMatches(const uint8_t hdr[4], const StreamProfile& profile) {
-    const uint32_t raw = packHeaderBytes(hdr);
-    if (!Mp3FrameScanner::isValidHeader(raw)) return false;
-    bool ok;
-    const Header h(raw, ok);
-    return ok && profile.matches(h) && h.getFrameLength() > 0;
-}
-
 SplitTails promoteSplitTails(vector<ChunkMeta>& metas, const vector<vector<uint8_t>>& chunks,
                              const long chunkSize, const StreamProfile& prof, const uint8_t proto[4]) {
     const int n = static_cast<int>(metas.size());
@@ -315,7 +304,7 @@ SplitTails promoteSplitTails(vector<ChunkMeta>& metas, const vector<vector<uint8
         const int rem = tailRemaining(a);
         if (rem >= C - 3 && rem <= C - 1) ++st.expected[C - rem];
     }
-    for (int i = 1; i < n; ++i) {
+    for (int i = 0; i < n; ++i) {
         ChunkMeta& m = metas[i];
         const vector<uint8_t>& ch = chunks[i];
         if (!isHeaderless(m, ch.size(), chunkSize)) continue;
@@ -324,7 +313,10 @@ SplitTails promoteSplitTails(vector<ChunkMeta>& metas, const vector<vector<uint8
             if (!st.expected[tt]) continue;
             uint8_t hdr[4];
             for (int k = 0; k < 4; ++k) hdr[k] = k < tt ? ch[C - tt + k] : proto[k];
-            if (headerMatches(hdr, prof)) t = tt;
+            
+            bool ok;
+            Header h(packHeaderBytes(hdr), ok);
+            if (ok && prof.matches(h) && h.getFrameLength() > 0) t = tt;
         }
         if (!t) continue;
         bool headCompletes = false;
@@ -332,7 +324,10 @@ SplitTails promoteSplitTails(vector<ChunkMeta>& metas, const vector<vector<uint8
             if (!st.expected[tt]) continue;
             uint8_t hdr[4];
             for (int k = 0; k < 4; ++k) hdr[k] = k < tt ? proto[k] : ch[k - tt];
-            headCompletes = headerMatches(hdr, prof);
+
+            bool ok;
+            Header h(packHeaderBytes(hdr), ok);
+            headCompletes = ok && prof.matches(h) && h.getFrameLength() > 0;
         }
         if (headCompletes) continue;
         m.valid          = true;
@@ -354,5 +349,3 @@ int splitHeaderOffset(const ChunkMeta& a, const vector<uint8_t>& next) {
     if (a.tailPartialLen != -1 || tov < 1 || tov > 3 || next.size() < 4) return -1;
     return reconstructTailHeaderOffset(a.tailBytes.data(), tov, next.data(), a.profile);
 }
-
-bool hasFrameStart(const ChunkMeta& b, const int off) { return hasFrameAt(b, off); }

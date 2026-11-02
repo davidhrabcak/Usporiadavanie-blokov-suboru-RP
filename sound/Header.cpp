@@ -10,7 +10,6 @@ Header::Header(const unsigned int input, bool &ok) {
         ok = decode();
     } else {
         ok = false;
-        cerr << "Invalid input" << endl;
     }
 }
 

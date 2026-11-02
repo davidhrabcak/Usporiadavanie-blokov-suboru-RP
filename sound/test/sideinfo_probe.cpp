@@ -102,7 +102,7 @@ static double auc(vector<double> trueD, vector<double> randD) {
     for (double t : trueD) {
         const auto lo = lower_bound(randD.begin(), randD.end(), t);
         const auto hi = upper_bound(randD.begin(), randD.end(), t);
-        const double less = double(lo - randD.begin());        // randD strictly greater than t
+        const double less = double(lo - randD.begin());        // randD strictly less than t
         const double eq   = double(hi - lo);
         acc += ( (n - (less + eq)) + 0.5 * eq ) / n;           // P(randD > t) + 0.5 P(==)
     }

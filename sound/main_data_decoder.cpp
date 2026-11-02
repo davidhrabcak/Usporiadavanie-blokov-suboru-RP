@@ -36,9 +36,10 @@ uint32_t BitReader::peek(int n) const {
 
 // ---- MPEG1 long-block scalefactor-band boundaries (line index of each sfb start, + 576) ---
 
+// Running sums of minimp3.h's g_scf_long band widths: rows 5 / 6 / 7 = MPEG1 44.1 / 48 / 32 kHz.
 static const int kSfbLong44100[23] = {0,4,8,12,16,20,24,30,36,44,52,62,74,90,110,134,162,196,238,288,342,418,576};
 static const int kSfbLong48000[23] = {0,4,8,12,16,20,24,30,36,42,50,60,72,88,106,128,156,190,230,276,330,384,576};
-static const int kSfbLong32000[23] = {0,4,8,12,16,20,24,30,36,44,54,66,82,102,126,156,194,240,296,364,448,576};
+static const int kSfbLong32000[23] = {0,4,8,12,16,20,24,30,36,44,54,66,82,102,126,156,194,240,296,364,448,550,576};
 
 static const int* sfbLongTable(int sampleRate) {
     if (sampleRate == 48000) return kSfbLong48000;

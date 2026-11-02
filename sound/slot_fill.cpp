@@ -93,7 +93,7 @@ std::vector<int> assign(const std::vector<std::vector<uint8_t>>& chunks, const s
         for (int m = 0; m < H; ++m) {
             if (case2) {
                 const int off = splitHeaderOffset(a, pool[m]);
-                if (off < C || !hasFrameStart(metas[sl.b], off - C)) { ++nExcl[s]; continue; }
+                if (off < C || !hasFrameAt(metas[sl.b], off - C)) { ++nExcl[s]; continue; }
             }
             std::vector<uint8_t> frame(a.tailBytes);   // the straddling frame from its header on
             frame.insert(frame.end(), pool[m].begin(), pool[m].begin() + std::min<size_t>(pool[m].size(), 64));

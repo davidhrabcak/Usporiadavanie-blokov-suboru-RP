@@ -12,7 +12,6 @@
 #include "third_party/minimp3.h"
 
 namespace PcmJunction {
-
 Window decodeWindow(const std::vector<const std::vector<uint8_t>*>& segs, int boundarySeg,
                     int startOffset) {
     Window w;

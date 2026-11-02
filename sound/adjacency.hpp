@@ -43,8 +43,8 @@ SplitTails promoteSplitTails(std::vector<ChunkMeta>& metas, const std::vector<st
 // a's Case-2 tail (1-3 header bytes) completed with the first bytes of `next`: the offset in
 // `next` where that frame ends (frame length - tov), or -1 if the header is invalid/off-profile.
 int splitHeaderOffset(const ChunkMeta& a, const std::vector<uint8_t>& next);
-// True if `off` is one of b's frame starts.
-bool hasFrameStart(const ChunkMeta& b, int off);
+// True if `rem` is one of b's frame starts.
+bool hasFrameAt(const ChunkMeta& b, int rem);
 // True if b has a frame start at one of `offsets` (b follows a's slot).
 bool canFollowGap(const ChunkMeta& b, const std::vector<int>& offsets);
 // Replaces each demander's successor list with its gap edges a => b.

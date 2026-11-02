@@ -2,7 +2,7 @@
 
 namespace Mp3Huffman {
 
-// Verbatim from minimp3.h (`tabs`), CC0 1.0 - see huffman_tables.hpp for the leaf encoding.
+// from minimp3.h (`tabs`), CC0 1.0 - see huffman_tables.hpp for the leaf encoding.
 const int16_t kBigValueTable[2164] = {
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -142,25 +142,25 @@ const int16_t kBigValueTable[2164] = {
     290, 290, 288, 258
 };
 
-// Verbatim from minimp3.h (`tabindex`).
+// from minimp3.h (`tabindex`).
 const int16_t kBigValueTableIndex[32] = {
     0, 32, 64, 98, 0, 132, 180, 218, 292, 364, 426, 538, 648, 746, 0, 1126,
     1460, 1460, 1460, 1460, 1460, 1460, 1460, 1460, 1842, 1842, 1842, 1842, 1842, 1842, 1842, 1842
 };
 
-// Verbatim from minimp3.h (`g_linbits`).
+// from minimp3.h (`g_linbits`).
 const uint8_t kLinbits[32] = {
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     1, 2, 3, 4, 6, 8, 10, 13, 4, 5, 6, 7, 8, 9, 11, 13
 };
 
-// Verbatim from minimp3.h (`tab32`).
+// from minimp3.h (`tab32`).
 const uint8_t kCount1TableA[28] = {
     130, 162, 193, 209, 44, 28, 76, 140, 9, 9, 9, 9, 9, 9, 9, 9,
     190, 254, 222, 238, 126, 94, 157, 157, 109, 61, 173, 205
 };
 
-// Verbatim from minimp3.h (`tab33`).
+// from minimp3.h (`tab33`).
 const uint8_t kCount1TableB[16] = {
     252, 236, 220, 204, 188, 172, 156, 140, 124, 108, 92, 76, 60, 44, 28, 12
 };
