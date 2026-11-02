@@ -437,11 +437,19 @@ struct OrderCost {
         return unmeasured != o.unmeasured ? unmeasured < o.unmeasured : sum < o.sum - 1e-9;
     }
 };
+// PCM window left side of the junction before seq[k]: the (up to) g_pcmLeft chunks before it,
+// oldest first. Returns their count.
+static int leftOf(const vector<int>& seq, const int k, int left[PCM_LEFT_MAX]) {
+    int nl = 0;
+    for (int j = k - g_pcmLeft; j < k; ++j) if (j >= 0) left[nl++] = seq[j];
+    return nl;
+}
+
 static OrderCost summedFlux(const vector<ChunkMeta>& metas, const vector<int>& seq) {
     OrderCost c;
     for (size_t k = 1; k < seq.size(); ++k) {
-        int left[PCM_LEFT_MAX], nl = 0;
-        for (int j = (int)k - g_pcmLeft; j < (int)k; ++j) if (j >= 0) left[nl++] = seq[j];
+        int left[PCM_LEFT_MAX];
+        const int nl = leftOf(seq, (int)k, left);
         const double v = pcmRaw(metas, left, nl, seq[k]);
         if (v < 0) ++c.unmeasured; else c.sum += v;
     }
@@ -529,8 +537,8 @@ static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
         for (int k = 0; k < n; ++k) {
             double v = 0;
             if (k >= 1) {
-                int left[PCM_LEFT_MAX], nl = 0;
-                for (int j = k - g_pcmLeft; j < k; ++j) if (j >= 0) left[nl++] = seq[j];
+                int left[PCM_LEFT_MAX];
+                const int nl = leftOf(seq, k, left);
                 v = pcmRaw(metas, left, nl, seq[k]);
             }
             jv[k] = v;
@@ -1319,18 +1327,11 @@ int main(int argc, char* argv[]) {
             // (see advanceReservoirFrame). A correct model must never reject a real
             // chunk sequence.
             if (prof0.isLayerIII()) {
-                const int sideInfo0     = sideInfoSize(prof0.versionID, prof0.isMono());
-                const int maxReservoir0 = (prof0.versionID == 0b11) ? 511 : 255;
-                int level = 0;
-                int reservoirBreaks = 0;
-                for (int i = 0; i < static_cast<int>(origMetas.size()); ++i) {
-                    const ChunkMeta* prev = (i > 0) ? &origMetas[i - 1] : nullptr;
-                    if (!advanceReservoirChunk(level, prev, origMetas[i], chunks[i], sideInfo0, maxReservoir0)) {
-                        cout << "  RESERVOIR BREAK at chunk " << i << "\n";
-                        ++reservoirBreaks;
-                        level = maxReservoir0 * 8;   // like the DFS/repair: one break mustn't cascade
-                    }
-                }
+                vector<int> trueOrder(origMetas.size()), breakAt;
+                for (size_t i = 0; i < trueOrder.size(); ++i) trueOrder[i] = static_cast<int>(i);
+                const int reservoirBreaks = ::reservoirBreaks(origMetas, trueOrder,
+                    sideInfoSize(prof0.versionID, prof0.isMono()), maxReservoirBytes(prof0.versionID), &breakAt);
+                for (int i : breakAt) cout << "  RESERVOIR BREAK at chunk " << i << "\n";
                 preShuffleResvBreaks = reservoirBreaks;
                 RunReport::set("resv_breaks", reservoirBreaks);
                 if (reservoirBreaks == 0)
@@ -1544,7 +1545,7 @@ int main(int argc, char* argv[]) {
         const bool force = e && e[0] == '1', off = e && e[0] == '0';
         if (!off && (preShuffleResvBreaks == 0 || force)) {
             const int si = sideInfoSize(profile.versionID, profile.isMono());
-            const int mr = (profile.versionID == 0b11) ? 511 : 255;
+            const int mr = maxReservoirBytes(profile.versionID);
             long removed = 0, removedTrue = 0;
             for (size_t a = 0; a < adj.size(); ++a) {
                 int base = mr * 8;
@@ -1595,7 +1596,7 @@ int main(int argc, char* argv[]) {
     // every DFS call rather than recomputed per edge.
     const bool isLayerIII   = profile.isLayerIII();
     const int  sideInfo     = sideInfoSize(profile.versionID, profile.isMono());
-    const int  maxReservoir = (profile.versionID == 0b11) ? 511 : 255;
+    const int  maxReservoir = maxReservoirBytes(profile.versionID);
 
     if (const char* s = std::getenv("RP_MAX_NODES")) g_maxNodes = std::strtoull(s, nullptr, 10);
     if (const char* s = std::getenv("RP_PROGRESS")) {
