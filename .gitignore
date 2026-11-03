@@ -17,6 +17,8 @@ __pycache__
 /sound/cmake-build-debug/
 /sound/build/
 /sound/output.mp3
+# The test corpus (third-party audio + derived files, test/corpus.py) - never commit any of it.
+/sound/musiclib/
 
 # Never commit private keys / credentials.
 *_ssh

@@ -11,7 +11,7 @@
 # heuristic drift.
 #
 # Usage: test/ci_sanity.sh [BUILD_DIR] [FIXTURE]
-#   BUILD_DIR  directory holding the `rp` and `evaluate_order` binaries (default: cmake-build-debug)
+#   BUILD_DIR  directory holding the `rp`, `evaluate_order` and `graph_check` binaries (default: cmake-build-debug)
 #   FIXTURE    input MP3 (default: test/ci_sanity.mp3)
 # Run from the `sound/` directory.
 
@@ -21,14 +21,20 @@ BUILD_DIR=${1:-cmake-build-debug}
 FIXTURE=${2:-test/ci_sanity.mp3}
 RP="$BUILD_DIR/rp"
 EVAL="$BUILD_DIR/evaluate_order"
+GRAPH="$BUILD_DIR/graph_check"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
 MIN_TAU=0.999      # observed +1.0000 across 7 seeds x {heuristic on, off}
 MIN_EXACT_PCT=99.9 # observed 100.0%
 
-for f in "$RP" "$EVAL" "$FIXTURE"; do
+for f in "$RP" "$EVAL" "$GRAPH" "$FIXTURE"; do
     [ -e "$f" ] || { echo "FAIL: missing $f"; exit 1; }
+done
+
+echo ">> graph: buildAdjacency agrees with canFollow on every pair (1 and 4 KB chunks)"
+for cs in 1024 4096; do
+    RP_CHUNK_SIZE=$cs "$GRAPH" "$FIXTURE" > "$WORK/graph.out" 2>&1 || { echo "FAIL: graph_check"; cat "$WORK/graph.out"; exit 1; }
 done
 
 echo ">> reconstructing (RP_SEED=1, 120s timeout)"
