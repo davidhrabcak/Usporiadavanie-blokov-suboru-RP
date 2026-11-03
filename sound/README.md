@@ -12,14 +12,18 @@ test/ci_sanity.sh build              # the end-to-end check CI runs
 ## Layout
 
 ```
-src/main.cpp      the pipeline, start here
+src/main.cpp      the pipeline in five calls, start here
 src/config.*      every RP_* option, parsed once
+src/pipeline/     input (chunk, shuffle, find the start, metadata) and output (write, score)
 src/mp3/          the MP3 format: frame headers, per-chunk metadata (chunk_meta),
                   Layer III side info / main data, the bit-reservoir model
-src/graph/        which chunk can follow which (adjacency, arc consistency),
-                  gap slots for chunks with no frame header (slot_fill)
-src/scoring/      junction scoring: decode a candidate junction to PCM and measure the
-                  spectral flux (pcm_junction), lock confident edges (edge_lock)
+src/graph/        which chunk can follow which (adjacency, arc consistency, the staged
+                  search graph in chunk_graph), gap slots for chunks with no frame header
+                  (slot_fill), forced-chain collapse (supernodes)
+src/scoring/      junction costs for the ranking (junction_scorer; full-PCM flux in
+                  pcm_junction), confident-edge locking (edge_lock)
+src/search/       ordering the supernodes: DFS (dfs), global matching (global_match),
+                  block-move repair (repair), and the lock schedule around them (reconstruct)
 tools/            measurement probes, linked against the same code (rpcore)
 test/             scripts (ci_sanity, regression, corpus.py) and fixtures
 docs/             HOW_IT_WORKS.md (the algorithm, chapter by chapter), PLAN_*.md, benchmarks

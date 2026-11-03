@@ -10,7 +10,7 @@ The first chunk is not known (2026-10-27; before that chunk 0 was pinned). `rp` 
 
 ## File Structure
 
-`src/` is the pipeline, compiled once into the `rpcore` library that `rp` (`src/main.cpp`) and the tools link: `src/mp3/` reads the MP3 format (headers, per-chunk metadata, side info, main data, bit reservoir), `src/graph/` decides which chunk can follow which, `src/scoring/` decodes junctions to PCM and scores them. `tools/` holds the measurement probes (`sideinfo_probe`, `pcm_probe`, `left_context_check`, `graph_check`, `evaluate_order`), `test/` the scripts and fixtures, `docs/` the write-ups (`HOW_IT_WORKS.md`, `PLAN_*.md`, `BENCHMARK_*`), `third_party/` minimp3. Includes are relative to `src/` (`#include "mp3/chunk_meta.hpp"`).
+`src/` is the pipeline, compiled once into the `rpcore` library that `rp` (`src/main.cpp`) and the tools link: `src/mp3/` reads the MP3 format (headers, per-chunk metadata, side info, main data, bit reservoir), `src/graph/` decides which chunk can follow which, `src/scoring/` scores how well one chunk continues another (side info, spectrum, full-PCM flux), `src/search/` orders the supernodes (DFS, global matching, repair, and `reconstruct` with the lock schedule around them), `src/pipeline/` loads the input and writes the output. `src/main.cpp` only calls the stages. `tools/` holds the measurement probes (`sideinfo_probe`, `pcm_probe`, `left_context_check`, `graph_check`, `evaluate_order`), `test/` the scripts and fixtures, `docs/` the write-ups (`HOW_IT_WORKS.md`, `PLAN_*.md`, `BENCHMARK_*`), `third_party/` minimp3. Includes are relative to `src/` (`#include "mp3/chunk_meta.hpp"`).
 
 | File | Role |
 |---|---|
@@ -25,9 +25,20 @@ The first chunk is not known (2026-10-27; before that chunk 0 was pinned). `rp` 
 | `src/scoring/edge_lock.cpp / .hpp` | Confident-edge locking: forces edges whose median-context PCM flux beats every competitor on both sides by `RP_LOCK_TAU`. Run iteratively with AC-3 before the supernode collapse. |
 | `src/scoring/pcm_decoder_impl.cpp`, `third_party/minimp3.h` | Vendored [minimp3](https://github.com/lieff/minimp3) (CC0), compiled once, float output. Full Layer I/II/III decoder: requantise, stereo, IMDCT, synthesis. |
 | `src/mp3/reservoir.cpp / .hpp` | Layer III bit-reservoir model: `advanceReservoirFrame` / `advanceReservoirChunk` (one frame / one chunk after a known predecessor), `reservoirValid` / `reservoirBreaks` over a whole order, `maxReservoirBytes`. Used by the DFS, the reservoir arc filter, the repair and the true-order check. |
-| `src/config.cpp / .hpp` | `Config::fromEnv`: every `RP_*` option (table under Build) parsed once at startup; `main.cpp` reads only `cfg`. `RP_REPORT` is read by `run_report.hpp`. |
+| `src/config.cpp / .hpp` | `Config::fromEnv`: every `RP_*` option (table under Build) parsed once at startup; the pipeline reads only `cfg`. `RP_REPORT` is read by `run_report.hpp`. |
 | `src/run_report.hpp` | `RP_REPORT`: one JSON object per run, written when `main` returns (`test/corpus.py`). |
-| `src/main.cpp` | Orchestrates the pipeline: load → profile → shuffle → per-chunk metadata → adjacency graph → supernode collapse → DFS reconstruction → write output. |
+| `src/graph/supernodes.cpp / .hpp` | Forced-chain collapse (`buildSupernodes`) and `chunksOf` (a supernode order as a chunk sequence). |
+| `src/graph/chunk_graph.cpp / .hpp` | The search graph in stages: `buildStructuralGraph` (adjacency + gap slots/edges), `filterReservoirArcs`, AC-3; `buildGraph` runs them with their gates (`TrueOrderCheck`) and log lines. `adjFull` = before AC-3, the repair's move space. |
+| `src/scoring/junction_scorer.cpp / .hpp` | `JunctionScorer`: the three ranking terms (`gainCost` = Δglobal_gain + Δbig_values/32 in absolute value, `spectralCost`, `pcmCost`/`pcmRaw`), their memos, the PCM window size (`pcmLeft`) and the per-file calibration (`calibrateSpectral`, `calibratePcm`). |
+| `src/search/dfs.cpp / .hpp` | `DfsSearch`: the ranked, reservoir-pruned DFS over supernodes with node cap, deadline, beam width and best-of; `runSchedule` = iterative broadening. |
+| `src/search/global_match.cpp / .hpp` | `globalMatch`: min-cost successor assignment (contexts under the decode cap, edge costs, SSP, cycle splicing). |
+| `src/search/repair.cpp / .hpp` | `OrderRepair`: block-move / block-swap repair on (reservoir breaks, unmeasured, summed flux). |
+| `src/search/reconstruct.cpp / .hpp` | `reconstruct`: the lock-tau schedule - edge locking, collapse, DFS, matching (+ iterated matching, hint rerun), final repair policy. Returns a `Reconstruction`. |
+| `src/pipeline/input.cpp / .hpp` | `loadProblem`: chunks, CBR detection, headerless pool and true-order diagnostic (before the shuffle), shuffle, start chunk, profile, metadata. The `Problem` struct. |
+| `src/pipeline/output.cpp / .hpp` | `writeOutput`: slot assignment, `output.mp3`, provenance line, score vs source, `RP_SCORE_ORDER`; `reportFailure`. |
+| `src/main.cpp` | The pipeline in five calls: `loadProblem` → `JunctionScorer` → `buildGraph` → `reconstruct` → `writeOutput`. |
+
+**Old names (2026-11-03 refactor).** The history below names code by where it was then, mostly `main.cpp`. Now: `dfs()` → `DfsSearch` (`search/dfs`), `junctionCost` / `BoundaryGain` / `spectralJunctionCost` / `pcmRaw` / PCM calibration → `JunctionScorer` (`scoring/junction_scorer`), `repairOrdering` → `OrderRepair::run` (`search/repair`), `globalMatch` → `search/global_match`, `tryMatch` / the lock loop → `search/reconstruct`, `buildSupernodes` → `graph/supernodes`, the reservoir arc filter and AC-3 block → `graph/chunk_graph`, `advanceReservoir*` → `mp3/reservoir`, the pre-shuffle check / shuffle / start finding → `pipeline/input`, the output and C2 score → `pipeline/output`, `getenv` calls → `config`.
 
 ---
 

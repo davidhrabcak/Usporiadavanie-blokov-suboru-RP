@@ -1063,12 +1063,14 @@ Unchanged but central: `RP_SEED` (1), `RP_CHUNK_SIZE` (1024), `RP_LOCK_TAU` (1.5
 
 **Where the code lives:**
 
-- `main.cpp` - the whole pipeline; `globalMatch` (matching + splicing), `repairOrdering`
-  (repair), the reservoir filter block after `buildAdjacency`, `tryMatch` (matching ->
-  repair -> hint rerun), the provenance output.
-- `pcm_junction.cpp` - window decode, flux, `LeftContext`.
-- `edge_lock.cpp` - locking and `scoreWindows` (parallel scoring shared with the matching).
-- `adjacency.cpp` - `canFollow`, `buildAdjacency`, `propagateArcConsistency` (with the
+- `src/main.cpp` - the pipeline in five calls (load, score, graph, reconstruct, output).
+- `src/search/global_match.cpp` - `globalMatch` (matching + splicing); `src/search/repair.cpp`
+  - `OrderRepair` (repair); `src/search/reconstruct.cpp` - the lock schedule and `tryMatch`
+  (matching -> repair -> hint rerun); `src/pipeline/output.cpp` - the provenance output.
+- `src/graph/chunk_graph.cpp` - the reservoir arc filter (`filterReservoirArcs`) and AC-3 gate.
+- `src/scoring/pcm_junction.cpp` - window decode, flux, `LeftContext`.
+- `src/scoring/edge_lock.cpp` - locking and `scoreWindows` (parallel scoring shared with the matching).
+- `src/graph/adjacency.cpp` - `canFollow`, `buildAdjacency`, `propagateArcConsistency` (with the
   end-of-stream fix).
 - `tools/left_context_check.cpp` - proves `LeftContext` is bit-identical.
 - Benchmark data and scripts: `tmp/bench/runs.csv`, `tmp/bench/move_study.txt`,

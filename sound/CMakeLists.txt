@@ -11,7 +11,9 @@ find_package(Threads REQUIRED)
 #   src/scoring  junction costs for the ranking (junction_scorer: side info, spectrum, full-PCM
 #                flux via the vendored minimp3) and confident-edge locking
 #   src/search   ordering the supernodes: DFS with iterative broadening, global min-cost
-#                successor matching, block-move repair on the summed PCM flux
+#                successor matching, block-move repair on the summed PCM flux; reconstruct()
+#                runs them under the edge-lock schedule
+#   src/pipeline the stages around it: loading and shuffling the input, writing the output
 add_library(rpcore STATIC
         src/config.cpp
         src/config.hpp
@@ -48,7 +50,13 @@ add_library(rpcore STATIC
         src/search/global_match.cpp
         src/search/global_match.hpp
         src/search/repair.cpp
-        src/search/repair.hpp)
+        src/search/repair.hpp
+        src/search/reconstruct.cpp
+        src/search/reconstruct.hpp
+        src/pipeline/input.cpp
+        src/pipeline/input.hpp
+        src/pipeline/output.cpp
+        src/pipeline/output.hpp)
 target_include_directories(rpcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src
                                   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})   # third_party/minimp3.h
 target_link_libraries(rpcore PUBLIC Threads::Threads)

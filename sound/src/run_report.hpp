@@ -12,6 +12,8 @@
 // main() sets fields where it prints the matching log line; the object is written when the
 // process exits normally (any return from main), so a missing report means a crash or a kill.
 // Keys keep their first-set order; setting a key again overwrites its value.
+extern char** environ;   // POSIX
+
 namespace RunReport {
 
 struct Report {
@@ -58,6 +60,19 @@ inline void set(const std::string& k, double v) {
 }
 inline void setNull(const std::string& k)                   { report().put(k, "null"); }
 inline void setRaw(const std::string& k, const std::string& json) { report().put(k, json); }
+
+// The run's RP_* environment variables (RP_REPORT itself left out), as the "env" object.
+inline void recordEnvironment() {
+    std::string env = "{";
+    for (char** e = environ; e && *e; ++e) {
+        const std::string kv = *e;
+        if (kv.compare(0, 3, "RP_") != 0 || kv.compare(0, 10, "RP_REPORT=") == 0) continue;
+        const size_t eq = kv.find('=');
+        if (env.size() > 1) env += ", ";
+        env += quote(kv.substr(0, eq)) + ": " + quote(eq == std::string::npos ? "" : kv.substr(eq + 1));
+    }
+    setRaw("env", env + "}");
+}
 
 } // namespace RunReport
 
