@@ -10,6 +10,7 @@ find_package(Threads REQUIRED)
 #                staged into the search graph (chunk_graph), forced-chain collapse (supernodes)
 #   src/scoring  junction costs for the ranking (junction_scorer: side info, spectrum, full-PCM
 #                flux via the vendored minimp3) and confident-edge locking
+#   src/search   ordering the supernodes: DFS with iterative broadening
 add_library(rpcore STATIC
         src/config.cpp
         src/config.hpp
@@ -40,7 +41,9 @@ add_library(rpcore STATIC
         src/scoring/edge_lock.cpp
         src/scoring/edge_lock.hpp
         src/scoring/junction_scorer.cpp
-        src/scoring/junction_scorer.hpp)
+        src/scoring/junction_scorer.hpp
+        src/search/dfs.cpp
+        src/search/dfs.hpp)
 target_include_directories(rpcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src
                                   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})   # third_party/minimp3.h
 target_link_libraries(rpcore PUBLIC Threads::Threads)

@@ -25,6 +25,7 @@
 #include "scoring/pcm_junction.hpp"
 #include "scoring/edge_lock.hpp"
 #include "scoring/junction_scorer.hpp"
+#include "search/dfs.hpp"
 #include "run_report.hpp"
 #include "graph/slot_fill.hpp"
 #include "config.hpp"
@@ -36,19 +37,6 @@ using namespace std;
 
 vector<vector<uint8_t>> chunks; // moved for debugging
 
-// --------------------------------------------------------------------------
-// DFS over supernodes (Phase 5)
-// --------------------------------------------------------------------------
-
-struct DfsState {
-    vector<int> order;    // supernode indices placed so far
-    vector<bool> used;
-    int reservoirLevel = 0;   // bit-reservoir fill level after everything placed so far
-    long long score  = 0;     // summed gainCost over the junctions between placed supernodes
-};
-
-// Global matching: successor per supernode, used as a DFS ranking hint; -1 none.
-static vector<int> g_matchSucc;
 static const vector<int>* g_origIndexOf = nullptr;   // diagnostics only: source position of each chunk
 static int trueJunctions(const vector<int>& seq) {
     int tj = 0;
@@ -342,200 +330,6 @@ static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas, Junc
         if (outOfTime) cout << "  repair: time budget (" << opt.budget << " s) spent - stopping\n";
     }
     return applied;
-}
-
-// DFS instrumentation / bounding. `counter` = number of supernode placements tried.
-// RP_MAX_NODES caps it (0 = unlimited) so a bounded A/B run stops cleanly instead of being
-// SIGTERM'd (which loses buffered stdout); RP_PROGRESS overrides how often a progress line
-// is printed. g_aborted unwinds the whole recursion once the cap is hit.
-static uint64_t counter        = 0;
-static vector<int> g_deepestOrder;   // deepest partial ordering reached (diagnostic)
-static uint64_t g_maxNodes     = 0;
-static uint64_t g_progressEvery = Config::Search{}.progressEvery;
-static bool     g_aborted      = false;
-static chrono::steady_clock::time_point g_dfsStart;
-static chrono::steady_clock::time_point g_deadline;   // wall-clock stop for the whole search
-static bool     g_haveDeadline = false;
-
-// Best-of search (A1, RP_BESTOF=1): instead of returning the first complete valid ordering,
-// keep exploring (bounded by the deadline) and remember the lowest-scoring one, score =
-// summed gainCost over every supernode boundary; branch-and-bound prunes any prefix whose
-// partial score already meets/exceeds the best complete score.
-//
-// OFF by default: measured worse than first-valid. The summed-gainCost objective is
-// misaligned with truth - its global minimum is a "smoother than reality" reorder (sample-3s:
-// 25% of chunks in place vs 76-100% for first-valid), because a real stream's true order
-// genuinely contains large global_gain steps at transients/section edges. global_gain is a
-// good *local rank* signal, not a good *global objective*. Kept behind the flag for
-// experimenting with a better objective (reservoir margin, or a multi-feature score verified
-// to have the true order as its argmin). See CLAUDE.md item 7.
-static bool          g_bestOf     = false;
-static long long     g_bestScore  = LLONG_MAX;
-static vector<int>   g_bestOrder;
-
-// RP_BEAM: at each DFS node, recurse into at most this many reservoir-valid candidates,
-// taken in continuity-rank order (0 = unlimited = exhaustive). A small beam turns the DFS
-// into near-greedy descent - it reaches full depth fast when the global_gain heuristic is
-// right, but can dead-end with no complete ordering when the heuristic is wrong at some node,
-// so it is normally driven by the iterative-broadening loop in main().
-static int g_beamK = 0;
-
-static double dfsElapsedSec() {
-    return chrono::duration<double>(chrono::steady_clock::now() - g_dfsStart).count();
-}
-
-/**
- * Exhaustive DFS over the supernode graph, starting from the supernode containing chunk 0.
- * The Layer III bit-reservoir check now runs incrementally as each candidate supernode is
- * tried (see advanceReservoirChunk), instead of only once the whole order is complete - a
- * candidate that would break the reservoir chain is pruned immediately rather than explored
- * to the end, per CLAUDE.md TODO "Incremental validateReservoir inside the DFS".
- * @param state The current state of the search. state.reservoirLevel must already reflect
- *              every chunk in state.order.
- * @param supernodes A list of supernode structures containing grouped MP3 chunks.
- * @param superAdj The adjacency list representing valid transitions between supernodes.
- * @param metas Metadata for all chunks.
- * @param sideInfo Side-information size in bytes for this stream (0 / unused for non-Layer-III).
- * @param maxReservoir Reservoir capacity in bytes (0 / unused for non-Layer-III).
- * @param isLayerIII Whether the reservoir check applies at all to this stream.
- * @param result If found, the valid supernode sequence is filled into result.
- * @return True if a valid, decodable sequence of all supernodes exists.
- */
-bool dfs(DfsState& state,
-         const vector<Supernode>& supernodes,
-         const vector<vector<int>>& superAdj,
-         const vector<ChunkMeta>& metas,
-         JunctionScorer& scorer,
-         const bool rankByContinuity,
-         const int sideInfo,
-         const int maxReservoir,
-         const bool isLayerIII,
-         vector<int>& result) {
-
-    if (g_aborted) return false;
-    if (state.order.size() > g_deepestOrder.size()) g_deepestOrder = state.order;
-
-    if (state.order.size() == supernodes.size()) {
-        // Reservoir validity has already been established incrementally for every chunk
-        // placed so far - nothing left to verify.
-        if (!g_bestOf) {
-            result = state.order;
-            return true;
-        }
-        if (state.score < g_bestScore) {
-            g_bestScore = state.score;
-            g_bestOrder = state.order;
-            cout << "  [ordering found: score=" << state.score
-                 << " nodes=" << counter
-                 << " elapsed=" << fixed << setprecision(1) << dfsElapsedSec() << "s]\n" << flush;
-        }
-        return g_bestScore == 0; // score 0 = perfect continuity, cannot be beaten - stop early
-    }
-
-    const int cur = state.order.back();
-    const int curTailChunk = supernodes[cur].chunks.back();
-
-    // Chunk immediately preceding curTailChunk in the current path (for the trailing spectrum's
-    // cross-chunk main-data assembly). -1 when cur is the pinned start.
-    int curPrevChunk = -1;
-    if (supernodes[cur].chunks.size() >= 2)
-        curPrevChunk = supernodes[cur].chunks[supernodes[cur].chunks.size() - 2];
-    else if (state.order.size() >= 2)
-        curPrevChunk = supernodes[state.order[state.order.size() - 2]].chunks.back();
-
-    // Try structurally-legal successors in order of junction continuity (smallest cost first).
-    // Pure exploration ordering - every candidate is still tried (subject to the beam cap),
-    // and the reservoir check below is unchanged.
-    vector<int> candidates(superAdj[cur].begin(), superAdj[cur].end());
-    if (rankByContinuity && candidates.size() > 1) {
-        const bool useSpec = scorer.spectralOn();
-        const bool usePcm  = scorer.pcmOn();
-        // Last (up to) pcmLeft chunks of the path, oldest first - the PCM window's left side.
-        int left[PCM_LEFT_MAX], nLeft = 0;
-        if (usePcm) {
-            int tmp[PCM_LEFT_MAX];
-            const int pcmLeft = scorer.pcmLeft();
-            for (int oi = (int)state.order.size() - 1; oi >= 0 && nLeft < pcmLeft; --oi) {
-                const auto& ch = supernodes[state.order[oi]].chunks;
-                for (int k = (int)ch.size() - 1; k >= 0 && nLeft < pcmLeft; --k) tmp[nLeft++] = ch[k];
-            }
-            for (int k = 0; k < nLeft; ++k) left[k] = tmp[nLeft - 1 - k];
-        }
-        // Each candidate's cost computed once (the PCM term is a full decode per edge).
-        vector<pair<double, int>> keyed;
-        keyed.reserve(candidates.size());
-        for (int x : candidates) {
-            const int head = supernodes[x].chunks.front();
-            double c = scorer.gainCost(curTailChunk, head);
-            if (useSpec) c += scorer.spectralCost(curPrevChunk, curTailChunk, head);
-            if (usePcm && !state.used[x]) c += scorer.pcmCost(left, nLeft, head);
-            if (!g_matchSucc.empty() && g_matchSucc[cur] == x) c -= 1e9;   // global matching hint
-            keyed.push_back({c, x});
-        }
-        stable_sort(keyed.begin(), keyed.end(),
-                    [](const pair<double, int>& a, const pair<double, int>& b) { return a.first < b.first; });
-        for (size_t k = 0; k < keyed.size(); ++k) candidates[k] = keyed[k].second;
-    }
-
-    int recursed = 0; // reservoir-valid candidates descended into so far, for the RP_BEAM cap
-    for (int si : candidates) {
-        if (state.used[si]) continue;
-
-        const int jc = scorer.gainCost(curTailChunk, supernodes[si].chunks.front());
-        // Branch-and-bound: this prefix can only get more expensive, so if it already ties or
-        // beats the best complete ordering there is no point descending. Candidates are sorted
-        // ascending by jc when ranking is on, so every later one is >= this: break, not continue.
-        if (g_bestOf && state.score + jc >= g_bestScore) {
-            if (rankByContinuity) break;
-            continue;
-        }
-
-        const int savedLevel = state.reservoirLevel;
-        bool reservoirOk = true;
-        if (isLayerIII) {
-            int prevCi = curTailChunk; // last chunk of `cur`'s supernode directly precedes si's first chunk
-            for (int ci : supernodes[si].chunks) {
-                if (!advanceReservoirChunk(state.reservoirLevel, &metas[prevCi], metas[ci], chunks[ci], sideInfo, maxReservoir)) {
-                    reservoirOk = false;
-                    break;
-                }
-                prevCi = ci;
-            }
-        }
-        if (!reservoirOk) {
-            state.reservoirLevel = savedLevel;
-            continue;
-        }
-
-        state.used[si] = true;
-        state.order.push_back(si);
-        state.score += jc;
-
-        if (++counter % g_progressEvery == 0) {
-            cout << "  [nodes=" << counter << " depth=" << state.order.size()
-                 << "/" << supernodes.size() << " elapsed="
-                 << fixed << setprecision(1) << dfsElapsedSec() << "s]\n" << flush;
-        }
-        if (g_maxNodes && counter >= g_maxNodes) g_aborted = true;
-        // Wall-clock stop. Sampled every 64 placements: with the PCM term a single placement can
-        // cost tens of ms (a decode per candidate), so the old every-2^18 sampling overshot a
-        // 45 s budget by minutes on dense graphs. steady_clock::now is a vDSO call (~20 ns).
-        if (g_haveDeadline && (counter & 0x3F) == 0 && chrono::steady_clock::now() >= g_deadline)
-            g_aborted = true;
-
-        const bool hit = !g_aborted &&
-            dfs(state, supernodes, superAdj, metas, scorer, rankByContinuity, sideInfo, maxReservoir, isLayerIII, result);
-
-        state.order.pop_back();
-        state.used[si] = false;
-        state.reservoirLevel = savedLevel;
-        state.score -= jc;
-
-        if (hit) return true;              // first-valid mode, or best-of early-out (score 0)
-        if (g_aborted) return false;
-        if (g_beamK && ++recursed >= g_beamK) break;
-    }
-    return false;
 }
 
 // --- Global min-cost successor matching (method 1 of "global search on summed flux"). ---
@@ -1058,9 +852,12 @@ int main(int argc, char* argv[]) {
     const int  sideInfo     = sideInfoSize(profile.versionID, profile.isMono());
     const int  maxReservoir = maxReservoirBytes(profile.versionID);
 
-    g_maxNodes      = cfg.search.maxNodes;
-    g_progressEvery = cfg.search.progressEvery;
-    g_bestOf        = cfg.search.bestOf; // OFF by default - see g_bestOf
+    DfsSearch::Options dfsOpt;
+    dfsOpt.rank = rankByContinuity;
+    dfsOpt.bestOf = cfg.search.bestOf;   // OFF by default - see DfsSearch
+    dfsOpt.maxNodes = cfg.search.maxNodes;
+    dfsOpt.progressEvery = cfg.search.progressEvery;
+    DfsSearch dfs(chunks, metas, scorer, profile, dfsOpt);
 
     scorer.calibrateSpectral();
     scorer.calibratePcm(adj);
@@ -1129,10 +926,10 @@ int main(int argc, char* argv[]) {
     vector<int> bestPartial;   // chunk indices
     size_t bestPartialSupers = 0, bestPartialOf = 0;
     auto keepDeepest = [&]() {
-        vector<int> p = chunksOf(supernodes, g_deepestOrder);
+        vector<int> p = chunksOf(supernodes, dfs.deepest());
         if (p.size() > bestPartial.size()) {
             bestPartial = std::move(p);
-            bestPartialSupers = g_deepestOrder.size();
+            bestPartialSupers = dfs.deepest().size();
             bestPartialOf = supernodes.size();
         }
     };
@@ -1151,8 +948,8 @@ int main(int argc, char* argv[]) {
         const double tau = lockTaus[lockAttempt];
         adj = adjBase;
         if (lockAttempt > 0) keepDeepest();
-        g_deepestOrder.clear();
-        g_haveDeadline = false;   // each lock attempt gets its own search budget
+        dfs.clearDeepest();
+        dfs.clearDeadline();   // each lock attempt gets its own search budget
         if (lockTaus.size() > 1)
             cout << "\n--- lock attempt " << lockAttempt + 1 << "/" << lockTaus.size() << " (tau " << tau << ") ---\n";
         if (tau > 0) {
@@ -1239,7 +1036,7 @@ int main(int argc, char* argv[]) {
                 // attempt can't succeed, the next (from the unlocked graph) still can.
                 cout << "Pinned start supernode fails the reservoir check (a wrong lock merged into it)"
                      << " - abandoning this lock attempt\n";
-                g_deepestOrder.assign(1, startSuper);
+                dfs.setDeepest({startSuper});
                 continue;
             }
             if (!startOk) {
@@ -1263,74 +1060,23 @@ int main(int argc, char* argv[]) {
             broaden = cfg.search.broaden ? *cfg.search.broaden : supernodes.size() > 120;
             beamSchedule = broaden ? vector<int>{1, 2, 3, 4, 6, 9, 0} : vector<int>{0};
         }
-        // helper for readability when setting g_deadline for the search budget
-        auto make_deadline = [](double budget_secs) {
-            using namespace std::chrono;
-            return steady_clock::now() + duration_cast<steady_clock::duration>(duration<double>(budget_secs));
-        };
-
         auto search = [&]() {
             // Wall-clock budget for the whole search. Needed whenever the search is not a plain
             // first-valid exhaustive DFS: broadening's wider attempts and best-of both keep going
             // past the first complete ordering and would otherwise not terminate on large graphs.
             // RP_TIME_BUDGET (seconds) overrides; RP_MAX_NODES (node cap) also bounds it.
-            if (g_maxNodes == 0 && (broaden || g_bestOf)) {
-                const double budget = cfg.search.timeBudget ? *cfg.search.timeBudget : broaden ? 45.0 : 30.0;
-                g_deadline = make_deadline(budget);
-                g_haveDeadline = true;
+            if (dfs.maxNodes() == 0 && (broaden || dfs.bestOf())) {
+                dfs.setDeadline(cfg.search.timeBudget ? *cfg.search.timeBudget : broaden ? 45.0 : 30.0);
             } else if (cfg.search.timeBudget) {
-                g_deadline = make_deadline(*cfg.search.timeBudget);
-                g_haveDeadline = true;
-            } else if (g_maxNodes == 0 && lockTaus.size() > 1) {
+                dfs.setDeadline(*cfg.search.timeBudget);
+            } else if (dfs.maxNodes() == 0 && lockTaus.size() > 1) {
                 // With a lock schedule, no attempt may run an unbounded exhaustive DFS: locking can
                 // shrink a large graph below the broadening threshold (test7_short at tau 1.25:
                 // 108 supernodes, ran >500 s), which would drop rp's "always terminates" guarantee.
                 // 30 s per attempt with a fallback left, 45 s for the last one.
-                const double budget = (lockAttempt + 1 < lockTaus.size()) ? 30.0 : 45.0;
-                g_deadline = make_deadline(budget);
-                g_haveDeadline = true;
+                dfs.setDeadline((lockAttempt + 1 < lockTaus.size()) ? 30.0 : 45.0);
             }
-
-            cout << "Starting search over " << supernodes.size() << " supernodes"
-                 << " (continuity ranking " << (rankByContinuity ? "ON" : "OFF")
-                 << ", " << (g_bestOf ? "best-of" : "first-valid")
-                 << (scorer.spectralOn() ? ", +spectral" : "")
-                 << (scorer.pcmOn() ? ", +pcm" : "") << ")\n";
-
-            g_bestScore = LLONG_MAX;
-            g_bestOrder.clear();
-            for (size_t attempt = 0; attempt < beamSchedule.size(); ++attempt) {
-                if (g_haveDeadline && chrono::steady_clock::now() >= g_deadline) {
-                    cout << "  (time budget spent - skipping remaining beam widths)\n";
-                    break;
-                }
-                g_beamK   = beamSchedule[attempt];
-                counter   = 0;
-                g_aborted = false;
-                DfsState state = primed;
-                vector<int> res;
-                g_dfsStart = chrono::steady_clock::now();
-
-                cout << "  beam=" << (g_beamK ? std::to_string(g_beamK) : string("unlimited")) << " ... " << flush;
-                const bool hit = dfs(state, supernodes, superAdj, metas, scorer, rankByContinuity,
-                                     sideInfo, maxReservoir, isLayerIII, res);
-
-                if (g_bestOf) {
-                    found = !g_bestOrder.empty();
-                    cout << counter << " nodes, " << fixed << setprecision(2) << dfsElapsedSec() << "s";
-                    if (found) cout << ", best score=" << g_bestScore;
-                    else       cout << (g_aborted ? " (stopped: budget)" : " (exhausted, no ordering)");
-                    cout << "\n" << flush;
-                    if (found && g_bestScore == 0) break;       // perfect continuity - cannot improve
-                } else {
-                    if (hit) { result = res; found = true; }
-                    cout << counter << " nodes, " << fixed << setprecision(2) << dfsElapsedSec() << "s"
-                         << (found ? " -> FOUND" : (g_aborted ? " (stopped: budget)" : " (exhausted, no ordering)"))
-                         << "\n" << flush;
-                    if (found) break;
-                }
-            }
-            if (g_bestOf && found) result = g_bestOrder;
+            if (dfs.runSchedule(supernodes, superAdj, primed, beamSchedule, result)) found = true;
         };
 
         // Global successor matching (RP_MATCH): 1 (default) = when this attempt's DFS fails,
@@ -1414,11 +1160,11 @@ int main(int argc, char* argv[]) {
                 } else if (ok) { result = mr.order; matchSeq = seqm; foundByMatch = true; return true; }
             }
             if (mr.succ.empty()) return false;
-            g_matchSucc = mr.succ;
-            g_haveDeadline = false;
+            dfs.setMatchHint(mr.succ);
+            dfs.clearDeadline();
             cout << "Search with the matching as ranking hint:\n";
             search();
-            g_matchSucc.clear();
+            dfs.clearMatchHint();
             if (found) foundByHint = true;   // a DFS result: normal repair policy, own label
             return found;
         };
@@ -1430,7 +1176,7 @@ int main(int argc, char* argv[]) {
     } // lock attempts
 
     if (found) {
-        cout << "Reconstruction found" << (g_bestOf ? (" (score " + std::to_string(g_bestScore) + ")") : "") << "\n";
+        cout << "Reconstruction found" << (dfs.bestOf() ? (" (score " + std::to_string(dfs.bestScore()) + ")") : "") << "\n";
         ofstream out("output.mp3", ios::binary | ios::trunc);
         if (!out) { cerr << "Cannot open output.mp3\n"; RunReport::set("error", "cannot open output.mp3"); return 1; }
 
@@ -1600,7 +1346,7 @@ int main(int argc, char* argv[]) {
         }
     } else {
         cout << "Failed to reconstruct (no complete ordering found"
-             << (g_aborted ? " within the search budget" : "") << ").\n";
+             << (dfs.aborted() ? " within the search budget" : "") << ").\n";
         // How right was the deepest partial path? Chunk-level junctions whose successor is the
         // true next chunk, and where the first wrong one is.
         keepDeepest();
@@ -1612,7 +1358,7 @@ int main(int argc, char* argv[]) {
             else if (firstBad < 0) firstBad = static_cast<int>(k);
         }
         RunReport::set("status", "no_ordering");
-        RunReport::set("budget_exhausted", static_cast<bool>(g_aborted));
+        RunReport::set("budget_exhausted", dfs.aborted());
         RunReport::set("partial_chunks", path.size());
         RunReport::set("partial_true_junctions", good);
         cout << "Deepest partial path: " << bestPartialSupers << "/" << bestPartialOf << " supernodes, "
