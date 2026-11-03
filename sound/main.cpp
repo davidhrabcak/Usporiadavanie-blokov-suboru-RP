@@ -4,7 +4,6 @@
 #include <chrono>
 #include <array>
 #include <queue>
-#include <thread>
 #include <string>
 #include <cstdint>
 #include <iostream>
@@ -25,12 +24,9 @@
 #include "edge_lock.hpp"
 #include "run_report.hpp"
 #include "slot_fill.hpp"
+#include "config.hpp"
 
 extern char** environ;
-
-#define CHUNK_SIZE 1024
-#define COUNTER_FREQUENCY 9999999
-#define FILENAME "test/test7_shorter.mp3"
 
 using namespace std;
 
@@ -339,15 +335,6 @@ static double spectralJunctionCost(const vector<ChunkMeta>& metas, int curPrev, 
 // (not a safe filter: some true junctions do spike). RP_PCM=0 disables; RP_PCM_W weights it
 // relative to the existing (global_gain + spectral) cost, see the calibration in main().
 static vector<int> g_matchSucc;   // global matching: successor per supernode (DFS hint), -1 none
-// RP_REPAIR_MIN_GAIN: on a reservoir-valid order, a flux-only repair move must lower the summed
-// log1p(flux) by at least this much (both the DFS and the matching repair). Small gains are
-// noise: a 0.037 move turned a true order into a cheaper wrong one (cbr192_10s 2 KB), the move
-// that fixed test7_short gained 3.4. 0 = repair to a flux local optimum (the old behaviour).
-static double repairMinGain() {
-    double g = 1.0;
-    if (const char* v = std::getenv("RP_REPAIR_MIN_GAIN")) g = atof(v);
-    return g;
-}
 static const vector<int>* g_origIndexOf = nullptr;   // diagnostics only: source position of each chunk
 static int trueJunctions(const vector<int>& seq) {
     int tj = 0;
@@ -493,12 +480,17 @@ static int reservoirBreaks(const vector<ChunkMeta>& metas, const vector<int>& se
 // Returns the number of moves applied; `seq` is updated in place. `gap` (optional) gets the
 // stability margin of the final order: how much the summed flux would rise under the cheapest
 // valid move the last (full-scan) pass rejected - NaN when no full scan completed. A small gap
-// means a nearby, almost equally cheap ordering exists (the wrong-output risk).
+// means a nearby, almost equally cheap ordering exists (the wrong-output risk). On a
+// reservoir-valid order a flux-only move must lower the summed log1p(flux) by at least
+// `opt.minGain`: small gains are noise (a 0.037 move turned a true order into a cheaper wrong
+// one, cbr192_10s 2 KB; the move that fixed test7_short gained 3.4).
 static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
                           const vector<vector<int>>& adjFull, const bool isLayerIII,
-                          const int sideInfo, const int maxReservoir, const int maxPasses,
-                          double* gap = nullptr, const double minFluxGain = 0) {
+                          const int sideInfo, const int maxReservoir, const Config::Repair& opt,
+                          double* gap = nullptr) {
     const int n = static_cast<int>(seq.size());
+    const int maxPasses = opt.passes;
+    const double minFluxGain = opt.minGain;
     std::unordered_set<uint64_t> edge;
     vector<vector<int>> preds(adjFull.size());
     for (size_t a = 0; a < adjFull.size(); ++a)
@@ -509,14 +501,11 @@ static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
     // splices are usually high-flux (pcm_probe: true median ~1.05, wrong ~3). Phase 0 of each
     // pass only evaluates moves that cut one of the K worst junctions (plus, for an invalid
     // order, the junctions just before each reservoir break); phase 1 scans every move if phase
-    // 0 found nothing. RP_REPAIR_SUSPECTS=K overrides (0 = no filter); RP_REPAIR_BUDGET (s,
-    // default 60) bounds the whole repair - when spent, the best move found so far is applied.
-    int suspects = std::max(16, n / 20);
-    if (const char* v = std::getenv("RP_REPAIR_SUSPECTS")) suspects = atoi(v);
-    double budget = 60;
-    if (const char* v = std::getenv("RP_REPAIR_BUDGET")) budget = atof(v);
+    // 0 found nothing (opt.suspects = K, 0 = no filter). opt.budget (s) bounds the whole repair
+    // - when spent, the best move found so far is applied.
+    const int suspects = opt.suspects ? *opt.suspects : std::max(16, n / 20);
     const auto deadline = chrono::steady_clock::now() +
-        chrono::duration_cast<chrono::steady_clock::duration>(chrono::duration<double>(budget));
+        chrono::duration_cast<chrono::steady_clock::duration>(chrono::duration<double>(opt.budget));
     bool outOfTime = false;
     if (gap) *gap = std::numeric_limits<double>::quiet_NaN();
     double nearest = std::numeric_limits<double>::infinity();   // cheapest rejected move (sum delta)
@@ -745,7 +734,7 @@ static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
             cout << "\n";
             break;
         }
-        if (outOfTime) cout << "  repair: time budget (" << budget << " s) spent - stopping\n";
+        if (outOfTime) cout << "  repair: time budget (" << opt.budget << " s) spent - stopping\n";
     }
     return applied;
 }
@@ -757,7 +746,7 @@ static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
 static uint64_t counter        = 0;
 static vector<int> g_deepestOrder;   // deepest partial ordering reached (diagnostic)
 static uint64_t g_maxNodes     = 0;
-static uint64_t g_progressEvery = COUNTER_FREQUENCY;
+static uint64_t g_progressEvery = Config::Search{}.progressEvery;
 static bool     g_aborted      = false;
 static chrono::steady_clock::time_point g_dfsStart;
 static chrono::steady_clock::time_point g_deadline;   // wall-clock stop for the whole search
@@ -970,7 +959,7 @@ struct MatchResult {
 static MatchResult globalMatch(const vector<Supernode>& sn, const vector<vector<int>>& superAdj,
                                int startSuper, const vector<vector<int>>& chunkAdj,
                                const vector<ChunkMeta>& metas, EdgeLock::FluxMemo& memo, int threads,
-                               const EdgeLock::WarmChains* warm,
+                               const EdgeLock::WarmChains* warm, const long maxDecodes,
                                const std::unordered_set<uint64_t>* forbidden = nullptr) {
     auto banned = [&](int s, int t) {
         return forbidden && forbidden->count(((uint64_t)(unsigned)s << 32) | (unsigned)t) > 0;
@@ -996,10 +985,10 @@ static MatchResult globalMatch(const vector<Supernode>& sn, const vector<vector<
     // Decode cap: dense low-bitrate graphs (bohemoan 32 kbps at 1-2 KB: ~700 supernodes x ~140
     // successors x 8 contexts) took > 15 min just to score. Halve the number of predecessor
     // contexts per single-chunk supernode until the windows not yet in the memo fit under
-    // RP_MATCH_MAX_DECODES; skip the matching if even one context doesn't fit. Count-based (not
-    // time-based) so whether and how the matching runs doesn't depend on the core count.
-    long cap = 100000;
-    if (const char* v = std::getenv("RP_MATCH_MAX_DECODES")) cap = atol(v);
+    // maxDecodes (RP_MATCH_MAX_DECODES); skip the matching if even one context doesn't fit.
+    // Count-based (not time-based) so whether and how the matching runs doesn't depend on the
+    // core count.
+    const long cap = maxDecodes;
     vector<vector<int>> ctxOf(N);
     vector<std::array<int, 3>> windows;
     for (int maxCtx = 8; ; maxCtx /= 2) {
@@ -1178,7 +1167,8 @@ static MatchResult globalMatch(const vector<Supernode>& sn, const vector<vector<
 }
 
 int main(int argc, char* argv[]) {
-    const string filename = (argc > 1) ? argv[1] : FILENAME;
+    const Config cfg = Config::fromEnv(argc, argv);
+    const string& filename = cfg.input;
 
     // RP_REPORT (PLAN_test_automation.md): starts the clock; written on any return from main.
     RunReport::set("file", filename);
@@ -1202,11 +1192,8 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // RP_CHUNK_SIZE overrides the default chunk size (bytes). Must be >= the largest frame so a
-    // frame never spans more than one chunk boundary.
-    long chunkSize = CHUNK_SIZE;
-    if (const char* s = std::getenv("RP_CHUNK_SIZE")) chunkSize = std::max(1024L, std::strtol(s, nullptr, 10));
-    if (chunkSize != CHUNK_SIZE) cout << "Chunk size: " << chunkSize << " bytes\n";
+    const long chunkSize = cfg.chunkSize;
+    if (chunkSize != Config::kDefaultChunkSize) cout << "Chunk size: " << chunkSize << " bytes\n";
     chunks = scanner.chunksFromFirstFrame(chunkSize);
 
     // Constant-bitrate detection (A3a): if every frame shares one bitrate, enable the
@@ -1218,7 +1205,7 @@ int main(int argc, char* argv[]) {
         StreamProfile tmp{};
         if (voteProfile(chunks, tmp)) cbr = detectCBRUnordered(chunks, tmp, cbrKbps);
     }
-    if (const char* s = std::getenv("RP_CBR")) if (s[0] == '0') cbr = false; // A/B toggle for A3a
+    if (!cfg.cbrFilter) cbr = false; // A/B toggle for A3a
     if (cbr)
         cout << "Detected constant bitrate: " << cbrKbps
              << " kbps - frame-header bitrate filter enabled\n";
@@ -1249,8 +1236,7 @@ int main(int argc, char* argv[]) {
             for (int i = 0; i < static_cast<int>(chunks.size()); ++i)
                 origMetas.push_back(computeChunkMeta(i, chunks[i], prof0, static_cast<long>(chunks[i].size()) < chunkSize));
 
-            const char* gapEnv = std::getenv("RP_GAP");
-            if (!(gapEnv && gapEnv[0] == '0')) {
+            if (cfg.gap) {
                 const SplitTails st = promoteSplitTails(origMetas, chunks, chunkSize, prof0, proto);
                 splitTailsPre = st.promoted[1] + st.promoted[2] + st.promoted[3];
                 if (splitTailsPre > 0 || st.expected[1] + st.expected[2] + st.expected[3] > 0) {
@@ -1339,13 +1325,7 @@ int main(int argc, char* argv[]) {
     // Shuffle seed. Deterministic by default (C1) so a given input always reconstructs the
     // same way and results are reproducible; RP_SEED=<n> pins a specific one, RP_SEED=random
     // draws from the clock.
-    unsigned seed = 1;
-    bool randomSeed = false;
-    if (const char* s = std::getenv("RP_SEED")) {
-        if (std::string(s) == "random") randomSeed = true;
-        else seed = static_cast<unsigned>(std::strtoul(s, nullptr, 10));
-    }
-    if (randomSeed) seed = static_cast<unsigned>(chrono::system_clock::now().time_since_epoch().count());
+    const unsigned seed = cfg.seed;
 
     // origIndexOf[i] = original (pre-shuffle) index of the chunk now at position i. Shuffled
     // with the same seed/engine as `chunks`, so it stays in lock-step and lets us score the
@@ -1361,8 +1341,7 @@ int main(int argc, char* argv[]) {
     // The first chunk is not known either: move it to a random position too. Done as one swap
     // after the shuffle above, so a correctly found start restores exactly the layout the
     // pipeline had when chunk 0 was pinned. RP_START=pinned keeps chunk 0 in place (A/B).
-    const char* startEnv = std::getenv("RP_START");
-    const bool startPinned = startEnv && std::string(startEnv) == "pinned";
+    const bool startPinned = cfg.startPinned;
     if (!startPinned && chunks.size() > 1) {
         std::uniform_int_distribution<size_t> pick(0, chunks.size() - 1);
         std::mt19937 rngStart(seed + 2);   // not minstd: its first draw from a small seed is ~0
@@ -1411,7 +1390,7 @@ int main(int argc, char* argv[]) {
     RunReport::set("chunk_size", static_cast<long long>(chunkSize));
     RunReport::set("seed", static_cast<long long>(seed));
     RunReport::set("chunks", chunks.size());
-    cout << "Shuffle seed: " << seed << (randomSeed ? " (random)" : " (fixed default; RP_SEED to override)") << "\n";
+    cout << "Shuffle seed: " << seed << (cfg.randomSeed ? " (random)" : " (fixed default; RP_SEED to override)") << "\n";
 
     // Derive stream profile from chunk 0 (the start found above, or pinned with RP_START=pinned)
     StreamProfile profile{};
@@ -1463,7 +1442,7 @@ int main(int argc, char* argv[]) {
             p90 = lens[lens.size() * 9 / 10];
         }
         g_pcmLeft = std::max(3, PcmJunction::leftChunksNeeded(p90, chunkSize));
-        if (const char* v = std::getenv("RP_PCM_LEFT")) g_pcmLeft = atoi(v);
+        if (cfg.pcmLeft) g_pcmLeft = *cfg.pcmLeft;
         g_pcmLeft = std::min(std::max(g_pcmLeft, 2), PCM_LEFT_MAX);
         if (g_pcmLeft != 3)
             cout << "PCM window: " << g_pcmLeft << " left chunks (p90 frame " << p90 << " B)\n";
@@ -1472,15 +1451,12 @@ int main(int argc, char* argv[]) {
     // Boundary granule loudness for the DFS continuity heuristic (see BoundaryGain / dfs()).
     // Off only if RP_RANK=0 - kept as a switch for the pinned-seed A/B in
     // PLAN_sideinfo_mainbits.md Step 1.
-    const bool rankByContinuity = [] {
-        const char* v = std::getenv("RP_RANK");
-        return !(v && v[0] == '0');
-    }();
+    const bool rankByContinuity = cfg.rank;
     // Milestone 2 spectral-continuity term in the ranking (see spectralJunctionCost). RP_SPEC=0
     // disables it for A/B.
     g_sampleRate = profile.sampleRate;
-    if (const char* v = std::getenv("RP_SPEC")) g_specRank = (v[0] != '0');
-    if (const char* v = std::getenv("RP_SPEC_SCALE")) g_specScale = atof(v);
+    g_specRank = cfg.spec;
+    if (cfg.specScale) g_specScale = *cfg.specScale;
     vector<BoundaryGain> boundaryGain(chunks.size());
     if (profile.isLayerIII()) {
         for (size_t i = 0; i < metas.size(); ++i) {
@@ -1532,8 +1508,7 @@ int main(int argc, char* argv[]) {
     // reservoir model passed the true order (a model that rejects real arcs would let AC-3
     // force wrong ones). RP_RESV_FILTER=0 off, =1 forces past the gate.
     if (profile.isLayerIII()) {
-        const char* e = std::getenv("RP_RESV_FILTER");
-        const bool force = e && e[0] == '1', off = e && e[0] == '0';
+        const bool force = cfg.resvFilter == Switch::On, off = cfg.resvFilter == Switch::Off;
         if (!off && (preShuffleResvBreaks == 0 || force)) {
             const int si = sideInfoSize(profile.versionID, profile.isMono());
             const int mr = maxReservoirBytes(profile.versionID);
@@ -1565,9 +1540,8 @@ int main(int argc, char* argv[]) {
     // graph). Gate on the pre-shuffle diagnostic: skip when it found breaks. RP_AC3=0 forces
     // off, RP_AC3=1 forces on regardless of the gate.
     {
-        const char* e = std::getenv("RP_AC3");
-        const bool force = e && e[0] == '1';
-        const bool off   = e && e[0] == '0';
+        const bool force = cfg.ac3 == Switch::On;
+        const bool off   = cfg.ac3 == Switch::Off;
         const bool safe  = preShuffleBreaks == 0;
         if (off) {
             // disabled
@@ -1589,18 +1563,15 @@ int main(int argc, char* argv[]) {
     const int  sideInfo     = sideInfoSize(profile.versionID, profile.isMono());
     const int  maxReservoir = maxReservoirBytes(profile.versionID);
 
-    if (const char* s = std::getenv("RP_MAX_NODES")) g_maxNodes = std::strtoull(s, nullptr, 10);
-    if (const char* s = std::getenv("RP_PROGRESS")) {
-        const uint64_t v = std::strtoull(s, nullptr, 10);
-        if (v) g_progressEvery = v;
-    }
-    if (const char* s = std::getenv("RP_BESTOF")) g_bestOf = (s[0] != '0'); // OFF by default - see g_bestOf
+    g_maxNodes      = cfg.search.maxNodes;
+    g_progressEvery = cfg.search.progressEvery;
+    g_bestOf        = cfg.search.bestOf; // OFF by default - see g_bestOf
 
     // Auto-calibrate the spectral term: sample random (prev, a, b) triples, take the median
     // raw L2 distance, and scale so a median junction contributes SPEC_TARGET (~a gentle
     // nudge, well below a typical |Δglobal_gain|). Removes the magic constant and adapts per
     // file. RP_SPEC_SCALE overrides the result.
-    if (g_specRank && isLayerIII && !std::getenv("RP_SPEC_SCALE")) {
+    if (g_specRank && isLayerIII && !cfg.specScale) {
         vector<int> validChunks;
         for (int i = 0; i < static_cast<int>(chunks.size()); ++i)
             if (metas[i].valid && !metas[i].frames.empty()) validChunks.push_back(i);
@@ -1635,10 +1606,9 @@ int main(int argc, char* argv[]) {
     // of real structural edges a->b with a plausible (g_pcmLeft - 1)-chunk path context (... ->pp
     // ->p->a, drawn from the graph's in-edges), scale log1p(flux) so its spread is RP_PCM_W times the spread of
     // junctionCost + spectral. Unmeasurable junctions get the median (neutral) value.
-    if (const char* v = std::getenv("RP_PCM")) g_pcmRank = (v[0] != '0');
+    g_pcmRank = cfg.pcm;
     if (g_pcmRank && rankByContinuity) {
-        double weight = 2.0;
-        if (const char* v = std::getenv("RP_PCM_W")) weight = atof(v);
+        const double weight = cfg.pcmWeight;
         const int n = static_cast<int>(chunks.size());
         vector<vector<int>> preds(n);
         for (int a = 0; a < n; ++a) for (int b : adj[a]) preds[b].push_back(a);
@@ -1703,12 +1673,11 @@ int main(int argc, char* argv[]) {
     // next (lower) one. A complete-but-wrong ordering from a too-low tau is then the repair
     // pass's job (it works on the FULL graph, so it can undo a wrong lock). RP_LOCK_TAU sets
     // the schedule (comma list, e.g. "1.5" for a single attempt); RP_LOCK=0 disables.
-    const char* lockEnv = std::getenv("RP_LOCK");
     // Same soundness gate as AC-3: with a real edge missing from the graph (pre-shuffle
     // breaks) the predecessor-side margin can be won unopposed by a wrong edge.
-    bool lockOn = !(lockEnv && lockEnv[0] == '0') && profile.isLayerIII() &&
-                  (preShuffleBreaks == 0 || (lockEnv && lockEnv[0] == '1'));
-    if (!lockOn && !(lockEnv && lockEnv[0] == '0') && profile.isLayerIII())
+    bool lockOn = cfg.lock.mode != Switch::Off && profile.isLayerIII() &&
+                  (preShuffleBreaks == 0 || cfg.lock.mode == Switch::On);
+    if (!lockOn && cfg.lock.mode != Switch::Off && profile.isLayerIII())
         cout << "Edge locking: skipped (pre-shuffle found breaks; RP_LOCK=1 forces)\n";
     if (lockOn) {
         // Cost cap: one round is ~sum_a min(|preds(a)|, 8) * |succ(a)| window decodes
@@ -1722,39 +1691,22 @@ int main(int argc, char* argv[]) {
         for (const auto& v : adj) for (int b : v) ++indegTmp[b];
         for (size_t x = 0; x < adj.size(); ++x)
             estimate += (long)std::min(indegTmp[x], 8) * (long)adj[x].size();
-        long cap = 640000;
-        if (const char* c = std::getenv("RP_LOCK_MAX_DECODES")) cap = atol(c);
-        if (estimate > cap && !(lockEnv && lockEnv[0] == '1')) {
+        const long cap = cfg.lock.maxDecodes;
+        if (estimate > cap && cfg.lock.mode != Switch::On) {
             cout << "Edge locking: skipped (~" << estimate << " decodes/round > " << cap
                  << "; RP_LOCK=1 forces, RP_LOCK_MAX_DECODES raises the cap)\n";
             lockOn = false;
         }
     }
-    vector<double> lockTaus = {1.5, 1.25, 1.1};
-    if (const char* t = std::getenv("RP_LOCK_TAU")) {
-        lockTaus.clear();
-        string spec(t);
-        size_t at = 0;
-        while (at < spec.size()) {
-            size_t comma = spec.find(',', at);
-            if (comma == string::npos) comma = spec.size();
-            const double v = atof(spec.substr(at, comma - at).c_str());
-            if (v > 0) lockTaus.push_back(v);
-            at = comma + 1;
-        }
-        if (lockTaus.empty()) lockTaus = {1.5};
-    }
+    vector<double> lockTaus = cfg.lock.taus;
     if (!lockOn) lockTaus = {0.0};  // single attempt, no locking
-    int lockRounds = 8;  // re-lock on the pruned graph until nothing new locks
-    if (const char* r = std::getenv("RP_LOCK_ROUNDS")) lockRounds = std::max(1, atoi(r));
-    const char* acEnv = std::getenv("RP_AC3");
-    const bool acOk = !(acEnv && acEnv[0] == '0') && (preShuffleBreaks == 0 || (acEnv && acEnv[0] == '1'));
+    const int lockRounds = cfg.lock.rounds;  // re-lock on the pruned graph until nothing new locks
+    const bool acOk = cfg.ac3 != Switch::Off && (preShuffleBreaks == 0 || cfg.ac3 == Switch::On);
 
     // Window fluxes are shared across lock rounds and tau attempts (a window's flux depends only
     // on its three chunks), and scored on RP_THREADS threads (default: all cores).
     EdgeLock::FluxMemo lockMemo;
-    int lockThreads = std::max(1u, std::thread::hardware_concurrency());
-    if (const char* t = std::getenv("RP_THREADS")) lockThreads = std::max(1, atoi(t));
+    const int lockThreads = cfg.threads;
 
     const auto adjBase = adj;
     // Lock/matching windows are [p, a, b], one chunk less on the left than the DFS's; past 3
@@ -1788,13 +1740,11 @@ int main(int argc, char* argv[]) {
     // RP_SLOT_ORACLE=1 (diagnostic, PLAN_headerless_chunks.md stage B): skip the search and take
     // the true order of the chunks with a header, so the slot assignment is measured alone.
     bool slotOracle = false;
-    if (const char* o = std::getenv("RP_SLOT_ORACLE")) {
-        if (o[0] == '1') {
-            matchSeq.assign(chunks.size(), 0);
-            for (size_t ci = 0; ci < chunks.size(); ++ci) matchSeq[origIndexOf[ci]] = static_cast<int>(ci);
-            found = foundByMatch = slotOracle = true;
-            cout << "Slot oracle: true order of the chunks with a header (search skipped)\n";
-        }
+    if (cfg.slotOracle) {
+        matchSeq.assign(chunks.size(), 0);
+        for (size_t ci = 0; ci < chunks.size(); ++ci) matchSeq[origIndexOf[ci]] = static_cast<int>(ci);
+        found = foundByMatch = slotOracle = true;
+        cout << "Slot oracle: true order of the chunks with a header (search skipped)\n";
     }
     for (size_t lockAttempt = 0; lockAttempt < lockTaus.size() && !found; ++lockAttempt) {
         foundAttempt = lockAttempt;
@@ -1908,11 +1858,10 @@ int main(int argc, char* argv[]) {
         // RP_BROADEN=0 / =1 overrides the size heuristic.
         vector<int> beamSchedule;
         bool broaden = false;
-        if (const char* s = std::getenv("RP_BEAM")) {
-            beamSchedule = { std::max(0, atoi(s)) };
+        if (cfg.search.beam) {
+            beamSchedule = { *cfg.search.beam };
         } else {
-            broaden = supernodes.size() > 120;
-            if (const char* b = std::getenv("RP_BROADEN")) broaden = (b[0] != '0');
+            broaden = cfg.search.broaden ? *cfg.search.broaden : supernodes.size() > 120;
             beamSchedule = broaden ? vector<int>{1, 2, 3, 4, 6, 9, 0} : vector<int>{0};
         }
         // helper for readability when setting g_deadline for the search budget
@@ -1927,12 +1876,11 @@ int main(int argc, char* argv[]) {
             // past the first complete ordering and would otherwise not terminate on large graphs.
             // RP_TIME_BUDGET (seconds) overrides; RP_MAX_NODES (node cap) also bounds it.
             if (g_maxNodes == 0 && (broaden || g_bestOf)) {
-                double budget = broaden ? 45.0 : 30.0;
-                if (const char* t = std::getenv("RP_TIME_BUDGET")) budget = atof(t);
+                const double budget = cfg.search.timeBudget ? *cfg.search.timeBudget : broaden ? 45.0 : 30.0;
                 g_deadline = make_deadline(budget);
                 g_haveDeadline = true;
-            } else if (const char* t = std::getenv("RP_TIME_BUDGET")) {
-                g_deadline = make_deadline(atof(t));
+            } else if (cfg.search.timeBudget) {
+                g_deadline = make_deadline(*cfg.search.timeBudget);
                 g_haveDeadline = true;
             } else if (g_maxNodes == 0 && lockTaus.size() > 1) {
                 // With a lock schedule, no attempt may run an unbounded exhaustive DFS: locking can
@@ -1991,13 +1939,13 @@ int main(int argc, char* argv[]) {
         // otherwise the DFS is rerun (fresh budget) with each matched successor ranked first.
         auto tryMatch = [&]() -> bool {
             const auto t0 = chrono::steady_clock::now();
-            MatchResult mr = globalMatch(supernodes, superAdj, startSuper, adj, metas, lockMemo, lockThreads, warmPtr);
+            MatchResult mr = globalMatch(supernodes, superAdj, startSuper, adj, metas, lockMemo, cfg.threads, warmPtr,
+                                         cfg.match.maxDecodes);
             // Iterated matching (RP_MATCH_ITERS rounds): the assignment ignores the bit
             // reservoir, so forbid the supernode arc at (or, for a break inside a supernode, just
             // before) each reservoir break and re-solve; keep the result with the fewest breaks,
             // then the lowest cost. Each round reuses the memoised window fluxes (~0.02-0.1 s).
-            int matchIters = 0;
-            if (const char* v = std::getenv("RP_MATCH_ITERS")) matchIters = std::max(0, atoi(v));
+            const int matchIters = cfg.match.iters;
             if (isLayerIII && matchIters > 0 && !mr.order.empty()) {
                 std::unordered_set<uint64_t> forb;
                 auto breaksOf = [&](const MatchResult& r, vector<int>* where) {
@@ -2024,7 +1972,8 @@ int main(int argc, char* argv[]) {
                         forb.insert(((uint64_t)(unsigned)cur.order[sp - 1] << 32) | (unsigned)cur.order[sp]);
                     }
                     if (forb.size() == before) break;
-                    MatchResult nx = globalMatch(supernodes, superAdj, startSuper, adj, metas, lockMemo, lockThreads, warmPtr, &forb);
+                    MatchResult nx = globalMatch(supernodes, superAdj, startSuper, adj, metas, lockMemo, cfg.threads, warmPtr,
+                                                     cfg.match.maxDecodes, &forb);
                     if (nx.order.empty()) break;   // over-constrained: keep the best so far
                     const int b = breaksOf(nx, nullptr);
                     if (b < bestBreaks || (b == bestBreaks && nx.cost < mr.cost)) { mr = nx; bestBreaks = b; }
@@ -2052,13 +2001,10 @@ int main(int argc, char* argv[]) {
                 // Repair (moves on the full structural graph). If the order is reservoir-invalid
                 // - usual, it is nearly right but a few wrong junctions break the reservoir -
                 // the cost is led by the number of reservoir breaks.
-                const double minGain = repairMinGain();
-                if (!(std::getenv("RP_REPAIR") && std::getenv("RP_REPAIR")[0] == '0')) {
-                    int passes = 50;
-                    if (const char* v = std::getenv("RP_REPAIR_PASSES")) passes = std::max(1, atoi(v));
+                if (cfg.repair.mode != Switch::Off) {
                     const auto r0 = chrono::steady_clock::now();
                     double gap = std::numeric_limits<double>::quiet_NaN();
-                    const int mv = repairOrdering(seqm, metas, adjFull, isLayerIII, sideInfo, maxReservoir, passes, &gap, minGain);
+                    const int mv = repairOrdering(seqm, metas, adjFull, isLayerIII, sideInfo, maxReservoir, cfg.repair, &gap);
                     const bool ok2 = reservoirValid(metas, seqm, sideInfo, maxReservoir);
                     int tj2 = 0;
                     for (size_t k = 1; k < seqm.size(); ++k) if (origIndexOf[seqm[k]] == origIndexOf[seqm[k - 1]] + 1) ++tj2;
@@ -2079,8 +2025,7 @@ int main(int argc, char* argv[]) {
             if (found) foundByHint = true;   // a DFS result: normal repair policy, own label
             return found;
         };
-        int matchMode = 1;
-        if (const char* m = std::getenv("RP_MATCH")) matchMode = atoi(m);
+        int matchMode = cfg.match.mode;
         if (!g_pcmRank) matchMode = 0;
         if (matchMode == 2 && tryMatch()) { found = true; continue; }
         search();
@@ -2103,19 +2048,17 @@ int main(int argc, char* argv[]) {
         // (test7_short: 606/609, fixed by a 3.4-gain move). So the repair now always runs with
         // the RP_REPAIR_MIN_GAIN threshold; with RP_REPAIR_MIN_GAIN=0 the old skip applies.
         // RP_REPAIR=1 forces the repair, =0 disables it.
-        const char* rp = std::getenv("RP_REPAIR");
-        const bool repairForced = rp && rp[0] == '1';
-        const bool firstOfSchedule = lockTaus.size() > 1 && foundAttempt == 0 && !foundByMatch && repairMinGain() <= 0;
+        const bool repairForced = cfg.repair.mode == Switch::On;
+        const bool repairOff    = cfg.repair.mode == Switch::Off;
+        const bool firstOfSchedule = lockTaus.size() > 1 && foundAttempt == 0 && !foundByMatch && cfg.repair.minGain <= 0;
         if (foundByMatch && !repairForced)
             cout << "Block-move repair: skipped (the matching's ordering was already repaired)\n";
-        else if (g_pcmRank && !(rp && rp[0] == '0') && firstOfSchedule && !repairForced)
+        else if (g_pcmRank && !repairOff && firstOfSchedule && !repairForced)
             cout << "Block-move repair: skipped (found by the strictest lock attempt; RP_REPAIR=1 forces)\n";
-        else if (g_pcmRank && !(rp && rp[0] == '0')) {
-            int passes = 50;
-            if (const char* v = std::getenv("RP_REPAIR_PASSES")) passes = std::max(1, atoi(v));
+        else if (g_pcmRank && !repairOff) {
             const auto t0 = chrono::steady_clock::now();
-            const int moves = repairOrdering(seq, metas, adjFull, isLayerIII, sideInfo, maxReservoir, passes, &resultGap,
-                                             repairMinGain());
+            const int moves = repairOrdering(seq, metas, adjFull, isLayerIII, sideInfo, maxReservoir, cfg.repair,
+                                             &resultGap);
             resultRepairMoves += moves;
             cout << "Block-move repair: " << moves << " move(s), " << fixed << setprecision(2)
                  << chrono::duration<double>(chrono::steady_clock::now() - t0).count() << "s\n";
@@ -2131,8 +2074,7 @@ int main(int argc, char* argv[]) {
         // by PCM flux (SlotFill). RP_SLOT_FILL=0: pool order (stage A behaviour).
         vector<int> slotPool;   // per slot, in order: pool index, -1 none
         vector<char> poolUsed(pool.size(), 0);
-        const char* sf = std::getenv("RP_SLOT_FILL");
-        if (!pool.empty() && !(sf && sf[0] == '0')) {
+        if (!pool.empty() && cfg.slotFill) {
             vector<SlotFill::Slot> sl;
             for (size_t k = 0; k + 1 < seq.size(); ++k) {
                 if (!metas[seq[k]].gapAfter) continue;
@@ -2245,7 +2187,7 @@ int main(int argc, char* argv[]) {
         // Diagnostic (RP_SCORE_ORDER=1): summed PCM flux of the found ordering vs the source
         // order, each junction scored in its own exact (PP, P, cur) context. Tells whether a
         // wrong-but-valid result is something a flux-minimising repair could fix.
-        if (std::getenv("RP_SCORE_ORDER") && !exactMatch) {
+        if (cfg.scoreOrder && !exactMatch) {
             vector<int> found = seq, truth(chunks.size());
             for (size_t ci = 0; ci < chunks.size(); ++ci) truth[origIndexOf[ci]] = static_cast<int>(ci);
             auto summed = [&](const vector<int>& ord, int& unmeasured) {

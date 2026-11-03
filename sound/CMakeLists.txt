@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(rp)
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 find_package(Threads REQUIRED)
 
 add_executable(rp
@@ -24,6 +24,8 @@ add_executable(rp
         edge_lock.hpp
         slot_fill.cpp
         slot_fill.hpp
+        config.cpp
+        config.hpp
         main.cpp)
 
 add_executable(evaluate_order

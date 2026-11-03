@@ -21,6 +21,7 @@ The first chunk is not known (2026-10-27; before that chunk 0 was pinned). `rp` 
 | `pcm_junction.cpp / .hpp` | Full-decode junction scoring (branch `full-pcm-decode`, `PLAN_full_pcm_decode.md`). Decodes `[PP, P, cur, candidate]` chunks to PCM with the vendored minimp3 (fresh decoder per window, frame-exact feeding) and measures the spectral-flux spike at the junction vs the flux inside the already-placed audio. Window decode is sample-exact vs a full-file decode. `test/pcm_probe.cpp` is its measurement tool. |
 | `edge_lock.cpp / .hpp` | Confident-edge locking: forces edges whose median-context PCM flux beats every competitor on both sides by `RP_LOCK_TAU`. Run iteratively with AC-3 before the supernode collapse. |
 | `pcm_decoder_impl.cpp`, `third_party/minimp3.h` | Vendored [minimp3](https://github.com/lieff/minimp3) (CC0), compiled once, float output. Full Layer I/II/III decoder: requantise, stereo, IMDCT, synthesis. |
+| `config.cpp / .hpp` | `Config::fromEnv`: every `RP_*` option (table under Build) parsed once at startup; `main.cpp` reads only `cfg`. `RP_REPORT` is read by `run_report.hpp`. |
 | `main.cpp` | Orchestrates the pipeline: load → profile → shuffle → per-chunk metadata → adjacency graph → supernode collapse → DFS reconstruction → write output. |
 
 ---
@@ -423,7 +424,7 @@ cmake -B cmake-build-debug && cmake --build cmake-build-debug
 ./cmake-build-debug/rp [input.mp3]
 ```
 
-`input.mp3` defaults to the `FILENAME` macro in `main.cpp` if omitted (2026-07-18: this CLI override was previously undocumented-but-broken - `main()` ignored `argv` entirely despite this doc already showing the `[input.mp3]` usage; fixed alongside Milestone 1 so the two now actually agree).
+`input.mp3` defaults to `Config::input` (`config.hpp`) if omitted (2026-07-18: this CLI override was previously undocumented-but-broken - `main()` ignored `argv` entirely despite this doc already showing the `[input.mp3]` usage; fixed alongside Milestone 1 so the two now actually agree).
 
 Output is written to `output.mp3` in the current directory. The first chunk is found from content and placed first (see Project Goal; `RP_START=pinned` keeps chunk 0 first instead). `rp` also prints, after a successful reconstruction, how many chunks landed in their original position and whether the output is byte-identical to the source (C2).
 
