@@ -1,339 +1,611 @@
 #!/usr/bin/env python3
-"""Build the benchmark workbook from bench/runs.csv and probe/probe.csv."""
-import csv, os, sys
+"""Readable benchmark workbook: main vs full-pcm-decode (and optional extra configs).
+
+Every summary number is a formula over the 'All runs' sheet, so the workbook recalculates if
+runs are added or corrected. Usage: BENCH_DIR=<dir with bench/runs.csv, probe/probe.csv>
+python3 build_xlsx.py OUT.xlsx   (then recalculate in LibreOffice/Excel).
+"""
+import csv, os, re, sys
 from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
-from openpyxl.formatting.rule import ColorScaleRule
-from openpyxl.worksheet.table import Table, TableStyleInfo
+from openpyxl.chart import BarChart, Reference
+from openpyxl.chart.label import DataLabelList
+from openpyxl.comments import Comment
+from openpyxl.worksheet.formula import ArrayFormula
+from openpyxl.formatting.rule import CellIsRule, ColorScaleRule, FormulaRule
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter as L
 
 SP = os.environ.get("BENCH_DIR") or os.path.dirname(os.path.abspath(__file__))
-OUT = sys.argv[1] if len(sys.argv) > 1 else SP + '/benchmark_pcm_vs_main.xlsx'
+OUT = sys.argv[1] if len(sys.argv) > 1 else SP + '/BENCHMARK_pcm_vs_main.xlsx'
+runs = list(csv.DictReader(open(SP + '/bench/runs.csv')))
+probe = list(csv.DictReader(open(SP + '/probe/probe.csv')))
 
+# ---------------------------------------------------------------- styling
 FONT = 'Arial'
-HDR_FILL = PatternFill('solid', fgColor='1F3864')
-HDR_FONT = Font(name=FONT, bold=True, color='FFFFFF')
-SUB_FILL = PatternFill('solid', fgColor='D9E1F2')
-BOLD = Font(name=FONT, bold=True)
-BASE = Font(name=FONT)
-THIN = Side(style='thin', color='BFBFBF')
+INK, INK2, MUTED = '0B0B0B', '52514E', '8A8985'
+SERIES = ['2A78D6', 'EB6834', '1BAF7A', 'EDA100', 'E87BA4', '6250D6']   # fixed categorical order
+HEAD = PatternFill('solid', fgColor='1F3864')
+BAND = PatternFill('solid', fgColor='EEF2F8')
+NOTE = PatternFill('solid', fgColor='FFF8E1')
+GOOD = PatternFill('solid', fgColor='C6EFCE')
+WARN = PatternFill('solid', fgColor='FFEB9C')
+BAD = PatternFill('solid', fgColor='FFC7CE')
+thin = Side(style='thin', color='D0D0D0')
+BOX = Border(left=thin, right=thin, top=thin, bottom=thin)
+F = lambda **k: Font(name=FONT, **k)
 
-CONFIGS = [  # (key, label, description)
-    ('main', 'main (as-is)', 'branch sideinfo-mainbits @777c455, unmodified algorithm'),
-    ('mainfix', 'main + final-fragment fix', 'main with the shared chunk_meta/adjacency fix for a header-less last chunk (aa9ce7c) - isolates that fix from the PCM work'),
-    ('pcm', 'PCM branch v1', 'full-pcm-decode @1446fe6: PCM ranking + locking + repair, final-fragment fix, byte-capped window; locking still capped at 40k decodes, repair unbounded'),
-    ('final', 'PCM branch final', 'full-pcm-decode @1c5abe1: + threaded/memoised locking with a fixed 640k-decode cap, bounded two-phase repair, repair skipped after a strict-tau success, wrong lock on chunk 0 abandons the attempt (RP_THREADS=4 in this benchmark)'),
+def title(ws, text, sub=None, row=1):
+    ws.cell(row=row, column=1, value=text).font = F(bold=True, size=15, color=INK)
+    if sub:
+        c = ws.cell(row=row + 1, column=1, value=sub)
+        c.font = F(italic=True, size=10, color=INK2)
+    return row + (3 if sub else 2)
+
+def para(ws, row, text, width_cols=10, bold=False, fill=None, size=10, height=None):
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=width_cols)
+    c = ws.cell(row=row, column=1, value=text)
+    c.font = F(bold=bold, size=size, color=INK)
+    c.alignment = Alignment(wrap_text=True, vertical='top')
+    if fill: c.fill = fill
+    if height: ws.row_dimensions[row].height = height
+    return row + 1
+
+def header(ws, row, cols, start=1, height=48):
+    for i, h in enumerate(cols):
+        c = ws.cell(row=row, column=start + i, value=h)
+        c.font = F(bold=True, color='FFFFFF', size=10)
+        c.fill = HEAD
+        c.alignment = Alignment(wrap_text=True, vertical='center', horizontal='center')
+        c.border = BOX
+    ws.row_dimensions[row].height = height
+
+def cell(ws, row, col, value, fmt=None, bold=False, align=None, fill=None, color=INK):
+    c = ws.cell(row=row, column=col, value=value)
+    c.font = F(bold=bold, color=color, size=10)
+    c.border = BOX
+    if fmt: c.number_format = fmt
+    if align: c.alignment = Alignment(horizontal=align, vertical='center', wrap_text=True)
+    if fill: c.fill = fill
+    return c
+
+def widths(ws, ws_widths):
+    for i, w in enumerate(ws_widths, 1): ws.column_dimensions[L(i)].width = w
+
+PCT, PCT1, NUM1 = '0%', '0.0%', '0.0'
+
+# ---------------------------------------------------------------- data model
+CONFIGS = [  # key, short label, long description
+    ('main', 'Main branch (as-is)',
+     'sideinfo-mainbits: frame-structure graph + side-info / partial-spectrum ranking + depth-first search.'),
+    ('mainfix', 'Main + last-chunk fix',
+     'Main with one shared bug fix (a last chunk holding only the end of the final frame was rejected). Isolates that fix from the PCM work.'),
+    ('pcm', 'PCM branch (first version)',
+     'full-pcm-decode @1446fe6: every candidate junction decoded to audio; spectral-flux score used for ranking, edge locking and repair.'),
+    ('final', 'PCM branch (final)',
+     'full-pcm-decode @1c5abe1: + faster/threaded locking with a fixed cap, bounded repair, safer fallbacks. This is the version in the pull request.'),
+    ('gm1', 'Global matching (after search)',
+     'global-matching @9d705fe: when the search fails, choose every successor at once by minimum summed flux, then repair.'),
+    ('gm2', 'Global matching (first)',
+     'global-matching @9d705fe: global matching tried before the search.'),
 ]
-ABL = [('final', 'final (all on)'), ('final_nopcm', 'RP_PCM=0'), ('final_nolock', 'RP_LOCK=0'),
-       ('final_norepair', 'RP_REPAIR=0'), ('final_tau15', 'RP_LOCK_TAU=1.5'), ('final_repair1', 'RP_REPAIR=1 (forced)'),
-       ('pcm', 'v1 (all on)'), ('pcm_nopcm', 'v1 RP_PCM=0'), ('pcm_nolock', 'v1 RP_LOCK=0'),
-       ('pcm_norepair', 'v1 RP_REPAIR=0'), ('pcm_tau15', 'v1 RP_LOCK_TAU=1.5')]
+present = {r['config'] for r in runs}
+_only = os.environ.get('BENCH_CONFIGS')   # e.g. main,mainfix,pcm,final
+if _only:
+    keep = set(_only.split(','))
+    runs = [r for r in runs if r['config'] in keep or not any(r['config'] == k or r['config'] == 'ho_' + k for k in ('gm1', 'gm2'))]
+    runs = [r for r in runs if r['config'] not in ('gm1', 'gm2', 'ho_gm1', 'ho_gm2') or r['config'] in keep]
+    present = {r['config'] for r in runs}
+CONFIGS = [c for c in CONFIGS if c[0] in present]
+MAINCMP = [c for c in CONFIGS]                     # compared everywhere
+REF, BEST = 'mainfix', 'final'
 
-def load(path):
-    with open(path) as f: return list(csv.DictReader(f))
+def fkey(f):
+    m = re.match(r'(cbr|vbrq)(\d+)_(\d+)s', f)
+    if m: return (0 if m.group(1) == 'cbr' else 1, int(m.group(3)), int(m.group(2)))
+    return (2, 0, 0 if f.startswith('bohemoan') else 1)
+
+FILES = sorted({r['file'] for r in runs if r['config'] == 'main'}, key=fkey)
+SIZES = [1024, 2048, 4096, 8192]
+
+def describe(f):
+    """(display name, mode, bitrate setting, length s)"""
+    m = re.match(r'cbr(\d+)_(\d+)s', f)
+    if m: return (f'{m.group(1)} kbps constant, {m.group(2)} s', 'Constant (CBR)', f'{m.group(1)} kbps', int(m.group(2)))
+    m = re.match(r'vbrq(\d+)_(\d+)s', f)
+    if m:
+        q = {'2': 'high quality (~190 kbps)', '5': 'medium quality (~130 kbps)'}[m.group(1)]
+        return (f'Variable q{m.group(1)}, {m.group(2)} s', 'Variable (VBR)', f'q{m.group(1)} - {q}', int(m.group(2)))
+    if f.startswith('bohemoan'): return ('Full song, 32 kbps constant (6 min)', 'Constant (CBR)', '32 kbps', 359)
+    if f.startswith('Queen'): return ('Full song, variable (6 min)', 'Variable (VBR)', 'LAME VBR (~121 kbps avg)', 359)
+    return (f, '?', '?', 0)
 
 def num(v):
     if v in (None, '', 'None'): return None
     if v in ('True', 'False'): return v == 'True'
     try:
         x = float(v); return int(x) if x.is_integer() and '.' not in v else x
-    except ValueError:
-        return v
+    except ValueError: return v
 
-def header(ws, row, cols, widths=None):
-    for c, h in enumerate(cols, 1):
-        cell = ws.cell(row=row, column=c, value=h)
-        cell.font = HDR_FONT; cell.fill = HDR_FILL
-        cell.alignment = Alignment(wrap_text=True, vertical='center', horizontal='center')
-    if widths:
-        for c, w in enumerate(widths, 1): ws.column_dimensions[get_column_letter(c)].width = w
-
-def style_all(ws):
-    for row in ws.iter_rows():
-        for cell in row:
-            if cell.font is None or cell.font.name != FONT or (not cell.font.bold and cell.font.color is None):
-                f = cell.font
-                cell.font = Font(name=FONT, bold=f.bold, color=f.color, italic=f.italic, size=f.size)
-
-runs = load(SP + '/bench/runs.csv')
-probe = load(SP + '/probe/probe.csv')
-FILE_ORDER = lambda f: (0 if f.startswith('cbr') else 1 if f.startswith('vbr') else 2,
-                        int(''.join(ch for ch in f.split('_')[0] if ch.isdigit()) or 0) if f[:3] in ('cbr', 'vbr') else 0,
-                        f)
-files = sorted({r['file'] for r in runs}, key=FILE_ORDER)
-sizes = sorted({int(r['chunk_size']) for r in runs})
+OUTCOME_TEXT = {'EXACT': 'Exact', 'COMPLETE_WRONG': 'Wrong order', 'FAILED': 'Failed', 'TIMEOUT': 'Timed out', 'ERROR': 'Crashed'}
+CFG_LABEL = {k: lab for k, lab, _ in CONFIGS}
+CFG_LABEL.update({'ho_mainfix': 'Main + last-chunk fix', 'ho_final': 'PCM branch (final)',
+                  'ho_gm1': 'Global matching (after search)', 'ho_gm2': 'Global matching (first)',
+                  'mainfix150': 'Main + fix, 150 s budget', 'ho_mainfix150': 'Main + fix, 150 s budget',
+                  'final_nopcm': 'PCM final without PCM ranking', 'final_nolock': 'PCM final without locking',
+                  'final_norepair': 'PCM final without repair', 'final_tau15': 'PCM final, strict locking only',
+                  'pcm_nopcm': 'PCM v1 without PCM ranking', 'pcm_nolock': 'PCM v1 without locking',
+                  'pcm_norepair': 'PCM v1 without repair', 'pcm_tau15': 'PCM v1, strict locking only'})
 
 wb = Workbook()
 
-# ---------------- Notes ----------------
-ws = wb.active; ws.title = 'Notes'
-notes = [
-    ('MP3 chunk reconstruction: main vs full-pcm-decode', True),
-    ('', False),
-    ('What was run', True),
-    ('Each run shuffles the file into fixed-size chunks (chunk 0 pinned) with RP_SEED and asks rp to restore the order.', False),
-    ('Chunk sizes 1, 2, 4, 8 KB (RP_CHUNK_SIZE). Seeds 1-3 for the main comparison, seed 1 for ablations.', False),
-    ('Every run: RP_TIME_BUDGET=30 (search budget per attempt), hard timeout 900 s.', False),
-    ('Pass 1 (main, main+fix, PCM v1, v1 ablations) ran 14 processes in parallel on 16 cores; pass 2 (PCM final + ablations) ran 4 processes x RP_THREADS=4.', False),
-    ('Wall-clock times are therefore load-affected and only roughly comparable between passes.', False),
-    ('PCM final: EXACT runs from the first pass-2 attempt (bb1100d) were kept unless that log showed locking skipped by its thread-scaled cap; every other final / final_* / ho_final run was rerun on 1c5abe1. bb1100d and 1c5abe1 differ only in the lock cap (those cells rerun) and failure-path handling.', False),
-    ('Budgets differ by design: main searches once (30 s); the PCM branch may run 3 lock attempts x 30 s + locking + up to 60 s repair. The "Budget check" sheet reruns main+fix with a 150 s budget where PCM final is exact and main+fix is not.', False),
-    ('Deepest-path accounting: PCM final keeps the deepest partial path over all lock attempts; PCM v1 (pass 1) only reported its last attempt, so v1 recovered_frac understates it on FAILED runs. The main backport keeps the maximum over all beam widths.', False),
-    ('PCM v1 has 4 ERROR runs: the pinned-start crash after a wrong lock on chunk 0 (fixed in 1c5abe1). They count as non-exact.', False),
-    ('The repair policy (skip after a strict-tau success) and the two-phase repair scan were derived from cells of this same matrix (cbr32_10s 1 KB, cbr320_10s 4 KB, test7_short). The "Held-out" sheet is a second segment (start 200 s) not used for any tuning.', False),
-    ('', False),
-    ('Configurations', True),
-] + [(f'{lab}: {desc}', False) for _, lab, desc in CONFIGS] + [
-    ('', False),
-    ('Outcomes (Runs sheet, column "outcome")', True),
-    ('EXACT - output is byte-identical to the source.', False),
-    ('COMPLETE_WRONG - a complete, structurally valid ordering that is not the source order.', False),
-    ('FAILED - no complete ordering within the budget (or search exhausted). rp writes nothing.', False),
-    ('TIMEOUT - hit the 900 s hard limit.', False),
-    ('', False),
-    ('Metrics', True),
-    ('recovered_frac - true successor junctions in the result (complete ordering, or deepest partial path for FAILED) / (chunks - 1). Comparable across outcomes.', False),
-    ('path_precision - true junctions / junctions in the (partial) path.', False),
-    ('Exact (of 3) - number of seeds 1-3 with a byte-exact result.', False),
-    ('', False),
-    ('Test files', True),
-    ('cbr<K>_<D>s / vbrq<Q>_<D>s: generated by sound/test/make_bitrate_variants.sh from the Queen track (start 120 s), LAME, 44.1 kHz joint stereo, no tags/Xing.', False),
-    ('bohemoan-rhapsody-2k/4k/8k.mp3 are byte-identical (md5 85368b27...), a 6 min 32 kbps CBR file; tested once at each chunk size.', False),
-    ('Queen - Bohemian Rhapsody VBR.mp3: 6 min LAME VBR (~121 kbps average).', False),
-    ('cbr320 at 1 KB is out of scope: its 1045-byte frames are longer than a chunk, so some chunks contain no frame header.', False),
-    ('', False),
-    ('Probe sheet', True),
-    ('pcm_probe on the TRUE order: how well each per-edge signal ranks the true successor among the structural candidates (budget-independent).', False),
-    ('flux = PCM junction spectral flux (PCM branch); m2 = Milestone 2 partial spectral L2 (main branch). lfl_* = like-for-like candidate sets.', False),
-    ('lockXXX_wrong / _cov_pct = median-mode edge locks at tau X.XX that are wrong / % of branch-point true edges locked.', False),
-    ('gate1_exact_pct < 100 at 4-8 KB is expected: the byte-capped window starts mid-chunk, and its first warm-up frames cannot be sample-exact.', False),
+# ================================================================ All runs (data)
+wr = wb.active
+wr.title = 'All runs'
+RCOLS = [  # (key, header, width, fmt, description)
+    ('config', 'Config key', 14, None, 'Internal name of the configuration (see Read me).'),
+    ('label', 'Algorithm / configuration', 32, None, 'What was run.'),
+    ('set', 'Test set', 10, None, 'main = segment from 120 s + full songs; held-out = segment from 200 s (never used for tuning).'),
+    ('file', 'Test file key', 26, None, 'File name of the test MP3.'),
+    ('fdesc', 'Test file', 30, None, 'Readable description of the file.'),
+    ('mode', 'Bitrate mode', 14, None, 'Constant bitrate (every frame the same size) or variable.'),
+    ('rate', 'Bitrate setting', 22, None, 'Encoder setting.'),
+    ('duration_s', 'Length (s)', 8, '0', 'Length of the audio.'),
+    ('chunk_kb', 'Chunk size (KB)', 8, '0', 'The file is cut into pieces of this size and shuffled.'),
+    ('seed', 'Shuffle seed', 7, '0', 'Which random shuffle (1-3).'),
+    ('chunks', 'Chunks', 8, '#,##0', 'How many pieces the file was cut into.'),
+    ('outcome_text', 'Result', 12, None, 'Exact = byte-identical original; Wrong order = a complete but wrong file; Failed = no complete order found in time.'),
+    ('exact', 'Exact (1/0)', 7, '0', '1 if the output is byte-identical to the original.'),
+    ('wrong', 'Wrong order (1/0)', 7, '0', '1 if a complete but wrong order was output.'),
+    ('recovered_frac', 'Junctions recovered', 10, PCT, 'Share of the true chunk-to-chunk links (chunks - 1 of them) present in the result, or in the deepest partial result if it failed.'),
+    ('exact_pos_pct', 'Chunks in original position (%)', 10, '0.0', 'Only for complete results.'),
+    ('wall_s', 'Run time (s)', 9, '0.0', 'Wall-clock time (machine shared by several runs - indicative only; a few runs span a machine suspend and show inflated times).'),
+    ('supernodes', 'Search units after merging', 10, '#,##0', 'Pieces left for the search after certain links were merged.'),
+    ('edges', 'Possible links (graph edges)', 10, '#,##0', 'Chunk pairs that are structurally allowed to follow each other.'),
+    ('locks', 'Links locked by PCM', 9, '#,##0', 'Links forced before the search because the audio evidence was very clear.'),
+    ('locks_wrong', 'Of which wrong', 8, '0', 'Locked links that were not true (checked against the original).'),
+    ('final_tau', 'Lock threshold used', 9, '0.00', 'Strictness of the last locking attempt (1.5 strict ... 1.1 loose).'),
+    ('repair_moves', 'Repair moves', 8, '0', 'Block moves/swaps applied by the repair step.'),
+    ('pre_breaks', 'Structural breaks in true order', 9, '0', 'Pairs of the TRUE order the structure check rejects (>0 makes an exact result impossible).'),
 ]
-for i, (t, b) in enumerate(notes, 1):
-    c = ws.cell(row=i, column=1, value=t); c.font = Font(name=FONT, bold=b, size=14 if i == 1 else 10)
-ws.column_dimensions['A'].width = 150
+header(wr, 1, [c[1] for c in RCOLS])
+for i, c in enumerate(RCOLS, 1):
+    wr.column_dimensions[L(i)].width = c[2]
+    wr.cell(row=1, column=i).comment = Comment(c[4], 'benchmark')
+order_keys = [c[0] for c in CONFIGS]
+def rsort(r):
+    k = r['config']
+    return (order_keys.index(k) if k in order_keys else 50, k, fkey(r['file']), int(r['chunk_size']), int(r['seed']))
+for ri, r in enumerate(sorted(runs, key=rsort), 2):
+    desc = describe(r['file'])
+    locks, lc = num(r['locks']), num(r['locks_correct'])
+    vals = {
+        'config': r['config'], 'label': CFG_LABEL.get(r['config'], r['config']),
+        'set': 'held-out' if r['config'].startswith('ho_') else 'main', 'file': r['file'],
+        'fdesc': desc[0], 'mode': desc[1], 'rate': desc[2], 'duration_s': desc[3],
+        'chunk_kb': int(r['chunk_size']) // 1024, 'seed': int(r['seed']), 'chunks': num(r['chunks']),
+        'outcome_text': OUTCOME_TEXT.get(r['outcome'], r['outcome']),
+        'exact': 1 if r['outcome'] == 'EXACT' else 0, 'wrong': 1 if r['outcome'] == 'COMPLETE_WRONG' else 0,
+        'recovered_frac': num(r['recovered_frac']), 'exact_pos_pct': num(r['exact_pos_pct']),
+        'wall_s': num(r['wall_s']), 'supernodes': num(r['supernodes']), 'edges': num(r['edges']),
+        'locks': locks, 'locks_wrong': (locks - lc) if isinstance(locks, int) and isinstance(lc, int) else None,
+        'final_tau': num(r['final_tau']), 'repair_moves': num(r['repair_moves']), 'pre_breaks': num(r['pre_breaks']),
+    }
+    for ci, c in enumerate(RCOLS, 1):
+        x = wr.cell(row=ri, column=ci, value=vals[c[0]])
+        x.font = F(size=9)
+        if c[3]: x.number_format = c[3]
+NR = len(runs) + 1
+wr.freeze_panes = 'F2'
+wr.auto_filter.ref = f'A1:{L(len(RCOLS))}{NR}'
+COL = {c[0]: L(i) for i, c in enumerate(RCOLS, 1)}
+def R(k): return f"'All runs'!${COL[k]}$2:${COL[k]}${NR}"
+for v, fill in (('"Exact"', GOOD), ('"Wrong order"', WARN), ('"Failed"', BAD), ('"Crashed"', BAD), ('"Timed out"', BAD)):
+    wr.conditional_formatting.add(f'{COL["outcome_text"]}2:{COL["outcome_text"]}{NR}',
+                                  CellIsRule(operator='equal', formula=[v], fill=fill))
 
-# ---------------- Runs ----------------
-wr = wb.create_sheet('Runs')
-cols = ['config', 'file', 'mode', 'rate', 'duration_s', 'chunk_size', 'seed', 'outcome', 'recovered_frac',
-        'path_precision', 'exact_pos_pct', 'true_junctions', 'path_junctions', 'prefix', 'chunks', 'pre_breaks',
-        'resv_breaks', 'edges', 'supernodes', 'lock_attempts', 'final_tau', 'locks', 'locks_correct',
-        'lock_skipped', 'repair_moves', 'wall_s', 'rc']
-header(wr, 1, cols, [14, 30, 6, 18, 9, 9, 6, 16, 10, 10, 10, 9, 9, 8, 8, 8, 8, 9, 10, 8, 8, 7, 8, 8, 8, 9, 5])
-runs_sorted = sorted(runs, key=lambda r: ([c[0] for c in CONFIGS + [(a, '', '') for a, _ in ABL]].index(r['config'])
-                                          if r['config'] in [c[0] for c in CONFIGS] + [a for a, _ in ABL] else 99,
-                                          FILE_ORDER(r['file']), int(r['chunk_size']), int(r['seed'])))
-for i, r in enumerate(runs_sorted, 2):
-    for c, k in enumerate(cols, 1):
-        cell = wr.cell(row=i, column=c, value=num(r.get(k)))
-        cell.font = BASE
-        if k in ('recovered_frac', 'path_precision'): cell.number_format = '0.0%'
-NR = len(runs_sorted) + 1
-wr.freeze_panes = 'C2'
-wr.auto_filter.ref = f'A1:{get_column_letter(len(cols))}{NR}'
-C = {k: get_column_letter(i) for i, k in enumerate(cols, 1)}
-rng = lambda k: f"Runs!${C[k]}$2:${C[k]}${NR}"
+def crit(cfg, extra=''):
+    return f'{R("config")},"{cfg}"' + extra
 
-# ---------------- Summary (file x chunk size) ----------------
-ws = wb.create_sheet('Summary', 1)
-ws['A1'] = 'Exact reconstructions (of 3 seeds) and mean recovered junctions per file x chunk size'
-ws['A1'].font = Font(name=FONT, bold=True, size=13)
-ws['A2'] = 'All cells are COUNTIFS/AVERAGEIFS over the Runs sheet. Recovered = true junctions found / (chunks-1), averaged over seeds; "-" = no runs.'
-ws['A2'].font = Font(name=FONT, italic=True, size=9)
-r0 = 4
-fixed_cols = ['file', 'mode', 'rate', 'chunk KB', 'chunks']
-hdr = fixed_cols[:]
-for _, lab, _ in CONFIGS: hdr += [f'{lab}\nexact /3', f'{lab}\ncomplete-wrong /3', f'{lab}\nrecovered']
-header(ws, r0, hdr, [30, 6, 18, 8, 8] + [11, 11, 11] * len(CONFIGS))
-ws.row_dimensions[r0].height = 58
-row = r0 + 1
-chunks_of = {}
-for r in runs:
-    if r['chunks']: chunks_of[(r['file'], int(r['chunk_size']))] = int(r['chunks'])
-meta = {r['file']: (r['mode'], r['rate']) for r in runs}
-first_data = row
-for f in files:
-    for cs in sizes:
-        ws.cell(row=row, column=1, value=f); ws.cell(row=row, column=2, value=meta[f][0])
-        ws.cell(row=row, column=3, value=meta[f][1]); ws.cell(row=row, column=4, value=cs // 1024)
-        ws.cell(row=row, column=5, value=chunks_of.get((f, cs)))
-        col = 6
-        for key, _, _ in CONFIGS:
-            crit = f'{rng("config")},"{key}",{rng("file")},$A{row},{rng("chunk_size")},$D{row}*1024'
-            ws.cell(row=row, column=col, value=f'=COUNTIFS({crit},{rng("outcome")},"EXACT")')
-            ws.cell(row=row, column=col + 1, value=f'=COUNTIFS({crit},{rng("outcome")},"COMPLETE_WRONG")')
-            c = ws.cell(row=row, column=col + 2,
-                        value=f'=IFERROR(AVERAGEIFS({rng("recovered_frac")},{crit}),"-")')
-            c.number_format = '0.0%'
-            col += 3
-        row += 1
-last_data = row - 1
-# totals
-ws.cell(row=row, column=1, value='TOTAL exact / runs').font = BOLD
-col = 6
-for key, _, _ in CONFIGS:
-    L = get_column_letter(col)
-    ws.cell(row=row, column=col, value=f'=SUM({L}{first_data}:{L}{last_data})').font = BOLD
-    L2 = get_column_letter(col + 1)
-    ws.cell(row=row, column=col + 1, value=f'=SUM({L2}{first_data}:{L2}{last_data})').font = BOLD
-    ws.cell(row=row, column=col + 2, value=f'=COUNTIFS({rng("config")},"{key}",{rng("seed")},"<=3")').font = BOLD
-    col += 3
-row += 1
-ws.cell(row=row, column=1, value='Exact rate').font = BOLD
-col = 6
-for key, _, _ in CONFIGS:
-    L, Lr = get_column_letter(col), get_column_letter(col + 2)
-    c = ws.cell(row=row, column=col, value=f'=IF({Lr}{row-1}=0,"-",{L}{row-1}/{Lr}{row-1})')
-    c.number_format = '0.0%'; c.font = BOLD
-    col += 3
-ws.cell(row=row + 1, column=1, value='(the "recovered" column of the TOTAL row holds the number of runs)').font = Font(name=FONT, italic=True, size=9)
-ws.freeze_panes = ws.cell(row=r0 + 1, column=6)
-# heat scale on exact & recovered
-col = 6
-for _ in CONFIGS:
-    L = get_column_letter(col)
-    ws.conditional_formatting.add(f'{L}{first_data}:{L}{last_data}',
-        ColorScaleRule(start_type='num', start_value=0, start_color='F8696B', mid_type='num', mid_value=1.5,
-                       mid_color='FFEB84', end_type='num', end_value=3, end_color='63BE7B'))
-    L = get_column_letter(col + 2)
-    ws.conditional_formatting.add(f'{L}{first_data}:{L}{last_data}',
-        ColorScaleRule(start_type='num', start_value=0, start_color='F8696B', mid_type='num', mid_value=0.8,
+# ================================================================ Read me
+rm = wb.create_sheet('Read me', 0)
+widths(rm, [26, 14, 14, 14, 14, 14, 14, 14, 14, 14])
+r = title(rm, 'MP3 chunk reconstruction - benchmark of the PCM-decode branch',
+          'Every number on the summary sheets is a formula over the sheet "All runs" (one row per run).')
+r = para(rm, r, 'What is being tested', bold=True, size=12)
+r = para(rm, r, 'An MP3 file is cut into equal pieces ("chunks", 1-8 KB), the pieces are shuffled, and the program has to put '
+                'them back into the original order using only what is inside the file. A run is a success only if the '
+                'rebuilt file is byte-for-byte identical to the original ("Exact"). The first chunk always stays first.',
+         height=48)
+r = para(rm, r, 'How each algorithm works (in short)', bold=True, size=12)
+for k, lab, d in CONFIGS:
+    lc_ = rm.cell(row=r, column=1, value=lab); lc_.font = F(bold=True, size=10); lc_.alignment = Alignment(vertical='top', wrap_text=True)
+    rm.merge_cells(start_row=r, start_column=2, end_row=r, end_column=10)
+    c = rm.cell(row=r, column=2, value=d); c.font = F(size=10); c.alignment = Alignment(wrap_text=True, vertical='top')
+    rm.row_dimensions[r].height = 30
+    r += 1
+r += 1
+r = para(rm, r, 'Possible results of one run', bold=True, size=12)
+for lab, d, fill in (('Exact', 'The output file is identical to the original. The only real success.', GOOD),
+                     ('Wrong order', 'A complete file that plays, but some pieces are in the wrong place. Worse than failing: it looks like a success.', WARN),
+                     ('Failed', 'No complete order found within the time budget; nothing is written. The "Junctions recovered" column then '
+                                'describes the longest partial result.', BAD)):
+    c = rm.cell(row=r, column=1, value=lab); c.font = F(bold=True, size=10); c.fill = fill; c.alignment = Alignment(vertical='top')
+    rm.merge_cells(start_row=r, start_column=2, end_row=r, end_column=10)
+    c = rm.cell(row=r, column=2, value=d); c.font = F(size=10); c.alignment = Alignment(wrap_text=True, vertical='top')
+    rm.row_dimensions[r].height = 28
+    r += 1
+r += 1
+r = para(rm, r, 'Headline numbers (main test set, 3 shuffles of every file x chunk size)', bold=True, size=12)
+header(rm, r, ['Algorithm', 'Runs', 'Exact', 'Exact rate', 'Wrong order', 'Failed', 'Junctions recovered (avg)'], height=34)
+r += 1
+for k, lab, _ in CONFIGS:
+    cs = crit(k, f',{R("set")},"main"')
+    cell(rm, r, 1, lab, bold=True)
+    cell(rm, r, 2, f'=COUNTIFS({cs})', '0', align='center')
+    cell(rm, r, 3, f'=COUNTIFS({cs},{R("outcome_text")},"Exact")', '0', align='center')
+    cell(rm, r, 4, f'=IF(B{r}=0,"-",C{r}/B{r})', PCT, align='center', bold=True)
+    cell(rm, r, 5, f'=COUNTIFS({cs},{R("outcome_text")},"Wrong order")', '0', align='center')
+    cell(rm, r, 6, f'=B{r}-C{r}-E{r}', '0', align='center')
+    cell(rm, r, 7, f'=IFERROR(AVERAGEIFS({R("recovered_frac")},{cs}),"-")', PCT, align='center')
+    r += 1
+r += 1
+r = para(rm, r, 'What the sheets contain', bold=True, size=12)
+for name, d in (('Overview', 'The headline table above, plus held-out, equal-time and component results, with a chart.'),
+                ('By chunk size', 'Exact rate per chunk size (1, 2, 4, 8 KB), split into constant and variable bitrate. Chart.'),
+                ('By bitrate', 'Exact rate per encoding setting (32-320 kbps constant, two variable settings, two full songs). Chart.'),
+                ('Per file', 'One row per test file and chunk size: what each algorithm achieved, in words, plus a verdict.'),
+                ('Components', 'What happens when one part of the PCM branch is switched off (ablation).'),
+                ('Held-out', 'Second set of test files cut from a different part of the song, never used to tune anything.'),
+                ('Equal time', 'Main given 5x more search time on the cases only the PCM branch solved.'),
+                ('Signal quality', 'How well each scoring signal recognises the true next chunk, measured on the original order.'),
+                ('All runs', 'Raw data: one row per run. Hover a column header for its definition.')):
+    rm.cell(row=r, column=1, value=name).font = F(bold=True, size=10, color='1F3864')
+    rm.merge_cells(start_row=r, start_column=2, end_row=r, end_column=10)
+    c = rm.cell(row=r, column=2, value=d); c.font = F(size=10); c.alignment = Alignment(wrap_text=True)
+    r += 1
+r += 1
+r = para(rm, r, 'Test files', bold=True, size=12)
+r = para(rm, r, 'Short files: cut from "Bohemian Rhapsody" (from 120 s; held-out set from 200 s) and re-encoded with LAME at 44.1 kHz: '
+                'constant 32 / 64 / 128 / 192 / 320 kbps and variable quality 2 / 5, each 10 s and 30 s long '
+                '(sound/test/make_bitrate_variants.sh). Full songs: a 6-minute 32 kbps constant file and a 6-minute variable file. '
+                'The three bohemoan-rhapsody-2k/4k/8k files are byte-identical, so that song was tested once per chunk size. '
+                '320 kbps with 1 KB chunks is out of scope: its frames (1045 bytes) are longer than a chunk.', height=74)
+r = para(rm, r, 'Fairness notes', bold=True, size=12)
+r = para(rm, r, 'Every run had a 30 s search budget and a 900 s hard limit. The PCM branch may make up to three locking attempts '
+                '(30 s each) plus a repair step, so it can take longer - the "Equal time" sheet checks whether main simply needed '
+                'more time (it did not). Runs shared a 16-core machine, so times are indicative only. Some PCM-final runs were '
+                'repeated on the final binary after fixes; the Notes in the report (BENCHMARK_pcm_vs_main.md) list exactly which.', height=74)
+
+# ================================================================ Overview
+ov = wb.create_sheet('Overview', 1)
+widths(ov, [34, 11, 11, 11, 11, 11, 13, 13, 4, 12])
+r = title(ov, 'Overview', 'Main test set: 16 files x 4 chunk sizes x 3 shuffles = 192 runs per algorithm.')
+header(ov, r, ['Algorithm', 'Runs', 'Exact', 'Exact rate', 'Wrong order', 'Failed', 'Junctions recovered (avg)', 'Median run time (s)'], height=40)
+hr = r; r += 1
+first = r
+for k, lab, _ in CONFIGS:
+    cs = crit(k, f',{R("set")},"main"')
+    cell(ov, r, 1, lab, bold=True)
+    cell(ov, r, 2, f'=COUNTIFS({cs})', '0', align='center')
+    cell(ov, r, 3, f'=COUNTIFS({cs},{R("outcome_text")},"Exact")', '0', align='center')
+    cell(ov, r, 4, f'=IF(B{r}=0,0,C{r}/B{r})', PCT, align='center', bold=True)
+    cell(ov, r, 5, f'=COUNTIFS({cs},{R("outcome_text")},"Wrong order")', '0', align='center')
+    cell(ov, r, 6, f'=B{r}-C{r}-E{r}', '0', align='center')
+    cell(ov, r, 7, f'=IFERROR(AVERAGEIFS({R("recovered_frac")},{cs}),0)', PCT, align='center')
+    c8 = cell(ov, r, 8, None, NUM1, align='center')
+    c8.value = ArrayFormula(f'H{r}', f'=MEDIAN(IF(({R("config")}="{k}")*({R("set")}="main"),{R("wall_s")}))')
+    r += 1
+last = r - 1
+ov.cell(row=hr, column=8, value='Median run time (s)')
+ov.cell(row=r, column=1, value='Junctions recovered = share of true chunk-to-chunk links in the result (or in the longest partial result when the run failed).').font = F(italic=True, size=9, color=INK2)
+r += 1
+ov.cell(row=r, column=1, value='Run time: median, because a few runs span a machine suspend and their recorded wall time (up to ~5800 s) is not real compute time.').font = F(italic=True, size=9, color=INK2)
+r += 2
+ch = BarChart(); ch.type = 'bar'; ch.style = 10
+ch.title = 'Exact reconstructions (share of 192 runs)'
+ch.y_axis.title = None; ch.x_axis.title = None
+data = Reference(ov, min_col=4, min_row=hr, max_row=last)
+cats = Reference(ov, min_col=1, min_row=first, max_row=last)
+ch.add_data(data, titles_from_data=True); ch.set_categories(cats)
+ch.legend = None
+ch.y_axis.number_format = '0%'; ch.y_axis.scaling.min = 0; ch.y_axis.scaling.max = 1
+ch.y_axis.majorGridlines = None
+s = ch.series[0]
+s.graphicalProperties.solidFill = SERIES[0]; s.graphicalProperties.line.noFill = True
+from openpyxl.chart.series import DataPoint
+for i in range(len(CONFIGS)):
+    pt = DataPoint(idx=i); pt.graphicalProperties.solidFill = SERIES[i]; pt.graphicalProperties.line.noFill = True
+    s.dPt.append(pt)
+s.dLbls = DataLabelList(); s.dLbls.showVal = True; s.dLbls.numFmt = '0%'
+s.dLbls.showSerName = False; s.dLbls.showCatName = False; s.dLbls.showLegendKey = False
+ch.height = 7.5; ch.width = 18
+ov.add_chart(ch, f'A{r}')
+r += 17
+
+def small_table(ws, r, heading, explain, rows_spec, cols):
+    """rows_spec: list of (label, criteria-string); cols: Runs/Exact/Exact rate/Wrong/Failed/Recovered"""
+    ws.cell(row=r, column=1, value=heading).font = F(bold=True, size=12)
+    r += 1
+    r = para(ws, r, explain, width_cols=8, fill=NOTE, height=32)
+    header(ws, r, ['Algorithm', 'Runs', 'Exact', 'Exact rate', 'Wrong order', 'Failed', 'Junctions recovered (avg)'], height=34)
+    r += 1
+    for lab, cs in rows_spec:
+        cell(ws, r, 1, lab, bold=True)
+        cell(ws, r, 2, f'=COUNTIFS({cs})', '0', align='center')
+        cell(ws, r, 3, f'=COUNTIFS({cs},{R("outcome_text")},"Exact")', '0', align='center')
+        cell(ws, r, 4, f'=IF(B{r}=0,"-",C{r}/B{r})', PCT, align='center', bold=True)
+        cell(ws, r, 5, f'=COUNTIFS({cs},{R("outcome_text")},"Wrong order")', '0', align='center')
+        cell(ws, r, 6, f'=B{r}-C{r}-E{r}', '0', align='center')
+        cell(ws, r, 7, f'=IFERROR(AVERAGEIFS({R("recovered_frac")},{cs}),"-")', PCT, align='center')
+        r += 1
+    return r + 1
+
+ho_rows = [(CFG_LABEL[k], crit(k)) for k in ('ho_mainfix', 'ho_final', 'ho_gm1', 'ho_gm2') if k in present]
+if ho_rows:
+    r = small_table(ov, r, 'Held-out test set (seed 1)',
+                    'Same 14 settings cut from a different part of the song (from 200 s). Nothing was tuned on these files, so this checks '
+                    'that the improvement is not specific to the main test files.', ho_rows, None)
+abl = [(CFG_LABEL.get(k, k), crit(k, f',{R("seed")},1')) for k in ('final', 'final_nopcm', 'final_nolock', 'final_norepair', 'final_tau15', 'mainfix') if k in present]
+abl[0] = ('PCM branch (final), everything on', abl[0][1])
+r = small_table(ov, r, 'Which part of the PCM branch matters? (seed 1, 64 cases)',
+                'One component switched off at a time. A drop in exact results shows how much that component contributes. '
+                'Main + fix is shown for reference.', abl, None)
+
+# ================================================================ By chunk size
+bc = wb.create_sheet('By chunk size', 2)
+widths(bc, [16, 12] + [13] * (2 * len(CONFIGS)))
+r = title(bc, 'Results by chunk size', 'Exact rate = share of runs (all files of that bitrate mode, 3 shuffles) rebuilt byte-for-byte. Larger chunks = fewer, more distinctive pieces.')
+chart_rows = {}
+for mode in ('Constant (CBR)', 'Variable (VBR)', 'All files'):
+    bc.cell(row=r, column=1, value=mode).font = F(bold=True, size=12); r += 1
+    header(bc, r, ['Chunk size', 'Runs per algorithm'] + [f'{lab}\nexact rate' for _, lab, _ in CONFIGS] +
+           [f'{lab}\njunctions recovered' for _, lab, _ in CONFIGS], height=60)
+    hr = r; r += 1
+    for cs in SIZES:
+        mcrit = '' if mode == 'All files' else f',{R("mode")},"{mode}"'
+        base = f',{R("set")},"main",{R("chunk_kb")},{cs // 1024}{mcrit}'
+        cell(bc, r, 1, f'{cs // 1024} KB', bold=True, align='center')
+        cell(bc, r, 2, f'=COUNTIFS({crit("main", base)})', '0', align='center')
+        for j, (k, _, _) in enumerate(CONFIGS):
+            cs_ = crit(k, base)
+            cell(bc, r, 3 + j, f'=IFERROR(COUNTIFS({cs_},{R("outcome_text")},"Exact")/COUNTIFS({cs_}),"-")', PCT, align='center')
+            cell(bc, r, 3 + len(CONFIGS) + j, f'=IFERROR(AVERAGEIFS({R("recovered_frac")},{cs_}),"-")', PCT, align='center')
+        r += 1
+    chart_rows[mode] = (hr, r - 1)
+    bc.conditional_formatting.add(f'C{hr+1}:{L(2 + 2 * len(CONFIGS))}{r-1}',
+        ColorScaleRule(start_type='num', start_value=0, start_color='F8696B', mid_type='num', mid_value=0.5,
                        mid_color='FFEB84', end_type='num', end_value=1, end_color='63BE7B'))
-    col += 3
+    r += 1
 
-# ---------------- By group (mode x chunk size) ----------------
-wg = wb.create_sheet('By group', 2)
-wg['A1'] = 'Exact-reconstruction rate by bitrate mode and chunk size (seeds 1-3, all files of that mode)'
-wg['A1'].font = Font(name=FONT, bold=True, size=13)
-hdr = ['mode', 'chunk KB', 'runs per config'] + [f'{lab}\nexact rate' for _, lab, _ in CONFIGS] + \
-      [f'{lab}\nmean recovered' for _, lab, _ in CONFIGS]
-header(wg, 3, hdr, [8, 8, 9] + [14] * (2 * len(CONFIGS)))
-wg.row_dimensions[3].height = 45
-row = 4
-for mode in ('CBR', 'VBR'):
-    for cs in sizes + ['all']:
-        wg.cell(row=row, column=1, value=mode); wg.cell(row=row, column=2, value=(cs // 1024) if cs != 'all' else 'all')
-        cscrit = f',{rng("chunk_size")},$B{row}*1024' if cs != 'all' else ''
-        base = f'{rng("mode")},$A{row}{cscrit},{rng("seed")},"<=3"'
-        wg.cell(row=row, column=3, value=f'=COUNTIFS({rng("config")},"main",{base})')
-        for j, (key, _, _) in enumerate(CONFIGS):
-            crit = f'{rng("config")},"{key}",{base}'
-            c = wg.cell(row=row, column=4 + j,
-                        value=f'=IFERROR(COUNTIFS({crit},{rng("outcome")},"EXACT")/COUNTIFS({crit}),"-")')
-            c.number_format = '0.0%'
-            c = wg.cell(row=row, column=4 + len(CONFIGS) + j,
-                        value=f'=IFERROR(AVERAGEIFS({rng("recovered_frac")},{crit}),"-")')
-            c.number_format = '0.0%'
-        if cs == 'all':
-            for cc in range(1, 4 + 2 * len(CONFIGS)): wg.cell(row=row, column=cc).font = BOLD
-        row += 1
-wg.conditional_formatting.add(f'D4:{get_column_letter(3 + 2 * len(CONFIGS))}{row-1}',
+def grouped_bar(ws, hr, lr, cat_col, first_col, n, title_, anchor, height=8, width=22):
+    ch = BarChart(); ch.type = 'col'; ch.grouping = 'clustered'; ch.style = 10
+    ch.title = title_
+    for j in range(n):
+        ref = Reference(ws, min_col=first_col + j, min_row=hr, max_row=lr)
+        ch.add_data(ref, titles_from_data=True)
+        ch.series[-1].graphicalProperties.solidFill = SERIES[j]
+        ch.series[-1].graphicalProperties.line.noFill = True
+    ch.set_categories(Reference(ws, min_col=cat_col, min_row=hr + 1, max_row=lr))
+    ch.y_axis.number_format = '0%'; ch.y_axis.scaling.min = 0; ch.y_axis.scaling.max = 1
+    ch.y_axis.majorGridlines = None
+    ch.legend.position = 'b'
+    ch.height = height; ch.width = width
+    ws.add_chart(ch, anchor)
+
+hr, lr = chart_rows['All files']
+grouped_bar(bc, hr, lr, 1, 3, len(CONFIGS), 'Exact rate by chunk size (all files)', f'A{r + 1}')
+
+# ================================================================ By bitrate
+bb = wb.create_sheet('By bitrate', 3)
+widths(bb, [34, 16, 10] + [13] * (2 * len(CONFIGS)))
+r = title(bb, 'Results by encoding setting', 'All chunk sizes and lengths of that setting, 3 shuffles each. "Full song" rows are the 6-minute files.')
+groups = []
+for k in (32, 64, 128, 192, 320):
+    groups.append((f'{k} kbps constant (10 s + 30 s files)', 'Constant (CBR)', [f for f in FILES if f.startswith(f'cbr{k}_')]))
+for q, d in (('2', 'high quality'), ('5', 'medium quality')):
+    groups.append((f'Variable q{q}, {d} (10 s + 30 s files)', 'Variable (VBR)', [f for f in FILES if f.startswith(f'vbrq{q}_')]))
+groups.append(('Full song, 32 kbps constant (6 min)', 'Constant (CBR)', [f for f in FILES if f.startswith('bohemoan')]))
+groups.append(('Full song, variable (6 min)', 'Variable (VBR)', [f for f in FILES if f.startswith('Queen')]))
+header(bb, r, ['Encoding setting', 'Mode', 'Runs per algorithm'] + [f'{lab}\nexact rate' for _, lab, _ in CONFIGS] +
+       [f'{lab}\njunctions recovered' for _, lab, _ in CONFIGS], height=60)
+hr = r; r += 1
+for lab_, mode, fl in groups:
+    cell(bb, r, 1, lab_, bold=True)
+    cell(bb, r, 2, mode, align='center')
+    def gc(k):
+        return [crit(k, f',{R("set")},"main",{R("file")},"{f}"') for f in fl]
+    cell(bb, r, 3, '=' + '+'.join(f'COUNTIFS({c})' for c in gc('main')), '0', align='center')
+    for j, (k, _, _) in enumerate(CONFIGS):
+        ex = '+'.join(f'COUNTIFS({c},{R("outcome_text")},"Exact")' for c in gc(k))
+        n_ = '+'.join(f'COUNTIFS({c})' for c in gc(k))
+        cell(bb, r, 4 + j, f'=IFERROR(({ex})/({n_}),"-")', PCT, align='center')
+        sm = '+'.join(f'SUMIFS({R("recovered_frac")},{c})' for c in gc(k))
+        cell(bb, r, 4 + len(CONFIGS) + j, f'=IFERROR(({sm})/({n_}),"-")', PCT, align='center')
+    r += 1
+bb.conditional_formatting.add(f'D{hr+1}:{L(3 + 2 * len(CONFIGS))}{r-1}',
     ColorScaleRule(start_type='num', start_value=0, start_color='F8696B', mid_type='num', mid_value=0.5,
                    mid_color='FFEB84', end_type='num', end_value=1, end_color='63BE7B'))
+r += 1
+grouped_bar(bb, hr, r - 2, 1, 4, len(CONFIGS), 'Exact rate by encoding setting', f'A{r}', height=9, width=28)
 
-# ---------------- Ablations ----------------
-wa = wb.create_sheet('Ablations', 3)
-wa['A1'] = 'Ablations, seed 1: outcome per configuration (E = exact, W = complete-but-wrong, F = failed, T = timeout) and recovered junctions'
-wa['A1'].font = Font(name=FONT, bold=True, size=13)
-hdr = ['file', 'chunk KB'] + [f'{lab}\noutcome' for _, lab in ABL] + [f'{lab}\nrecovered' for _, lab in ABL]
-header(wa, 3, hdr, [30, 8] + [11] * (2 * len(ABL)))
-wa.row_dimensions[3].height = 58
-row = 4
-for f in files:
-    for cs in sizes:
-        wa.cell(row=row, column=1, value=f); wa.cell(row=row, column=2, value=cs // 1024)
-        for j, (key, _) in enumerate(ABL):
-            crit = f'{rng("config")},"{key}",{rng("file")},$A{row},{rng("chunk_size")},$B{row}*1024,{rng("seed")},1'
-            wa.cell(row=row, column=3 + j, value=(
-                f'=IF(COUNTIFS({crit})=0,"-",IF(COUNTIFS({crit},{rng("outcome")},"EXACT")>0,"E",'
-                f'IF(COUNTIFS({crit},{rng("outcome")},"COMPLETE_WRONG")>0,"W",'
-                f'IF(COUNTIFS({crit},{rng("outcome")},"TIMEOUT")>0,"T","F"))))'))
-            c = wa.cell(row=row, column=3 + len(ABL) + j, value=f'=IFERROR(AVERAGEIFS({rng("recovered_frac")},{crit}),"-")')
-            c.number_format = '0.0%'
-        row += 1
-ws_last = row - 1
-wa.cell(row=row, column=1, value='exact count').font = BOLD
-for j in range(len(ABL)):
-    L = get_column_letter(3 + j)
-    wa.cell(row=row, column=3 + j, value=f'=COUNTIF({L}4:{L}{ws_last},"E")').font = BOLD
-wa.freeze_panes = 'C4'
-from openpyxl.formatting.rule import CellIsRule
-L1, L2 = get_column_letter(3), get_column_letter(2 + len(ABL))
-for val, color in (('"E"', 'C6EFCE'), ('"W"', 'FFEB9C'), ('"F"', 'FFC7CE'), ('"T"', 'FFC7CE')):
-    wa.conditional_formatting.add(f'{L1}4:{L2}{ws_last}', CellIsRule(operator='equal', formula=[val], fill=PatternFill('solid', fgColor=color)))
+# ================================================================ Per file
+pf = wb.create_sheet('Per file', 4)
+r = title(pf, 'Per test file and chunk size', 'Each cell summarises 3 shuffles. The verdict compares the PCM branch (final) with main + last-chunk fix.')
+cols = ['Test file', 'Mode', 'Chunk size (KB)', 'Chunks', 'Possible next chunks per junction (avg)']
+for _, lab, _ in CONFIGS: cols += [f'{lab}\nresult', f'{lab}\njunctions recovered']
+cols += ['Verdict (PCM final vs main + fix)']
+header(pf, r, cols, height=62)
+widths(pf, [34, 14, 9, 8, 12] + [17, 11] * len(CONFIGS) + [26])
+hr = r; r += 1
+pkey = {(p['file'], int(p['chunk_size'])): p for p in probe}
+for f in FILES:
+    d = describe(f)
+    for cs in SIZES:
+        cell(pf, r, 1, d[0], bold=True)
+        cell(pf, r, 2, d[1], align='center')
+        cell(pf, r, 3, cs // 1024, '0', align='center')
+        cell(pf, r, 4, f'=IFERROR(AVERAGEIFS({R("chunks")},{R("file")},"{f}",{R("chunk_kb")},{cs // 1024}),"-")', '#,##0', align='center')
+        p = pkey.get((f, cs))
+        if f.startswith('cbr320') and cs == 1024: candv = 'n/a (frames > chunk)'
+        elif p is None or p.get('junctions_deg2') in (None, ''): candv = 'not measured'
+        elif p.get('junctions_deg2') in (None, '', '0'): candv = '1 (no choice)'
+        else: candv = round(2 * num(p['flux_baseline']) - 1, 1)
+        cell(pf, r, 5, candv, '0.0', align='center')
+        col = 6
+        for k, lab, _ in CONFIGS:
+            base = crit(k, f',{R("set")},"main",{R("file")},"{f}",{R("chunk_kb")},{cs // 1024}')
+            ex = f'COUNTIFS({base},{R("outcome_text")},"Exact")'
+            wr_ = f'COUNTIFS({base},{R("outcome_text")},"Wrong order")'
+            n_ = f'COUNTIFS({base})'
+            cell(pf, r, col, f'=IF({n_}=0,"-",IF({ex}={n_},"Exact (all "&{n_}&")",IF({ex}>0,"Exact "&{ex}&" of "&{n_},'
+                             f'IF({wr_}>0,"Wrong order","Failed"))))', align='center')
+            cell(pf, r, col + 1, f'=IFERROR(AVERAGEIFS({R("recovered_frac")},{base}),"-")', PCT, align='center')
+            col += 2
+        ref_c = 6 + 2 * [c[0] for c in CONFIGS].index(REF)
+        best_c = 6 + 2 * [c[0] for c in CONFIGS].index(BEST)
+        cellc = f',{R("set")},"main",{R("file")},"{f}",{R("chunk_kb")},{cs // 1024}'
+        exr = f'COUNTIFS({crit(REF, cellc)},{R("outcome_text")},"Exact")'
+        exb = f'COUNTIFS({crit(BEST, cellc)},{R("outcome_text")},"Exact")'
+        recr, recb = f'{L(ref_c + 1)}{r}', f'{L(best_c + 1)}{r}'
+        cell(pf, r, col, f'=IF({exb}>{exr},"PCM better (more exact)",IF({exb}<{exr},"PCM worse",'
+                         f'IF({exb}=3,"Both exact",IF(AND(ISNUMBER({recb}),ISNUMBER({recr}),{recb}>{recr}+0.05),'
+                         f'"Neither exact - PCM closer","Same"))))', align='center')
+        if cs == SIZES[-1]:
+            for cc in range(1, col + 1): pf.cell(row=r, column=cc).border = Border(left=thin, right=thin, top=thin, bottom=Side(style='medium', color='1F3864'))
+        r += 1
+lastpf = r - 1
+rc = f'F{hr+1}:{L(5 + 2 * len(CONFIGS))}{lastpf}'
+pf.conditional_formatting.add(rc, FormulaRule(formula=[f'LEFT(F{hr+1},5)="Exact"'], fill=GOOD))
+pf.conditional_formatting.add(rc, FormulaRule(formula=[f'F{hr+1}="Wrong order"'], fill=WARN))
+pf.conditional_formatting.add(rc, FormulaRule(formula=[f'F{hr+1}="Failed"'], fill=BAD))
+vc = L(6 + 2 * len(CONFIGS))
+pf.conditional_formatting.add(f'{vc}{hr+1}:{vc}{lastpf}', FormulaRule(formula=[f'LEFT({vc}{hr+1},10)="PCM better"'], fill=GOOD))
+pf.conditional_formatting.add(f'{vc}{hr+1}:{vc}{lastpf}', FormulaRule(formula=[f'{vc}{hr+1}="PCM worse"'], fill=BAD))
+pf.freeze_panes = pf.cell(row=hr + 1, column=6)
+r += 1
+pf.cell(row=r, column=1, value='Verdict counts').font = F(bold=True, size=11); r += 1
+for v in ('PCM better (more exact)', 'Neither exact - PCM closer', 'Both exact', 'Same', 'PCM worse'):
+    cell(pf, r, 1, v); cell(pf, r, 2, f'=COUNTIF({vc}{hr+1}:{vc}{lastpf},"{v}")', '0', align='center'); r += 1
+r = para(pf, r + 1, '"Possible next chunks per junction" = average number of structurally allowed successors at the points where '
+                    'there is a choice (from pcm_probe). Higher = harder. "Junctions recovered" = share of the true links present in '
+                    'the result or in the longest partial result.', width_cols=12, fill=NOTE, height=30)
 
-# ---------------- Probe ----------------
-wp = wb.create_sheet('Probe', 4)
-pcols = ['file', 'mode', 'rate', 'chunk_size', 'chunks', 'junctions_deg2', 'flux_baseline', 'flux_auc',
-         'flux_rank1_pct', 'flux_meanrank', 'm2_auc', 'm2_rank1_pct', 'm2_meanrank', 'lfl_junctions',
-         'lfl_random_rank', 'lfl_flux_auc', 'lfl_flux_rank1_pct', 'lfl_m2_auc', 'lfl_m2_rank1_pct',
-         'twoopt_swaps', 'twoopt_true_cheaper_pct', 'lock150_wrong', 'lock150_cov_pct', 'lock125_wrong',
-         'lock125_cov_pct', 'lock110_wrong', 'lock110_cov_pct', 'lock100_wrong', 'lock100_cov_pct',
-         'gate1_exact_pct', 'secs', 'rc']
-header(wp, 1, pcols, [30, 6, 18] + [10] * (len(pcols) - 3))
-wp.row_dimensions[1].height = 45
-extra_files = {'CBR', 'sample-3s', 'test7_short', 'test7_shorter'}
-ps = sorted(probe, key=lambda r: (r['file'] in extra_files, FILE_ORDER(r['file']), int(r['chunk_size'])))
-for i, r in enumerate(ps, 2):
-    for c, k in enumerate(pcols, 1):
-        v = num(r.get(k))
-        if k in ('mode', 'rate') and r['file'] in extra_files:
-            v = {'CBR': ('CBR', '128 kbps (old fixture)'), 'sample-3s': ('VBR', 'old fixture'),
-                 'test7_short': ('VBR', 'old fixture'), 'test7_shorter': ('VBR', 'old fixture')}[r['file']][0 if k == 'mode' else 1]
-        wp.cell(row=i, column=c, value=v).font = BASE
-wp.freeze_panes = 'D2'
-wp.auto_filter.ref = f'A1:{get_column_letter(len(pcols))}{len(ps)+1}'
-wp.cell(row=len(ps) + 3, column=1, value='Rows with junctions_deg2 = 0 have no branch points (structure alone is unambiguous); their AUC 0.5 / rank 0 are placeholders, not results.').font = Font(name=FONT, italic=True, size=9)
+# ================================================================ Components (ablation detail)
+cp = wb.create_sheet('Components', 5)
+r = title(cp, 'Contribution of each component (seed 1)', 'Each row switches one part of the PCM branch (final) off. Fewer exact results = that part was helping.')
+COMP = [('final', 'Nothing switched off', 'Full PCM branch.'),
+        ('final_nopcm', 'Audio (PCM) ranking off', 'Candidates are no longer ordered by the audio-continuity score; locking and repair still use it.'),
+        ('final_nolock', 'Edge locking off', 'No links are forced before the search.'),
+        ('final_norepair', 'Repair off', 'The block-move / swap correction after the search is skipped.'),
+        ('final_tau15', 'Only strict locking', 'Locking threshold fixed at 1.5 - no looser second and third attempts.'),
+        ('mainfix', 'Reference: main + fix', 'The main branch (with the shared fix), for comparison.')]
+header(cp, r, ['Configuration', 'What changes', 'Exact (of 64)', 'Change vs full PCM', 'Wrong order', 'Failed', 'Junctions recovered (avg)'], height=40)
+widths(cp, [28, 60, 11, 12, 11, 9, 13])
+r += 1; full_r = r
+for k, lab, d in COMP:
+    if k not in present: continue
+    cs_ = crit(k, f',{R("seed")},1,{R("set")},"main"')
+    cell(cp, r, 1, lab, bold=True); cell(cp, r, 2, d)
+    cell(cp, r, 3, f'=COUNTIFS({cs_},{R("outcome_text")},"Exact")', '0', align='center')
+    cell(cp, r, 4, f'=C{r}-C${full_r}', '+0;-0;0', align='center')
+    cell(cp, r, 5, f'=COUNTIFS({cs_},{R("outcome_text")},"Wrong order")', '0', align='center')
+    cell(cp, r, 6, f'=COUNTIFS({cs_})-C{r}-E{r}', '0', align='center')
+    cell(cp, r, 7, f'=IFERROR(AVERAGEIFS({R("recovered_frac")},{cs_}),"-")', PCT, align='center')
+    cp.row_dimensions[r].height = 30
+    r += 1
+cp.conditional_formatting.add(f'D{full_r}:D{r-1}', CellIsRule(operator='lessThan', formula=['0'], fill=BAD))
 
-def pair_sheet(title, heading, configs, file_filter, cs_list, seed=1):
-    w = wb.create_sheet(title)
-    w['A1'] = heading; w['A1'].font = Font(name=FONT, bold=True, size=13)
-    hdr = ['file', 'chunk KB'] + [f'{lab}\noutcome' for _, lab in configs] + [f'{lab}\nrecovered' for _, lab in configs] + [f'{lab}\nwall s' for _, lab in configs]
-    header(w, 3, hdr, [30, 8] + [12] * (3 * len(configs)))
-    w.row_dimensions[3].height = 45
-    rr = 4
-    keys = sorted({(r['file'], int(r['chunk_size'])) for r in runs if r['config'] in [c for c, _ in configs] and file_filter(r)},
-                  key=lambda k: (FILE_ORDER(k[0]), k[1]))
-    for f, cs in keys:
-        w.cell(row=rr, column=1, value=f); w.cell(row=rr, column=2, value=cs // 1024)
-        for j, (key, _) in enumerate(configs):
-            crit = f'{rng("config")},"{key}",{rng("file")},$A{rr},{rng("chunk_size")},$B{rr}*1024,{rng("seed")},{seed}'
-            w.cell(row=rr, column=3 + j, value=(
-                f'=IF(COUNTIFS({crit})=0,"-",IF(COUNTIFS({crit},{rng("outcome")},"EXACT")>0,"E",'
-                f'IF(COUNTIFS({crit},{rng("outcome")},"COMPLETE_WRONG")>0,"W",'
-                f'IF(COUNTIFS({crit},{rng("outcome")},"TIMEOUT")>0,"T","F"))))'))
-            c = w.cell(row=rr, column=3 + len(configs) + j, value=f'=IFERROR(AVERAGEIFS({rng("recovered_frac")},{crit}),"-")')
-            c.number_format = '0.0%'
-            c = w.cell(row=rr, column=3 + 2 * len(configs) + j, value=f'=IFERROR(AVERAGEIFS({rng("wall_s")},{crit}),"-")')
-            c.number_format = '0.0'
-        rr += 1
-    last = rr - 1
-    w.cell(row=rr, column=1, value='exact count').font = BOLD
-    for j in range(len(configs)):
-        L = get_column_letter(3 + j)
-        w.cell(row=rr, column=3 + j, value=f'=COUNTIF({L}4:{L}{last},"E")').font = BOLD
-    w.cell(row=rr + 1, column=1, value='complete-but-wrong count').font = BOLD
-    for j in range(len(configs)):
-        L = get_column_letter(3 + j)
-        w.cell(row=rr + 1, column=3 + j, value=f'=COUNTIF({L}4:{L}{last},"W")').font = BOLD
-    L1, L2 = get_column_letter(3), get_column_letter(2 + len(configs))
-    for val, color in (('"E"', 'C6EFCE'), ('"W"', 'FFEB9C'), ('"F"', 'FFC7CE'), ('"T"', 'FFC7CE')):
-        w.conditional_formatting.add(f'{L1}4:{L2}{last}', CellIsRule(operator='equal', formula=[val], fill=PatternFill('solid', fgColor=color)))
-    w.freeze_panes = 'C4'
-    return w
+# ================================================================ Held-out (detail)
+if ho_rows:
+    hs = wb.create_sheet('Held-out', 6)
+    r = title(hs, 'Held-out test set - every case (seed 1)', 'Files cut from 200 s of the song with the same 14 encoder settings. Not used for any tuning.')
+    hcfg = [k for k in ('ho_mainfix', 'ho_final', 'ho_gm1', 'ho_gm2') if k in present]
+    header(hs, r, ['Test file', 'Chunk size (KB)'] + [f'{CFG_LABEL[k]}\nresult' for k in hcfg] + [f'{CFG_LABEL[k]}\njunctions recovered' for k in hcfg] + [f'{CFG_LABEL[k]}\ntime (s)' for k in hcfg], height=60)
+    widths(hs, [34, 9] + [16] * (3 * len(hcfg)))
+    hr = r; r += 1
+    hofiles = sorted({x['file'] for x in runs if x['config'] == 'ho_mainfix'}, key=fkey)
+    for f in hofiles:
+        for cs in SIZES:
+            cell(hs, r, 1, describe(f)[0], bold=True); cell(hs, r, 2, cs // 1024, '0', align='center')
+            for j, k in enumerate(hcfg):
+                base = crit(k, f',{R("file")},"{f}",{R("chunk_kb")},{cs // 1024}')
+                cell(hs, r, 3 + j, f'=IFERROR(INDEX({R("outcome_text")},MATCH(1,INDEX(({R("config")}="{k}")*({R("file")}="{f}")*({R("chunk_kb")}={cs // 1024}),0),0)),"-")', align='center')
+                cell(hs, r, 3 + len(hcfg) + j, f'=IFERROR(AVERAGEIFS({R("recovered_frac")},{base}),"-")', PCT, align='center')
+                cell(hs, r, 3 + 2 * len(hcfg) + j, f'=IFERROR(AVERAGEIFS({R("wall_s")},{base}),"-")', NUM1, align='center')
+            r += 1
+    rng_ = f'C{hr+1}:{L(2 + len(hcfg))}{r-1}'
+    for v, fill in (('"Exact"', GOOD), ('"Wrong order"', WARN), ('"Failed"', BAD)):
+        hs.conditional_formatting.add(rng_, CellIsRule(operator='equal', formula=[v], fill=fill))
+    hs.freeze_panes = 'C' + str(hr + 1)
 
-if any(r['config'].startswith('ho_') for r in runs):
-    pair_sheet('Held-out', 'Held-out segment (start 200 s, sound/test/gen2), seed 1 - not used for any tuning',
-               [('ho_mainfix', 'main + fix'), ('ho_final', 'PCM final')], lambda r: True, sizes)
-if any(r['config'] == 'mainfix150' for r in runs):
-    pair_sheet('Budget check', 'Equal-time check, seed 1: main + fix with a 150 s budget on cells where PCM final is exact and main + fix (30 s) is not',
-               [('mainfix', 'main + fix (30 s)'), ('mainfix150', 'main + fix (150 s)'), ('final', 'PCM final')],
-               lambda r: r['config'] == 'mainfix150', sizes)
+# ================================================================ Equal time
+eqk = [k for k in ('mainfix150', 'ho_mainfix150') if k in present]
+if eqk:
+    et = wb.create_sheet('Equal time', 7)
+    r = title(et, 'Was main just short of time?', 'On every case where only the PCM branch (final) was exact, main + fix was re-run with a 150 s budget (5x).')
+    header(et, r, ['Test file', 'Test set', 'Chunk size (KB)', 'Main + fix, 30 s', 'Main + fix, 150 s', 'PCM final', 'PCM final time (s)'], height=40)
+    widths(et, [34, 10, 9, 15, 15, 15, 12])
+    hr = r; r += 1
+    eq = sorted({(x['config'], x['file'], int(x['chunk_size'])) for x in runs if x['config'] in eqk}, key=lambda t: (t[0], fkey(t[1]), t[2]))
+    def lookup(cfg, f, kb, col='outcome_text'):
+        return f'=IFERROR(INDEX({R(col)},MATCH(1,INDEX(({R("config")}="{cfg}")*({R("file")}="{f}")*({R("chunk_kb")}={kb})*({R("seed")}=1),0),0)),"-")'
+    for cfg, f, cs in eq:
+        ho = cfg.startswith('ho_')
+        kb = cs // 1024
+        cell(et, r, 1, describe(f)[0], bold=True); cell(et, r, 2, 'held-out' if ho else 'main', align='center')
+        cell(et, r, 3, kb, '0', align='center')
+        cell(et, r, 4, lookup('ho_mainfix' if ho else 'mainfix', f, kb), align='center')
+        cell(et, r, 5, lookup(cfg, f, kb), align='center')
+        cell(et, r, 6, lookup('ho_final' if ho else 'final', f, kb), align='center')
+        cell(et, r, 7, lookup('ho_final' if ho else 'final', f, kb, 'wall_s'), NUM1, align='center')
+        r += 1
+    rng_ = f'D{hr+1}:F{r-1}'
+    for v, fill in (('"Exact"', GOOD), ('"Wrong order"', WARN), ('"Failed"', BAD)):
+        et.conditional_formatting.add(rng_, CellIsRule(operator='equal', formula=[v], fill=fill))
+    r += 1
+    cell(et, r, 1, 'Main + fix exact with 150 s', bold=True); cell(et, r, 5, f'=COUNTIF(E{hr+1}:E{r-2},"Exact")', '0', align='center', bold=True)
+    cell(et, r + 1, 1, 'Cases checked', bold=True); cell(et, r + 1, 5, f'=COUNTA(E{hr+1}:E{r-2})', '0', align='center', bold=True)
 
-for sh in wb.worksheets:
-    for row_ in sh.iter_rows():
-        for cell in row_:
-            f = cell.font
-            if f.name != FONT:
-                cell.font = Font(name=FONT, bold=f.bold, italic=f.italic, size=f.size, color=f.color)
+# ================================================================ Signal quality
+sq = wb.create_sheet('Signal quality', 8)
+r = title(sq, 'How well does each signal recognise the true next chunk?',
+          'Measured by pcm_probe on the ORIGINAL order: at every point where several chunks could structurally follow, the candidates are ranked by each signal.')
+r = para(sq, r, 'PCM flux = the audio-continuity score of the PCM branch. Old spectral score = the partial-spectrum signal (Milestone 2) the main branch uses. '
+                '"Ranked first" = the true next chunk got the best score. "Random guess" = what picking at random would give. '
+                '"Strict locks" = links the PCM branch would force before searching (threshold 1.5): how many are wrong and what share of links they cover.',
+         width_cols=12, fill=NOTE, height=46)
+header(sq, r, ['Test file', 'Chunk size (KB)', 'Decision points', 'Possible next chunks (avg)', 'Random guess ranked first',
+               'PCM flux: true chunk ranked first', 'Old spectral score: ranked first', 'PCM flux separation (AUC, 0.5 = useless, 1 = perfect)',
+               'Swap test: true pair scores better', 'Strict locks: wrong', 'Strict locks: share of links covered'], height=74)
+widths(sq, [36, 9, 10, 11, 11, 13, 13, 14, 12, 10, 12])
+hr = r; r += 1
+for p in sorted(probe, key=lambda p: (fkey(p['file']) if p['file'] in FILES or p['file'].startswith(('cbr', 'vbr')) else (3, 0, p['file']), int(p['chunk_size']))):
+    if p.get('junctions_deg2') in (None, '', '0') or num(p.get('flux_baseline')) in (None, 0): continue
+    name = describe(p['file'])[0] if (p['file'] in FILES) else f"Older fixture: {p['file']}"
+    base = num(p['flux_baseline'])
+    cell(sq, r, 1, name, bold=True); cell(sq, r, 2, int(p['chunk_size']) // 1024, '0', align='center')
+    cell(sq, r, 3, num(p['junctions_deg2']), '#,##0', align='center')
+    cell(sq, r, 4, round(2 * base - 1, 1), '0.0', align='center')
+    cell(sq, r, 5, f'=1/D{r}', PCT, align='center', color=INK2)
+    cell(sq, r, 6, num(p['flux_rank1_pct']) / 100, PCT, align='center', bold=True)
+    cell(sq, r, 7, num(p['m2_rank1_pct']) / 100 if num(p['m2_rank1_pct']) is not None else None, PCT, align='center')
+    cell(sq, r, 8, num(p['flux_auc']), '0.00', align='center')
+    cell(sq, r, 9, num(p['twoopt_true_cheaper_pct']) / 100 if num(p.get('twoopt_true_cheaper_pct')) is not None else None, PCT, align='center')
+    cell(sq, r, 10, num(p.get('lock150_wrong')), '0', align='center')
+    cell(sq, r, 11, num(p.get('lock150_cov_pct')) / 100 if num(p.get('lock150_cov_pct')) is not None else None, PCT, align='center')
+    r += 1
+sq.conditional_formatting.add(f'F{hr+1}:G{r-1}', ColorScaleRule(start_type='num', start_value=0, start_color='F8696B',
+                              mid_type='num', mid_value=0.5, mid_color='FFEB84', end_type='num', end_value=1, end_color='63BE7B'))
+sq.conditional_formatting.add(f'J{hr+1}:J{r-1}', CellIsRule(operator='greaterThan', formula=['0'], fill=BAD))
+sq.freeze_panes = 'C' + str(hr + 1)
+r = para(sq, r + 1, 'Missing rows: 320 kbps at 1 KB (frames longer than chunks - out of scope), cases without any decision point, '
+                    'and the 6-minute 32 kbps file at 1 KB (the probe did not finish in 90 min). The 2 KB row of that file covers its first 400 decision points.',
+         width_cols=11, fill=NOTE, height=32)
+
+# move raw data to the end, fonts everywhere
+wb.move_sheet('All runs', offset=len(wb.sheetnames))
+for ws in wb.worksheets:
+    ws.sheet_view.showGridLines = ws.title == 'All runs'
+wb.active = 0
 wb.save(OUT)
-print('wrote', OUT)
+print('wrote', OUT, 'configs:', [c[0] for c in CONFIGS])
