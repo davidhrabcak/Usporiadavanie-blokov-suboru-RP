@@ -1,4 +1,4 @@
-#include "edge_lock.hpp"
+#include "scoring/edge_lock.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -8,7 +8,7 @@
 #include <memory>
 #include <unordered_map>
 
-#include "pcm_junction.hpp"
+#include "scoring/pcm_junction.hpp"
 
 namespace EdgeLock {
 

@@ -12,10 +12,10 @@
 #include <string>
 #include <vector>
 
-#include "frame_scanner.hpp"
-#include "chunk_meta.hpp"
-#include "adjacency.hpp"
-#include "pcm_junction.hpp"
+#include "mp3/frame_scanner.hpp"
+#include "mp3/chunk_meta.hpp"
+#include "graph/adjacency.hpp"
+#include "scoring/pcm_junction.hpp"
 
 using namespace std;
 

@@ -30,11 +30,11 @@
 #include <string>
 #include <vector>
 
-#include "frame_scanner.hpp"
+#include "mp3/frame_scanner.hpp"
 #include "probe_util.hpp"
-#include "chunk_meta.hpp"
-#include "adjacency.hpp"
-#include "main_data_decoder.hpp"
+#include "mp3/chunk_meta.hpp"
+#include "graph/adjacency.hpp"
+#include "mp3/main_data_decoder.hpp"
 
 using namespace std;
 

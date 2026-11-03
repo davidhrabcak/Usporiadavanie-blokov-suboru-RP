@@ -3,7 +3,7 @@
 
 #include <cstdint>
 #include <vector>
-#include "chunk_meta.hpp"   // GranuleSideInfo, FrameSideInfo
+#include "mp3/chunk_meta.hpp"   // GranuleSideInfo, FrameSideInfo
 
 // Milestone 2 - partial Layer III main-data decode for a spectral-continuity signal.
 // MPEG1 Layer III only (every fixture is MPEG1); MPEG2/2.5 LSF is out of scope.

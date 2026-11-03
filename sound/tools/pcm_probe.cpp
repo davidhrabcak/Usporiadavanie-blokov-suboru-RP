@@ -21,13 +21,13 @@
 #include <string>
 #include <vector>
 
-#include "frame_scanner.hpp"
+#include "mp3/frame_scanner.hpp"
 #include "probe_util.hpp"
-#include "chunk_meta.hpp"
-#include "adjacency.hpp"
-#include "main_data_decoder.hpp"
-#include "pcm_junction.hpp"
-#include "edge_lock.hpp"
+#include "mp3/chunk_meta.hpp"
+#include "graph/adjacency.hpp"
+#include "mp3/main_data_decoder.hpp"
+#include "scoring/pcm_junction.hpp"
+#include "scoring/edge_lock.hpp"
 
 using namespace std;
 

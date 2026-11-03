@@ -1,4 +1,4 @@
-#include "huffman_tables.hpp"
+#include "mp3/huffman_tables.hpp"
 
 namespace Mp3Huffman {
 

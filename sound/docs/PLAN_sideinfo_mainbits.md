@@ -23,7 +23,7 @@ kept.
 Confirmed during planning: there is no existing Python prototyping workflow
 for `chunk_meta`/`adjacency` (the `.so` binding only wraps `Mp3FrameScanner`) —
 all new logic is implemented and validated directly in C++.
-`sound/test/evaluate_order.cpp` (`evaluate_order <original.mp3> <output.mp3>`)
+`sound/tools/evaluate_order.cpp` (`evaluate_order <original.mp3> <output.mp3>`)
 is the existing ground-truth comparator (Kendall's tau, exact-position %,
 adjacent-run coverage) for correctness verification.
 
@@ -129,7 +129,7 @@ item 7). Before building the expensive Huffman+requantize path, measure whether
 the *free* side-info fields alone (now that step 2 parses them) discriminate a
 chunk's true successor. They do - `global_gain` strongly.
 
-**Probe** (`test/sideinfo_probe.cpp`, built by CMake): runs on each fixture's
+**Probe** (`tools/sideinfo_probe.cpp`, built by CMake): runs on each fixture's
 true (unshuffled) order; for every chunk computes the trailing granule's side
 info and, for candidates, the leading granule's. Two measurements: (A)
 Mann-Whitney AUC of the junction |Δfeature| for true consecutive pairs vs

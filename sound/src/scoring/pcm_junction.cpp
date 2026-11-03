@@ -1,12 +1,11 @@
-#include "pcm_junction.hpp"
+#include "scoring/pcm_junction.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <complex>
 #include <cstring>
 
-#include "Header.hpp"
-#include "Header.hpp"
+#include "mp3/Header.hpp"
 
 #define MINIMP3_FLOAT_OUTPUT
 #include "third_party/minimp3.h"

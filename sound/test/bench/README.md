@@ -1,6 +1,6 @@
 # Benchmark tooling (main vs full-pcm-decode)
 
-Produces `sound/BENCHMARK_pcm_vs_main.xlsx` / `.md`.
+Produces `sound/docs/BENCHMARK_pcm_vs_main.xlsx` / `.md`.
 
 1. Build each variant once and copy its `rp` to `$SP/bin/` (`rp_main`: branch
    `sideinfo-mainbits`; `rp_mainfix`: same + the final-fragment fix aa9ce7c; `rp_pcm`: 1446fe6;

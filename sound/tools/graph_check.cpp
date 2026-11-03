@@ -5,9 +5,9 @@
 #include <cstdlib>
 #include <set>
 #include <vector>
-#include "frame_scanner.hpp"
-#include "chunk_meta.hpp"
-#include "adjacency.hpp"
+#include "mp3/frame_scanner.hpp"
+#include "mp3/chunk_meta.hpp"
+#include "graph/adjacency.hpp"
 
 using namespace std;
 

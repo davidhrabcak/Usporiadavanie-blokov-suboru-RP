@@ -19,7 +19,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
-#include "../frame_scanner.hpp"
+#include "mp3/frame_scanner.hpp"
 
 // ══════════════════════════════════════════════════════════════════════════
 // ── MP3 INTERFACE ────────────────────────────────────────────────────────

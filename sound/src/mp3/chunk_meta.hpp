@@ -3,7 +3,7 @@
 
 #include <cstdint>
 #include <vector>
-#include "Header.hpp"
+#include "mp3/Header.hpp"
 
 /**
  * Holds basic frame information that should remain similar across frames.
@@ -46,7 +46,7 @@ struct SideInfoResult {
 
 // Full per-granule/-channel Layer III side info (ISO 11172-3 2.4.1.7 / 13818-3). Everything a
 // decoder needs *except* the main-data payload itself. Populated by parseFrameSideInfoAt;
-// consumed by the side-info-only continuity probe (test/sideinfo_probe.cpp) and, later,
+// consumed by the side-info-only continuity probe (tools/sideinfo_probe.cpp) and, later,
 // Milestone 2's partial main-data decoder.
 struct GranuleSideInfo {
     uint16_t part23Length     = 0; // 12 bits - main-data bits for this granule/channel

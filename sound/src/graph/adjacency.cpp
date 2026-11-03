@@ -1,8 +1,8 @@
-#include "adjacency.hpp"
+#include "graph/adjacency.hpp"
 #include <algorithm>
 #include <unordered_map>
 
-#include "frame_scanner.hpp"
+#include "mp3/frame_scanner.hpp"
 
 using namespace std;
 

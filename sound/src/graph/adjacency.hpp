@@ -1,7 +1,7 @@
 #ifndef RP_ADJACENCY_HPP
 #define RP_ADJACENCY_HPP
 
-#include "chunk_meta.hpp"
+#include "mp3/chunk_meta.hpp"
 #include <vector>
 //True if chunk b can legally follow chunk a.
 bool canFollow(const ChunkMeta& a, const ChunkMeta& b);

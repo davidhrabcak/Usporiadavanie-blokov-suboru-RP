@@ -1,5 +1,5 @@
-#include "main_data_decoder.hpp"
-#include "huffman_tables.hpp"
+#include "mp3/main_data_decoder.hpp"
+#include "mp3/huffman_tables.hpp"
 
 #include <algorithm>
 #include <cmath>

@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
-#include "chunk_meta.hpp"
+#include "mp3/chunk_meta.hpp"
 
 // Confident-edge locking from the full-PCM junction flux (PLAN_full_pcm_decode.md, step 5).
 //

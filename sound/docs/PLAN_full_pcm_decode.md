@@ -63,7 +63,7 @@ It is memoised per triple in the DFS.
 1. **[gate: correctness]** On the true order, the windowed decode of `[i-1, i, i+1]` must
    match a full-file minimp3 decode sample-for-sample on the frames of `cur` and `X`. If it
    does not, add more left context.
-2. **[gate: signal]** `test/pcm_probe.cpp`: for every chunk i with structural out-degree >= 2
+2. **[gate: signal]** `tools/pcm_probe.cpp`: for every chunk i with structural out-degree >= 2
    (`buildAdjacency`, true order), score every candidate in `adj[i]` with each metric. Report
    AUC (true vs wrong *structural* candidates, never random pairs, which break frame sync
    and inflate the result), rank-1 %, and mean rank vs the (deg+1)/2 random baseline. Run

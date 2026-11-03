@@ -1,4 +1,4 @@
-#include "slot_fill.hpp"
+#include "graph/slot_fill.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -7,8 +7,8 @@
 #include <limits>
 #include <thread>
 
-#include "adjacency.hpp"
-#include "pcm_junction.hpp"
+#include "graph/adjacency.hpp"
+#include "scoring/pcm_junction.hpp"
 
 namespace SlotFill {
 

@@ -3,7 +3,7 @@
 
 #include <cstdint>
 #include <vector>
-#include "chunk_meta.hpp"
+#include "mp3/chunk_meta.hpp"
 
 // Layer III bit-reservoir model: does a candidate chunk order give every frame the main data
 // its main_data_begin reaches back for? Used by the DFS (per placed chunk), the reservoir arc

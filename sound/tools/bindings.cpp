@@ -1,6 +1,6 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>       // needed for automatic vector conversion
-#include "../frame_scanner.hpp"
+#include "mp3/frame_scanner.hpp"
 
 namespace py = pybind11;
 

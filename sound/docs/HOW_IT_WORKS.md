@@ -475,7 +475,7 @@ candidate, copy that state and decode only the right side (about 1 KB / 4 frames
 4 KB).
 
 **Why it is safe.** The result is bit-identical to decoding the whole window
-(`test/left_context_check.cpp` checks this). It is a pure speed-up, 1.5-2.9x cheaper
+(`tools/left_context_check.cpp` checks this). It is a pure speed-up, 1.5-2.9x cheaper
 scoring.
 
 **A small cache** keeps the 64 most recent left sides, because the DFS and the repair tend
@@ -1070,7 +1070,7 @@ Unchanged but central: `RP_SEED` (1), `RP_CHUNK_SIZE` (1024), `RP_LOCK_TAU` (1.5
 - `edge_lock.cpp` - locking and `scoreWindows` (parallel scoring shared with the matching).
 - `adjacency.cpp` - `canFollow`, `buildAdjacency`, `propagateArcConsistency` (with the
   end-of-stream fix).
-- `test/left_context_check.cpp` - proves `LeftContext` is bit-identical.
+- `tools/left_context_check.cpp` - proves `LeftContext` is bit-identical.
 - Benchmark data and scripts: `tmp/bench/runs.csv`, `tmp/bench/move_study.txt`,
   `tmp/scripts/` (not committed).
 

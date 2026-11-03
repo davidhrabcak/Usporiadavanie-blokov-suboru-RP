@@ -3,8 +3,8 @@
 #include <vector>
 #include <cstdint>
 #include <iostream>
-#include "Header.hpp"
-#include "frame_scanner.hpp"
+#include "mp3/Header.hpp"
+#include "mp3/frame_scanner.hpp"
 
 using namespace std;
 

@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <vector>
 
-#include "chunk_meta.hpp"
+#include "mp3/chunk_meta.hpp"
 
 // Stage B of PLAN_headerless_chunks.md: once the chunks with a header are ordered, put the
 // headerless ("pool") chunks into the slots after the demanders. Exact min-cost assignment of

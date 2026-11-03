@@ -16,16 +16,16 @@
 #include <unordered_set>
 #include <deque>
 #include <memory>
-#include "frame_scanner.hpp"
-#include "chunk_meta.hpp"
-#include "adjacency.hpp"
-#include "main_data_decoder.hpp"
-#include "pcm_junction.hpp"
-#include "edge_lock.hpp"
+#include "mp3/frame_scanner.hpp"
+#include "mp3/chunk_meta.hpp"
+#include "graph/adjacency.hpp"
+#include "mp3/main_data_decoder.hpp"
+#include "scoring/pcm_junction.hpp"
+#include "scoring/edge_lock.hpp"
 #include "run_report.hpp"
-#include "slot_fill.hpp"
+#include "graph/slot_fill.hpp"
 #include "config.hpp"
-#include "reservoir.hpp"
+#include "mp3/reservoir.hpp"
 
 extern char** environ;
 

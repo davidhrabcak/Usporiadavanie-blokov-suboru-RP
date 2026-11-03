@@ -319,7 +319,7 @@ Each step ends with a measurement that decides whether the next one is worth doi
 
 ## Files
 
-- `test/pcm_probe.cpp`: `--dump-arcs`.
+- `tools/pcm_probe.cpp`: `--dump-arcs`.
 - `scripts/fit_edge_model.py` (new; Python, numpy + scikit-learn): fit, calibrate, emit
   `edge_model.inc`.
 - `edge_model.{hpp,cpp}` (new): features → log-odds; Sinkhorn marginals.

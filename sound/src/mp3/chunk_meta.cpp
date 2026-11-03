@@ -1,5 +1,5 @@
-#include "chunk_meta.hpp"
-#include "frame_scanner.hpp"
+#include "mp3/chunk_meta.hpp"
+#include "mp3/frame_scanner.hpp"
 #include <algorithm>
 #include <cstring>
 
