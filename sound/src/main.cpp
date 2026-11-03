@@ -24,6 +24,7 @@
 #include "mp3/main_data_decoder.hpp"
 #include "scoring/pcm_junction.hpp"
 #include "scoring/edge_lock.hpp"
+#include "scoring/junction_scorer.hpp"
 #include "run_report.hpp"
 #include "graph/slot_fill.hpp"
 #include "config.hpp"
@@ -43,164 +44,17 @@ struct DfsState {
     vector<int> order;    // supernode indices placed so far
     vector<bool> used;
     int reservoirLevel = 0;   // bit-reservoir fill level after everything placed so far
-    long long score  = 0;     // summed junctionCost over the junctions between placed supernodes
+    long long score  = 0;     // summed gainCost over the junctions between placed supernodes
 };
 
-// Per-chunk Layer III side-info features at each end, for the continuity ranking heuristic.
-// *First = granule 0 of the chunk's first complete frame; *Last = last granule of the last
-// complete frame. -1 when unavailable (no complete frame / side info didn't fit).
-// See PLAN_sideinfo_mainbits.md Step 1 + A2: `global_gain` (granule loudness) is the dominant
-// junction-continuity signal - |Δ global_gain| ranks the true successor #1 in ~60-74% of VBR
-// branch points (vs ~30% for the graph's own order). A2: adding a small |Δ big_values|
-// (spectral-occupancy) term robustly nudges rank-1 up ~1-3pp on every fixture. Ranking only -
-// never rejects an edge.
-struct BoundaryGain {
-    int ggFirst = -1, ggLast = -1;   // global_gain
-    int bvFirst = -1, bvLast = -1;   // big_values
-};
-
-// Junction cost of putting a supernode whose first chunk is `b` right after one whose last
-// chunk is `a`: |Δ global_gain| + |Δ big_values|/BV_DIV across that boundary (A2 - the /32
-// matches the z-scored 1.0*gg + 0.15*bv the probe found robust). When global_gain is unknown
-// on either side, a fixed penalty above the 255 max real delta - so an ordering that resolves
-// more junctions scores better, unknowns sort last, and the running sum stays finite (needed
-// for the best-of branch-and-bound). Used for both DFS exploration order and the best-of score.
-static constexpr int UNKNOWN_JUNCTION_COST = 384;
-static constexpr int BV_DIV = 32;
-static int junctionCost(const vector<BoundaryGain>& bg, const int a, const int b) {
-    if (bg[a].ggLast < 0 || bg[b].ggFirst < 0) return UNKNOWN_JUNCTION_COST;
-    int cost = std::abs(bg[a].ggLast - bg[b].ggFirst);
-    if (bg[a].bvLast >= 0 && bg[b].bvFirst >= 0)
-        cost += std::abs(bg[a].bvLast - bg[b].bvFirst) / BV_DIV;
-    return cost;
-}
-
-// --- Milestone 2: spectral-continuity term added to the candidate ranking (not to the
-// best-of score / branch-and-bound). Decodes the trailing granule of `cur`'s last frame and
-// the leading granule of a candidate's first frame - cross-chunk main-data assembly, so the
-// trailing spectrum needs `cur`'s predecessor and the leading one needs `cur` itself.
-// Memoised by (predecessor, chunk); distinct keys ~= edge count. RP_SPEC=0 disables.
-// The probe (sideinfo_probe Measurement D) found z(global_gain) + 0.5*z(spectralL2) a strong
-// net win; here the raw 12-band-energy L2 distance is scaled by g_specScale, auto-calibrated
-// per file at startup so a median junction contributes a gentle ~3 (RP_SPEC_SCALE overrides).
-static bool   g_specRank   = true;
-static int    g_sampleRate = 44100;
-static double g_specScale  = 10.0;
-static std::unordered_map<long long, Mp3MainData::GranuleSpectrum> g_specHead, g_specTail;
-
-static const Mp3MainData::GranuleSpectrum* memoSpec(bool head, const vector<ChunkMeta>& metas,
-                                                    int prev, int chunk) {
-    if (chunk < 0 || !metas[chunk].valid || metas[chunk].frames.empty()) return nullptr;
-    auto& memo = head ? g_specHead : g_specTail;
-    const long long key = ((long long)(prev + 1) << 20) | (unsigned)chunk;
-    auto it = memo.find(key);
-    if (it == memo.end()) {
-        static const vector<uint8_t> empty;
-        // across a slot (headerless chunk not placed yet) the predecessor's bytes don't continue
-        const bool usePrev = prev >= 0 && !metas[prev].gapAfter;
-        const vector<uint8_t>& pv = usePrev ? chunks[prev] : empty;
-        const ChunkMeta* pm = usePrev ? &metas[prev] : nullptr;
-        const int off = head ? metas[chunk].frames.front().offset : metas[chunk].frames.back().offset;
-        const Mp3MainData::FrameSpectra fsp =
-            Mp3MainData::decodeChunkFrame(pm, pv, chunks[chunk], metas[chunk], off, g_sampleRate);
-        const bool mpeg1 = metas[chunk].profile.versionID == 0b11;
-        Mp3MainData::GranuleSpectrum gs; // gs.valid == false by default
-        if (fsp.valid) gs = head ? fsp.gr[0][0] : fsp.gr[mpeg1 ? 1 : 0][0];
-        it = memo.emplace(key, gs).first;
-    }
-    return it->second.valid ? &it->second : nullptr;
-}
-
-static double spectralJunctionCost(const vector<ChunkMeta>& metas, int curPrev, int curTail, int candHead) {
-    const Mp3MainData::GranuleSpectrum* A = memoSpec(false, metas, curPrev, curTail);
-    const Mp3MainData::GranuleSpectrum* B = memoSpec(true, metas, curTail, candHead);
-    if (!A || !B) return 0.0; // no spectrum on one side -> spectral term contributes nothing
-    double s = 0;
-    for (int q = 0; q < Mp3MainData::NBANDS; ++q) {
-        const double d = A->bandEnergy[q] - B->bandEnergy[q];
-        s += d * d;
-    }
-    return g_specScale * std::sqrt(s);
-}
-
-// --- Full PCM decode junction term (PLAN_full_pcm_decode.md). For a candidate edge, decode
-// the last (up to) g_pcmLeft chunks of the current path followed by the candidate's first chunk all
-// the way to PCM with minimp3 (fresh decoder, the first 2 chunks are warm-up - with them the
-// window decode is sample-exact vs a full-file decode), and measure the spectral-flux spike
-// at the junction relative to the flux inside the already-placed audio. A wrong successor
-// produces a hybrid straddling frame + a jump to another moment of the song. pcm_probe:
-// ranks the true successor #1 in 47-92% of branch points (Milestone 2: 11-51%).
-// Memoised by the (PP, P, cur, cand) chunk tuple. Ranking only - never rejects an edge
-// (not a safe filter: some true junctions do spike). RP_PCM=0 disables; RP_PCM_W weights it
-// relative to the existing (global_gain + spectral) cost, see the calibration in main().
-static vector<int> g_matchSucc;   // global matching: successor per supernode (DFS hint), -1 none
+// Global matching: successor per supernode, used as a DFS ranking hint; -1 none.
+static vector<int> g_matchSucc;
 static const vector<int>* g_origIndexOf = nullptr;   // diagnostics only: source position of each chunk
 static int trueJunctions(const vector<int>& seq) {
     int tj = 0;
     if (g_origIndexOf)
         for (size_t k = 1; k < seq.size(); ++k) if ((*g_origIndexOf)[seq[k]] == (*g_origIndexOf)[seq[k - 1]] + 1) ++tj;
     return tj;
-}
-static bool   g_pcmRank    = true;
-static double g_pcmScale   = 1.0;  // set by calibration
-static double g_pcmNeutral = 0.0;  // raw value used when a junction can't be measured
-// Path-tail chunks on the window's left side: 3, more when frames are large vs the chunk size
-// (PcmJunction::leftChunksNeeded; set in main, RP_PCM_LEFT overrides).
-constexpr int PCM_LEFT_MAX = 8;
-static int g_pcmLeft = 3;
-// Window key: up to PCM_LEFT_MAX left ids (oldest first, -1 padded) + the candidate.
-struct PcmKey {
-    std::array<int, PCM_LEFT_MAX + 1> id;
-    bool operator==(const PcmKey& o) const { return id == o.id; }
-};
-struct PcmKeyHash {
-    size_t operator()(const PcmKey& k) const {
-        uint64_t h = 1469598103934665603ull;
-        for (int v : k.id) h = (h ^ (uint32_t)v) * 1099511628211ull;
-        return (size_t)h;
-    }
-};
-static std::unordered_map<PcmKey, float, PcmKeyHash> g_pcmMemo;
-
-// Raw log1p(flux) for path tail `left[0..nLeft)` (oldest first) followed by `cand`;
-// -1 when the window can't be measured (too little audio, silent pre side).
-static double pcmRaw(const vector<ChunkMeta>& metas, const int* left, int nLeft, int cand) {
-    while (nLeft > 1 && !metas[left[0]].valid) { ++left; --nLeft; }
-    // A window spanning a slot (a headerless chunk not placed yet) can't be decoded: neutral
-    // once calibrated, never "unmeasured" - the repair would otherwise bunch slots together
-    // to share such windows (PLAN_headerless_chunks.md). Not memoised: neutral is set later.
-    for (int k = 0; k < nLeft; ++k)
-        if (metas[left[k]].gapAfter) return g_pcmNeutral > 0 ? g_pcmNeutral : -1.0;
-    PcmKey key;
-    key.id.fill(-1);
-    for (int k = 0; k < nLeft; ++k) key.id[k] = left[k];
-    key.id[PCM_LEFT_MAX] = cand;
-    auto it = g_pcmMemo.find(key);
-    if (it != g_pcmMemo.end()) return it->second;
-    // The DFS scores all candidates of one node with the same left side, so keep the decoded
-    // left sides of the last few contexts (a LeftContext holds up to ~250 KB at 32 kbps).
-    static std::unordered_map<PcmKey, std::unique_ptr<PcmJunction::LeftContext>, PcmKeyHash> leftCache;
-    static std::deque<PcmKey> leftOrder;
-    PcmKey lkey = key;
-    lkey.id[PCM_LEFT_MAX] = -1;   // the left ids only
-    auto lit = leftCache.find(lkey);
-    if (lit == leftCache.end()) {
-        vector<const vector<uint8_t>*> segs;
-        for (int k = 0; k < nLeft; ++k) segs.push_back(&chunks[left[k]]);
-        if (leftOrder.size() >= 64) { leftCache.erase(leftOrder.front()); leftOrder.pop_front(); }
-        lit = leftCache.emplace(lkey, std::unique_ptr<PcmJunction::LeftContext>(
-                  new PcmJunction::LeftContext(segs, metas[left[0]].headOffset))).first;
-        leftOrder.push_back(lkey);
-    }
-    const PcmJunction::Metrics m = lit->second->score(chunks[cand]);
-    const float v = (m.valid && !m.silent) ? (float)std::log1p(m.flux) : -1.0f;
-    g_pcmMemo.emplace(key, v);
-    return v;
-}
-
-static double pcmJunctionCost(const vector<ChunkMeta>& metas, const int* left, int nLeft, int cand) {
-    const double v = pcmRaw(metas, left, nLeft, cand);
-    return g_pcmScale * (v < 0 ? g_pcmNeutral : v);
 }
 
 // --- Block-move repair (PLAN_full_pcm_decode.md step 6). The DFS returns the FIRST valid
@@ -223,25 +77,6 @@ struct OrderCost {
         return unmeasured != o.unmeasured ? unmeasured < o.unmeasured : sum < o.sum - 1e-9;
     }
 };
-// PCM window left side of the junction before seq[k]: the (up to) g_pcmLeft chunks before it,
-// oldest first. Returns their count.
-static int leftOf(const vector<int>& seq, const int k, int left[PCM_LEFT_MAX]) {
-    int nl = 0;
-    for (int j = k - g_pcmLeft; j < k; ++j) if (j >= 0) left[nl++] = seq[j];
-    return nl;
-}
-
-static OrderCost summedFlux(const vector<ChunkMeta>& metas, const vector<int>& seq) {
-    OrderCost c;
-    for (size_t k = 1; k < seq.size(); ++k) {
-        int left[PCM_LEFT_MAX];
-        const int nl = leftOf(seq, (int)k, left);
-        const double v = pcmRaw(metas, left, nl, seq[k]);
-        if (v < 0) ++c.unmeasured; else c.sum += v;
-    }
-    return c;
-}
-
 // Two move types, each enumerated only where every new junction is a structural edge:
 //   block move: take seq[i..j] out and reinsert it after position k (3 new junctions);
 //   block swap: exchange two disjoint blocks seq[i1..j1] and seq[i2..j2] (4 new junctions) -
@@ -254,7 +89,7 @@ static OrderCost summedFlux(const vector<ChunkMeta>& metas, const vector<int>& s
 // reservoir-valid order a flux-only move must lower the summed log1p(flux) by at least
 // `opt.minGain`: small gains are noise (a 0.037 move turned a true order into a cheaper wrong
 // one, cbr192_10s 2 KB; the move that fixed test7_short gained 3.4).
-static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
+static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas, JunctionScorer& scorer,
                           const vector<vector<int>>& adjFull, const bool isLayerIII,
                           const int sideInfo, const int maxReservoir, const Config::Repair& opt,
                           double* gap = nullptr) {
@@ -282,8 +117,8 @@ static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
     string nearestWhat;
 
     // A candidate is a list of [from, to] segments of the current `seq`. It is evaluated
-    // incrementally: a junction's flux depends on its (g_pcmLeft + 1)-chunk window, so only the
-    // first g_pcmLeft positions of each segment need a pcmRaw lookup (the rest come from prefix sums of the
+    // incrementally: a junction's flux depends on its (pcmLeft + 1)-chunk window, so only the
+    // first pcmLeft positions of each segment need a pcmRaw lookup (the rest come from prefix sums of the
     // current order), and the reservoir state re-synchronises with the current order's within
     // a frame or two, after which the segment's remaining breaks come from prefix sums too.
     using Seg = pair<int, int>;
@@ -297,8 +132,8 @@ static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
             double v = 0;
             if (k >= 1) {
                 int left[PCM_LEFT_MAX];
-                const int nl = leftOf(seq, k, left);
-                v = pcmRaw(metas, left, nl, seq[k]);
+                const int nl = scorer.leftOf(seq, k, left);
+                v = scorer.pcmRaw(left, nl, seq[k]);
             }
             jv[k] = v;
             PS[k + 1] = PS[k] + ((k >= 1 && v >= 0) ? v : 0);
@@ -340,8 +175,8 @@ static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
     };
     auto evalFlux = [&](const vector<Seg>& segs, OrderCost& c) {
         int g = 0;              // position in the candidate
-        int last[PCM_LEFT_MAX], nl = 0;    // last (up to) g_pcmLeft chunks placed, oldest first
-        const int W = g_pcmLeft;
+        int last[PCM_LEFT_MAX], nl = 0;    // last (up to) pcmLeft chunks placed, oldest first
+        const int W = scorer.pcmLeft();
         for (const Seg& sg : segs) {
             for (int k = sg.first; k <= sg.second; ++k, ++g) {
                 if (g >= 1) {
@@ -356,7 +191,7 @@ static int repairOrdering(vector<int>& seq, const vector<ChunkMeta>& metas,
                         for (int j = std::max(sg.first, sg.second - (W - 1)); j <= sg.second; ++j) last[nl++] = seq[j];
                         goto nextSeg;
                     }
-                    const double v = pcmRaw(metas, last, nl, seq[k]);
+                    const double v = scorer.pcmRaw(last, nl, seq[k]);
                     if (v < 0) ++c.unmeasured; else c.sum += v;
                 }
                 if (nl < W) last[nl++] = seq[k];
@@ -524,10 +359,10 @@ static bool     g_haveDeadline = false;
 
 // Best-of search (A1, RP_BESTOF=1): instead of returning the first complete valid ordering,
 // keep exploring (bounded by the deadline) and remember the lowest-scoring one, score =
-// summed junctionCost over every supernode boundary; branch-and-bound prunes any prefix whose
+// summed gainCost over every supernode boundary; branch-and-bound prunes any prefix whose
 // partial score already meets/exceeds the best complete score.
 //
-// OFF by default: measured worse than first-valid. The summed-junctionCost objective is
+// OFF by default: measured worse than first-valid. The summed-gainCost objective is
 // misaligned with truth - its global minimum is a "smoother than reality" reorder (sample-3s:
 // 25% of chunks in place vs 76-100% for first-valid), because a real stream's true order
 // genuinely contains large global_gain steps at transients/section edges. global_gain is a
@@ -570,7 +405,7 @@ bool dfs(DfsState& state,
          const vector<Supernode>& supernodes,
          const vector<vector<int>>& superAdj,
          const vector<ChunkMeta>& metas,
-         const vector<BoundaryGain>& boundaryGain,
+         JunctionScorer& scorer,
          const bool rankByContinuity,
          const int sideInfo,
          const int maxReservoir,
@@ -613,15 +448,16 @@ bool dfs(DfsState& state,
     // and the reservoir check below is unchanged.
     vector<int> candidates(superAdj[cur].begin(), superAdj[cur].end());
     if (rankByContinuity && candidates.size() > 1) {
-        const bool useSpec = g_specRank && isLayerIII;
-        const bool usePcm  = g_pcmRank;
-        // Last (up to) g_pcmLeft chunks of the path, oldest first - the PCM window's left side.
+        const bool useSpec = scorer.spectralOn();
+        const bool usePcm  = scorer.pcmOn();
+        // Last (up to) pcmLeft chunks of the path, oldest first - the PCM window's left side.
         int left[PCM_LEFT_MAX], nLeft = 0;
         if (usePcm) {
             int tmp[PCM_LEFT_MAX];
-            for (int oi = (int)state.order.size() - 1; oi >= 0 && nLeft < g_pcmLeft; --oi) {
+            const int pcmLeft = scorer.pcmLeft();
+            for (int oi = (int)state.order.size() - 1; oi >= 0 && nLeft < pcmLeft; --oi) {
                 const auto& ch = supernodes[state.order[oi]].chunks;
-                for (int k = (int)ch.size() - 1; k >= 0 && nLeft < g_pcmLeft; --k) tmp[nLeft++] = ch[k];
+                for (int k = (int)ch.size() - 1; k >= 0 && nLeft < pcmLeft; --k) tmp[nLeft++] = ch[k];
             }
             for (int k = 0; k < nLeft; ++k) left[k] = tmp[nLeft - 1 - k];
         }
@@ -630,9 +466,9 @@ bool dfs(DfsState& state,
         keyed.reserve(candidates.size());
         for (int x : candidates) {
             const int head = supernodes[x].chunks.front();
-            double c = junctionCost(boundaryGain, curTailChunk, head);
-            if (useSpec) c += spectralJunctionCost(metas, curPrevChunk, curTailChunk, head);
-            if (usePcm && !state.used[x]) c += pcmJunctionCost(metas, left, nLeft, head);
+            double c = scorer.gainCost(curTailChunk, head);
+            if (useSpec) c += scorer.spectralCost(curPrevChunk, curTailChunk, head);
+            if (usePcm && !state.used[x]) c += scorer.pcmCost(left, nLeft, head);
             if (!g_matchSucc.empty() && g_matchSucc[cur] == x) c -= 1e9;   // global matching hint
             keyed.push_back({c, x});
         }
@@ -645,7 +481,7 @@ bool dfs(DfsState& state,
     for (int si : candidates) {
         if (state.used[si]) continue;
 
-        const int jc = junctionCost(boundaryGain, curTailChunk, supernodes[si].chunks.front());
+        const int jc = scorer.gainCost(curTailChunk, supernodes[si].chunks.front());
         // Branch-and-bound: this prefix can only get more expensive, so if it already ties or
         // beats the best complete ordering there is no point descending. Candidates are sorted
         // ascending by jc when ranking is on, so every later one is >= this: break, not continue.
@@ -688,7 +524,7 @@ bool dfs(DfsState& state,
             g_aborted = true;
 
         const bool hit = !g_aborted &&
-            dfs(state, supernodes, superAdj, metas, boundaryGain, rankByContinuity, sideInfo, maxReservoir, isLayerIII, result);
+            dfs(state, supernodes, superAdj, metas, scorer, rankByContinuity, sideInfo, maxReservoir, isLayerIII, result);
 
         state.order.pop_back();
         state.used[si] = false;
@@ -1194,52 +1030,12 @@ int main(int argc, char* argv[]) {
     if (invalidCount > 0)
         cerr << invalidCount << " invalid chunks — reconstruction may fail\n";
 
-    // PCM window left side: grows past 3 chunks when frames are large vs the chunk size (320 kbps
-    // at 1 KB measured ~0% of junctions otherwise). Sized on the 90th-percentile frame length so
-    // a few large frames in a VBR stream don't widen every window. Shuffle-invariant.
-    {
-        vector<int> lens;
-        for (const auto& m : metas) {   // + the spilling tail: a frame > chunk is never whole in one
-            for (const auto& f : m.frames) lens.push_back(f.length);
-            if (m.valid && m.tailPartialLen > 0) lens.push_back(m.tailPartialLen);
-        }
-        int p90 = 0;
-        if (!lens.empty()) {
-            std::nth_element(lens.begin(), lens.begin() + lens.size() * 9 / 10, lens.end());
-            p90 = lens[lens.size() * 9 / 10];
-        }
-        g_pcmLeft = std::max(3, PcmJunction::leftChunksNeeded(p90, chunkSize));
-        if (cfg.pcmLeft) g_pcmLeft = *cfg.pcmLeft;
-        g_pcmLeft = std::min(std::max(g_pcmLeft, 2), PCM_LEFT_MAX);
-        if (g_pcmLeft != 3)
-            cout << "PCM window: " << g_pcmLeft << " left chunks (p90 frame " << p90 << " B)\n";
-    }
-
-    // Boundary granule loudness for the DFS continuity heuristic (see BoundaryGain / dfs()).
-    // Off only if RP_RANK=0 - kept as a switch for the pinned-seed A/B in
-    // PLAN_sideinfo_mainbits.md Step 1.
+    // Junction scoring for the ranking, the repair and the matching. Constructed here: it
+    // references `chunks` and `metas`, which don't move from now on.
+    JunctionScorer scorer(chunks, metas, profile, chunkSize, cfg);
+    // Continuity ranking of DFS candidates (see dfs()). Off only if RP_RANK=0 - kept as a switch
+    // for the pinned-seed A/B in PLAN_sideinfo_mainbits.md Step 1.
     const bool rankByContinuity = cfg.rank;
-    // Milestone 2 spectral-continuity term in the ranking (see spectralJunctionCost). RP_SPEC=0
-    // disables it for A/B.
-    g_sampleRate = profile.sampleRate;
-    g_specRank = cfg.spec;
-    if (cfg.specScale) g_specScale = *cfg.specScale;
-    vector<BoundaryGain> boundaryGain(chunks.size());
-    if (profile.isLayerIII()) {
-        for (size_t i = 0; i < metas.size(); ++i) {
-            if (!metas[i].valid || metas[i].frames.empty()) continue;
-            const FrameSideInfo f0 = parseFrameSideInfoAt(chunks[i], metas[i].frames.front().offset);
-            const FrameSideInfo f1 = parseFrameSideInfoAt(chunks[i], metas[i].frames.back().offset);
-            if (f0.valid) {
-                boundaryGain[i].ggFirst = f0.gr[0][0].globalGain;
-                boundaryGain[i].bvFirst = f0.gr[0][0].bigValues;
-            }
-            if (f1.valid) {
-                boundaryGain[i].ggLast = f1.gr[f1.numGranules - 1][0].globalGain;
-                boundaryGain[i].bvLast = f1.gr[f1.numGranules - 1][0].bigValues;
-            }
-        }
-    }
 
     // Print full metadata table
     cout << "\nChunk metadata:\n";
@@ -1266,103 +1062,8 @@ int main(int argc, char* argv[]) {
     g_progressEvery = cfg.search.progressEvery;
     g_bestOf        = cfg.search.bestOf; // OFF by default - see g_bestOf
 
-    // Auto-calibrate the spectral term: sample random (prev, a, b) triples, take the median
-    // raw L2 distance, and scale so a median junction contributes SPEC_TARGET (~a gentle
-    // nudge, well below a typical |Δglobal_gain|). Removes the magic constant and adapts per
-    // file. RP_SPEC_SCALE overrides the result.
-    if (g_specRank && isLayerIII && !cfg.specScale) {
-        vector<int> validChunks;
-        for (int i = 0; i < static_cast<int>(chunks.size()); ++i)
-            if (metas[i].valid && !metas[i].frames.empty()) validChunks.push_back(i);
-        if (validChunks.size() >= 8) {
-            const double savedScale = g_specScale;
-            g_specScale = 1.0; // raw L2
-            std::mt19937 rc(12345);
-            std::uniform_int_distribution<int> pc(0, static_cast<int>(validChunks.size()) - 1);
-            vector<double> d;
-            for (int t = 0; t < 3000 && d.size() < 800; ++t) {
-                const int p = validChunks[pc(rc)], a = validChunks[pc(rc)], b = validChunks[pc(rc)];
-                if (a == b || a == p) continue;
-                const double v = spectralJunctionCost(metas, p, a, b);
-                if (v > 0) d.push_back(v);
-            }
-            if (d.size() >= 30) {
-                std::nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
-                const double med = d[d.size() / 2];
-                constexpr double SPEC_TARGET = 3.0;
-                g_specScale = med > 1e-6 ? SPEC_TARGET / med : savedScale;
-            } else {
-                g_specScale = savedScale;
-            }
-            g_specHead.clear();
-            g_specTail.clear();
-            cout << "Spectral term: calibrated scale = " << fixed << setprecision(2) << g_specScale
-                 << " (" << d.size() << " samples)\n";
-        }
-    }
-
-    // Calibrate the PCM term against the existing ranking cost (z-score style): over a sample
-    // of real structural edges a->b with a plausible (g_pcmLeft - 1)-chunk path context (... ->pp
-    // ->p->a, drawn from the graph's in-edges), scale log1p(flux) so its spread is RP_PCM_W times the spread of
-    // junctionCost + spectral. Unmeasurable junctions get the median (neutral) value.
-    g_pcmRank = cfg.pcm;
-    if (g_pcmRank && rankByContinuity) {
-        const double weight = cfg.pcmWeight;
-        const int n = static_cast<int>(chunks.size());
-        vector<vector<int>> preds(n);
-        for (int a = 0; a < n; ++a) for (int b : adj[a]) preds[b].push_back(a);
-        std::mt19937 rc(777);
-        std::uniform_int_distribution<int> pa(0, n - 1);
-        vector<double> pv, ov;
-        for (int t = 0; t < 20000 && pv.size() < 600; ++t) {
-            const int a = pa(rc);
-            if (adj[a].size() < 2 || preds[a].empty()) continue;
-            // backward walk a <- p <- pp <- ... of g_pcmLeft chunks, no repeats
-            int walk[PCM_LEFT_MAX], nw = 0;
-            walk[nw++] = a;
-            bool ok = true;
-            for (int d = 1; d < g_pcmLeft && ok; ++d) {
-                const int x = walk[nw - 1];
-                const int q = preds[x][rc() % preds[x].size()];
-                ok = std::find(walk, walk + nw, q) == walk + nw && (d == g_pcmLeft - 1 || !preds[q].empty());
-                walk[nw++] = q;
-            }
-            if (!ok) continue;
-            const int b = adj[a][rc() % adj[a].size()];
-            if (std::find(walk, walk + nw, b) != walk + nw) continue;
-            const int p = nw > 1 ? walk[1] : -1;
-            int left[PCM_LEFT_MAX];
-            for (int k = 0; k < nw; ++k) left[k] = walk[nw - 1 - k];
-            const double raw = pcmRaw(metas, left, nw, b);
-            if (raw < 0) continue;
-            double o = junctionCost(boundaryGain, a, b);
-            if (g_specRank && isLayerIII) o += spectralJunctionCost(metas, p, a, b);
-            pv.push_back(raw);
-            ov.push_back(o);
-        }
-        auto sdev = [](const vector<double>& v) {
-            double m = 0, s = 0;
-            for (double x : v) m += x;
-            m /= std::max<size_t>(1, v.size());
-            for (double x : v) s += (x - m) * (x - m);
-            return std::sqrt(s / std::max<size_t>(1, v.size()));
-        };
-        if (pv.size() >= 30) {
-            const double sp = sdev(pv), so = sdev(ov);
-            g_pcmScale = sp > 1e-9 ? weight * std::max(so, 1.0) / sp : 0.0;
-            vector<double> tmp = pv;
-            std::nth_element(tmp.begin(), tmp.begin() + tmp.size() / 2, tmp.end());
-            g_pcmNeutral = tmp[tmp.size() / 2];
-        } else {
-            g_pcmScale = weight * 10.0;   // too few samples: just make it dominant-ish
-            g_pcmNeutral = 0.7;
-        }
-        g_pcmMemo.clear();
-        cout << "PCM term: weight " << weight << ", scale = " << fixed << setprecision(2) << g_pcmScale
-             << ", neutral = " << g_pcmNeutral << " (" << pv.size() << " calibration edges)\n";
-    } else {
-        g_pcmRank = false;
-    }
+    scorer.calibrateSpectral();
+    scorer.calibratePcm(adj);
 
     // Confident-edge locking (PLAN_full_pcm_decode.md step 5): force edges whose full-PCM
     // junction flux beats every competitor - on both the successor and predecessor side - by
@@ -1409,8 +1110,8 @@ int main(int argc, char* argv[]) {
 
     const auto adjBase = adj;
     // Lock/matching windows are [p, a, b], one chunk less on the left than the DFS's; past 3
-    // they get g_pcmLeft - 3 warm-up chunks before p (EdgeLock::buildWarmChains).
-    const EdgeLock::WarmChains warm = EdgeLock::buildWarmChains(adjBase, g_pcmLeft - 3);
+    // they get pcmLeft - 3 warm-up chunks before p (EdgeLock::buildWarmChains).
+    const EdgeLock::WarmChains warm = EdgeLock::buildWarmChains(adjBase, scorer.pcmLeft() - 3);
     const EdgeLock::WarmChains* warmPtr = warm.empty() ? nullptr : &warm;
     vector<vector<int>> superAdj;
     vector<Supernode> supernodes;
@@ -1593,8 +1294,8 @@ int main(int argc, char* argv[]) {
             cout << "Starting search over " << supernodes.size() << " supernodes"
                  << " (continuity ranking " << (rankByContinuity ? "ON" : "OFF")
                  << ", " << (g_bestOf ? "best-of" : "first-valid")
-                 << (g_specRank && isLayerIII ? ", +spectral" : "")
-                 << (g_pcmRank ? ", +pcm" : "") << ")\n";
+                 << (scorer.spectralOn() ? ", +spectral" : "")
+                 << (scorer.pcmOn() ? ", +pcm" : "") << ")\n";
 
             g_bestScore = LLONG_MAX;
             g_bestOrder.clear();
@@ -1611,7 +1312,7 @@ int main(int argc, char* argv[]) {
                 g_dfsStart = chrono::steady_clock::now();
 
                 cout << "  beam=" << (g_beamK ? std::to_string(g_beamK) : string("unlimited")) << " ... " << flush;
-                const bool hit = dfs(state, supernodes, superAdj, metas, boundaryGain, rankByContinuity,
+                const bool hit = dfs(state, supernodes, superAdj, metas, scorer, rankByContinuity,
                                      sideInfo, maxReservoir, isLayerIII, res);
 
                 if (g_bestOf) {
@@ -1700,7 +1401,7 @@ int main(int argc, char* argv[]) {
                 if (cfg.repair.mode != Switch::Off) {
                     const auto r0 = chrono::steady_clock::now();
                     double gap = std::numeric_limits<double>::quiet_NaN();
-                    const int mv = repairOrdering(seqm, metas, adjFull, isLayerIII, sideInfo, maxReservoir, cfg.repair, &gap);
+                    const int mv = repairOrdering(seqm, metas, scorer, adjFull, isLayerIII, sideInfo, maxReservoir, cfg.repair, &gap);
                     const bool ok2 = reservoirValid(metas, chunks, seqm, sideInfo, maxReservoir);
                     int tj2 = 0;
                     for (size_t k = 1; k < seqm.size(); ++k) if (origIndexOf[seqm[k]] == origIndexOf[seqm[k - 1]] + 1) ++tj2;
@@ -1722,7 +1423,7 @@ int main(int argc, char* argv[]) {
             return found;
         };
         int matchMode = cfg.match.mode;
-        if (!g_pcmRank) matchMode = 0;
+        if (!scorer.pcmOn()) matchMode = 0;
         if (matchMode == 2 && tryMatch()) { found = true; continue; }
         search();
         if (!found && matchMode == 1 && tryMatch()) found = true;
@@ -1749,11 +1450,11 @@ int main(int argc, char* argv[]) {
         const bool firstOfSchedule = lockTaus.size() > 1 && foundAttempt == 0 && !foundByMatch && cfg.repair.minGain <= 0;
         if (foundByMatch && !repairForced)
             cout << "Block-move repair: skipped (the matching's ordering was already repaired)\n";
-        else if (g_pcmRank && !repairOff && firstOfSchedule && !repairForced)
+        else if (scorer.pcmOn() && !repairOff && firstOfSchedule && !repairForced)
             cout << "Block-move repair: skipped (found by the strictest lock attempt; RP_REPAIR=1 forces)\n";
-        else if (g_pcmRank && !repairOff) {
+        else if (scorer.pcmOn() && !repairOff) {
             const auto t0 = chrono::steady_clock::now();
-            const int moves = repairOrdering(seq, metas, adjFull, isLayerIII, sideInfo, maxReservoir, cfg.repair,
+            const int moves = repairOrdering(seq, metas, scorer, adjFull, isLayerIII, sideInfo, maxReservoir, cfg.repair,
                                              &resultGap);
             resultRepairMoves += moves;
             cout << "Block-move repair: " << moves << " move(s), " << fixed << setprecision(2)
@@ -1775,8 +1476,8 @@ int main(int argc, char* argv[]) {
             for (size_t k = 0; k + 1 < seq.size(); ++k) {
                 if (!metas[seq[k]].gapAfter) continue;
                 SlotFill::Slot s;
-                size_t from = k;   // left side: back to g_pcmLeft chunks, not across another slot
-                while (from > 0 && k - from + 1 < static_cast<size_t>(g_pcmLeft) && !metas[seq[from - 1]].gapAfter) --from;
+                size_t from = k;   // left side: back to pcmLeft chunks, not across another slot
+                while (from > 0 && k - from + 1 < static_cast<size_t>(scorer.pcmLeft()) && !metas[seq[from - 1]].gapAfter) --from;
                 s.left.assign(seq.begin() + from, seq.begin() + k + 1);
                 s.b = seq[k + 1];
                 if (k + 2 < seq.size() && !metas[s.b].gapAfter) s.after = seq[k + 2];
@@ -1886,22 +1587,13 @@ int main(int argc, char* argv[]) {
         if (cfg.scoreOrder && !exactMatch) {
             vector<int> found = seq, truth(chunks.size());
             for (size_t ci = 0; ci < chunks.size(); ++ci) truth[origIndexOf[ci]] = static_cast<int>(ci);
-            auto summed = [&](const vector<int>& ord, int& unmeasured) {
-                double sum = 0; unmeasured = 0;
-                for (size_t k = 1; k < ord.size(); ++k) {
-                    int left[PCM_LEFT_MAX], nl = 0;
-                    for (int j = (int)k - g_pcmLeft; j < (int)k; ++j) if (j >= 0) left[nl++] = ord[j];
-                    const double v = pcmRaw(metas, left, nl, ord[k]);
-                    if (v < 0) ++unmeasured; else sum += v;
-                }
-                return sum;
-            };
             for (size_t k = 1; k < found.size(); ++k)
                 if (origIndexOf[found[k]] != origIndexOf[found[k - 1]] + 1)
                     cout << "  wrong junction at position " << k << ": orig " << origIndexOf[found[k - 1]]
                          << " -> " << origIndexOf[found[k]] << "\n";
-            int uf = 0, ut = 0;
-            const double sf = summed(found, uf), st = summed(truth, ut);
+            const FluxSum fs = scorer.summedFlux(found), ts = scorer.summedFlux(truth);
+            const int uf = fs.unmeasured, ut = ts.unmeasured;
+            const double sf = fs.sum, st = ts.sum;
             cout << "Summed log1p(flux): found " << fixed << setprecision(3) << sf << " (" << uf
                  << " unmeasured), source " << st << " (" << ut << " unmeasured) -> "
                  << (st < sf ? "source is cheaper" : "found is cheaper or equal") << "\n";

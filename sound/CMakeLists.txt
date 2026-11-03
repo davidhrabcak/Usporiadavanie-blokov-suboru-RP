@@ -8,7 +8,8 @@ find_package(Threads REQUIRED)
 #   src/mp3      MPEG frame parsing, per-chunk metadata, Layer III side info / main data, bit reservoir
 #   src/graph    which chunk can follow which (adjacency, AC-3, gap slots for headerless chunks),
 #                staged into the search graph (chunk_graph), forced-chain collapse (supernodes)
-#   src/scoring  full-PCM junction scoring (vendored minimp3) and confident-edge locking
+#   src/scoring  junction costs for the ranking (junction_scorer: side info, spectrum, full-PCM
+#                flux via the vendored minimp3) and confident-edge locking
 add_library(rpcore STATIC
         src/config.cpp
         src/config.hpp
@@ -37,7 +38,9 @@ add_library(rpcore STATIC
         src/scoring/pcm_junction.hpp
         src/scoring/pcm_decoder_impl.cpp
         src/scoring/edge_lock.cpp
-        src/scoring/edge_lock.hpp)
+        src/scoring/edge_lock.hpp
+        src/scoring/junction_scorer.cpp
+        src/scoring/junction_scorer.hpp)
 target_include_directories(rpcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src
                                   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})   # third_party/minimp3.h
 target_link_libraries(rpcore PUBLIC Threads::Threads)
