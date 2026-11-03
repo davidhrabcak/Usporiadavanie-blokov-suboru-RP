@@ -1,5 +1,6 @@
 // buildAdjacency (indexed) and canFollow (one pair at a time) implement the same two cases;
-// this checks they agree on every ordered pair of chunks. Usage: graph_check FILE.mp3...
+// this checks they agree on every ordered pair of chunks, on the structural graph rp builds
+// (buildStructuralGraph; no headerless pool here, so no gap edges). Usage: graph_check FILE.mp3...
 // (RP_CHUNK_SIZE as in rp, default 1024). Exit 1 on any disagreement.
 #include <cstdio>
 #include <cstdlib>
@@ -8,6 +9,7 @@
 #include "mp3/frame_scanner.hpp"
 #include "mp3/chunk_meta.hpp"
 #include "graph/adjacency.hpp"
+#include "graph/chunk_graph.hpp"
 
 using namespace std;
 
@@ -27,7 +29,7 @@ int main(int argc, char** argv) {
         vector<ChunkMeta> metas;
         for (int i = 0; i < n; ++i)
             metas.push_back(computeChunkMeta(i, chunks[i], profile, static_cast<long>(chunks[i].size()) < chunkSize));
-        const vector<vector<int>> adj = buildAdjacency(metas);
+        const vector<vector<int>> adj = buildStructuralGraph(metas, {}, chunkSize).adj;   // as rp, no pool
         long onlyGraph = 0, onlyPair = 0, arcs = 0;
         for (int i = 0; i < n; ++i) {
             const set<int> out(adj[i].begin(), adj[i].end());

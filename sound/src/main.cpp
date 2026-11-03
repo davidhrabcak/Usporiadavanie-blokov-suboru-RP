@@ -19,6 +19,8 @@
 #include "mp3/frame_scanner.hpp"
 #include "mp3/chunk_meta.hpp"
 #include "graph/adjacency.hpp"
+#include "graph/chunk_graph.hpp"
+#include "graph/supernodes.hpp"
 #include "mp3/main_data_decoder.hpp"
 #include "scoring/pcm_junction.hpp"
 #include "scoring/edge_lock.hpp"
@@ -32,103 +34,6 @@ extern char** environ;
 using namespace std;
 
 vector<vector<uint8_t>> chunks; // moved for debugging
-
-// --------------------------------------------------------------------------
-// Greedy forced-chain collapse (Phase 3)
-// --------------------------------------------------------------------------
-
-/** A supernode is a maximal forced chain: every interior node has out-degree 1
- * and its successor has in-degree 1.
- */
-struct Supernode {
-    vector<int> chunks;   // chunk indices in order
-};
-
-/**
- * Build supernodes and the adjacency list over them.
- * @param adj Adjacency list of the input graph.
- * @param indeg List of degrees of only incoming edges for each vertex.
- * @param outdeg List of degrees of only outgoing edges for each vertex.
- * @param n Number of vertices in the graph.
- * @param start The index of the first chunk (pinned, never shuffled).
- * @param superAdj Output adjacency list.
- * @return List of created supernodes.
- */
-vector<Supernode> buildSupernodes(
-        const vector<vector<int>>& adj,
-        const vector<int>& indeg,
-        const vector<int>& outdeg,
-        const int n,
-        const int start,
-        vector<vector<int>>& superAdj) {
-
-    vector<int> chunkToSuper(n, -1);
-    vector<Supernode> supernodes;
-
-    // Find chain heads: nodes that start a forced chain.
-    // A chain head is a node where we cannot extend a forced chain backwards,
-    // i.e. indeg != 1 or its predecessor has outdeg != 1.
-    // We detect them by: node is `start`, or indeg[node] != 1, or the unique
-    // predecessor has outdeg != 1.
-    vector<bool> isHead(n, false);
-    isHead[start] = true;
-    for (int i = 0; i < n; ++i) {
-        if (indeg[i] == 0) { isHead[i] = true; continue; }
-        if (indeg[i] > 1)  { isHead[i] = true; continue; }
-        // indeg[i] == 1: find predecessor
-        bool predOk = false;
-        for (int p = 0; p < n; ++p) {
-            for (int s : adj[p]) {
-                if (s == i && outdeg[p] == 1) { predOk = true; break; }
-            }
-            if (predOk) break;
-        }
-        if (!predOk) isHead[i] = true;
-    }
-
-    // Grow a chain from each head
-    for (int i = 0; i < n; ++i) {
-        if (!isHead[i]) continue;
-        Supernode sn;
-        int cur = i;
-        while (true) {
-            if (chunkToSuper[cur] != -1) break; // already part of another supernode
-            chunkToSuper[cur] = static_cast<int>(supernodes.size());
-            sn.chunks.push_back(cur);
-            if (outdeg[cur] == 1) {
-                const int next = adj[cur][0];
-                if (indeg[next] == 1) {
-                    cur = next;
-                    continue;
-                }
-            }
-            break;
-        }
-        supernodes.push_back(sn);
-    }
-
-    // Any chunk not yet assigned (cycle-only nodes, shouldn't happen in practice)
-    for (int i = 0; i < n; ++i) {
-        if (chunkToSuper[i] == -1) {
-            chunkToSuper[i] = static_cast<int>(supernodes.size());
-            supernodes.push_back({{i}});
-        }
-    }
-
-    const int sn = static_cast<int>(supernodes.size());
-    superAdj.assign(sn, {});
-
-    for (int si = 0; si < sn; ++si) {
-        const int tail = supernodes[si].chunks.back();
-        for (const int nb : adj[tail]) {
-            int sj = chunkToSuper[nb];
-            if (sj != si)
-                superAdj[si].push_back(sj);
-        }
-    }
-
-    return supernodes;
-}
 
 // --------------------------------------------------------------------------
 // DFS over supernodes (Phase 5)
@@ -1076,8 +981,7 @@ int main(int argc, char* argv[]) {
              << " kbps - frame-header bitrate filter enabled\n";
 
     // --- Pre-shuffle sanity check ---
-    int preShuffleBreaks = -1; // -1 = not computed; >=0 = broken consecutive-pair count on true order
-    int preShuffleResvBreaks = -1; // same, for the reservoir model on the true order
+    TrueOrderCheck truth;   // gates AC-3, the reservoir arc filter and edge locking
     // Frames longer than the chunk (PLAN_headerless_chunks.md): the headerless chunks ("pool")
     // are taken out before the shuffle. The search orders the rest; a demander's edge a => b
     // stands for a, slot, b, and the pool fills the slots at output. RP_GAP=0 disables.
@@ -1129,11 +1033,9 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            auto origAdj = buildAdjacency(origMetas);
-            GapSlots gaps0;
+            const StructuralGraph origGraph = buildStructuralGraph(origMetas, pool, chunkSize);
+            const GapSlots& gaps0 = origGraph.gaps;
             if (!pool.empty()) {
-                gaps0 = findGapSlots(origMetas, origAdj, pool, chunkSize);
-                for (size_t i = 0; i < origMetas.size(); ++i) origMetas[i].gapAfter = !gaps0.offsets[i].empty();
                 cout << "Headerless chunks (frames > chunk): " << pool.size() << " taken out; demanders "
                      << gaps0.demanders() << " (" << gaps0.case1 << " whole header, " << gaps0.case2
                      << " split header" << (gaps0.ambiguous ? ", " + std::to_string(gaps0.ambiguous) + " ambiguous left out" : string())
@@ -1155,7 +1057,7 @@ int main(int argc, char* argv[]) {
                     ++broken;
                 }
             }
-            preShuffleBreaks = broken;
+            truth.breaks = broken;
             RunReport::set("pre_breaks", broken);
             if (broken == 0)
                 cout << "Pre-shuffle check PASSED: all " << chunks.size()
@@ -1174,7 +1076,7 @@ int main(int argc, char* argv[]) {
                 const int reservoirBreaks = ::reservoirBreaks(origMetas, chunks, trueOrder,
                     sideInfoSize(prof0.versionID, prof0.isMono()), maxReservoirBytes(prof0.versionID), &breakAt);
                 for (int i : breakAt) cout << "  RESERVOIR BREAK at chunk " << i << "\n";
-                preShuffleResvBreaks = reservoirBreaks;
+                truth.reservoirBreaks = reservoirBreaks;
                 RunReport::set("resv_breaks", reservoirBreaks);
                 if (reservoirBreaks == 0)
                     cout << "Reservoir check PASSED on true order: all "
@@ -1350,77 +1252,9 @@ int main(int argc, char* argv[]) {
              << (metas[i].valid ? "" : "  INVALID") << "\n";
     }
 
-    // Build adjacency graph
-    if (splitTailsPre > 0) {
-        const SplitTails st = promoteSplitTails(metas, chunks, chunkSize, profile, chunks[0].data());
-        const int n = st.promoted[1] + st.promoted[2] + st.promoted[3];
-        if (n != splitTailsPre)
-            cout << "WARNING: split tails promoted after the shuffle " << n << " != " << splitTailsPre << " before\n";
-    }
-    auto adj    = buildAdjacency(metas);
-    GapSlots gaps;   // demanders and their gap edges a => b (PLAN_headerless_chunks.md)
-    if (!pool.empty()) {
-        gaps = findGapSlots(metas, adj, pool, chunkSize);
-        for (size_t i = 0; i < metas.size(); ++i) metas[i].gapAfter = !gaps.offsets[i].empty();
-        addGapEdges(adj, metas, gaps);
-    }
-
-    // Reservoir arc pre-filter: drop arcs a->b that fail the bit-reservoir check even when `a`
-    // is entered with a FULL reservoir. The check is monotone in the entry level (the only
-    // level-dependent test is mainDataBegin > level/8; a frame's output level doesn't depend on
-    // it), so such an arc fails in every context - the DFS would reject it anyway, but the
-    // matching and the AC-3 / supernode collapse still counted it. Gated like AC-3: only when the
-    // reservoir model passed the true order (a model that rejects real arcs would let AC-3
-    // force wrong ones). RP_RESV_FILTER=0 off, =1 forces past the gate.
-    if (profile.isLayerIII()) {
-        const bool force = cfg.resvFilter == Switch::On, off = cfg.resvFilter == Switch::Off;
-        if (!off && (preShuffleResvBreaks == 0 || force)) {
-            const int si = sideInfoSize(profile.versionID, profile.isMono());
-            const int mr = maxReservoirBytes(profile.versionID);
-            long removed = 0, removedTrue = 0;
-            for (size_t a = 0; a < adj.size(); ++a) {
-                int base = mr * 8;
-                if (!advanceReservoirChunk(base, nullptr, metas[a], chunks[a], si, mr)) continue; // a itself: unknown, keep
-                auto& out = adj[a];
-                out.erase(std::remove_if(out.begin(), out.end(), [&](int b) {
-                    int level = base;
-                    if (advanceReservoirChunk(level, &metas[a], metas[b], chunks[b], si, mr)) return false;
-                    ++removed;
-                    if (origIndexOf[b] == origIndexOf[a] + 1) ++removedTrue;
-                    return true;
-                }), out.end());
-            }
-            cout << "Reservoir arc filter: removed " << removed << " arcs [vs source: " << removedTrue
-                 << " true arcs removed]\n";
-        } else if (!off) {
-            cout << "Reservoir arc filter: skipped (" << (preShuffleResvBreaks < 0 ? "no true-order diagnostic"
-                 : "reservoir model rejects the true order") << "; RP_RESV_FILTER=1 forces)\n";
-        }
-    }
-    const auto adjFull = adj;   // before AC-3 / locking - the repair pass may undo either
-
-    // Arc-consistency prune (A4) - shrinks the branch-point count before the search. It is
-    // only sound when `canFollow` has no false negatives among the true consecutive pairs
-    // (otherwise it can force a wrong edge where a real predecessor is missing from the
-    // graph). Gate on the pre-shuffle diagnostic: skip when it found breaks. RP_AC3=0 forces
-    // off, RP_AC3=1 forces on regardless of the gate.
-    {
-        const bool force = cfg.ac3 == Switch::On;
-        const bool off   = cfg.ac3 == Switch::Off;
-        const bool safe  = preShuffleBreaks == 0;
-        if (off) {
-            // disabled
-        } else if (!safe && !force) {
-            cout << "Arc consistency: skipped (" << (preShuffleBreaks < 0 ? "no pre-shuffle diagnostic"
-                 : "pre-shuffle found breaks - canFollow is lossy on this file") << "; RP_AC3=1 to force)\n";
-        } else {
-            const long acRemoved = propagateArcConsistency(adj, static_cast<int>(chunks.size()), 0);
-            if (acRemoved < 0)
-                cout << "Arc consistency: contradiction (canFollow is missing a real edge) - graph left as built\n";
-            else
-                cout << "Arc consistency: removed " << acRemoved << " edges\n";
-        }
-    }
+    ChunkGraph graph = buildGraph(metas, chunks, pool, profile, chunkSize, splitTailsPre, truth, cfg, origIndexOf);
+    auto& adj = graph.adj;
+    const auto& adjFull = graph.adjFull;
 
     // Reservoir parameters for this stream, computed once up front and threaded through
     // every DFS call rather than recomputed per edge.
@@ -1541,7 +1375,7 @@ int main(int argc, char* argv[]) {
     // Same soundness gate as AC-3: with a real edge missing from the graph (pre-shuffle
     // breaks) the predecessor-side margin can be won unopposed by a wrong edge.
     bool lockOn = cfg.lock.mode != Switch::Off && profile.isLayerIII() &&
-                  (preShuffleBreaks == 0 || cfg.lock.mode == Switch::On);
+                  (truth.breaks == 0 || cfg.lock.mode == Switch::On);
     if (!lockOn && cfg.lock.mode != Switch::Off && profile.isLayerIII())
         cout << "Edge locking: skipped (pre-shuffle found breaks; RP_LOCK=1 forces)\n";
     if (lockOn) {
@@ -1566,7 +1400,7 @@ int main(int argc, char* argv[]) {
     vector<double> lockTaus = cfg.lock.taus;
     if (!lockOn) lockTaus = {0.0};  // single attempt, no locking
     const int lockRounds = cfg.lock.rounds;  // re-lock on the pruned graph until nothing new locks
-    const bool acOk = cfg.ac3 != Switch::Off && (preShuffleBreaks == 0 || cfg.ac3 == Switch::On);
+    const bool acOk = cfg.ac3 != Switch::Off && (truth.breaks == 0 || cfg.ac3 == Switch::On);
 
     // Window fluxes are shared across lock rounds and tau attempts (a window's flux depends only
     // on its three chunks), and scored on RP_THREADS threads (default: all cores).
@@ -1594,8 +1428,7 @@ int main(int argc, char* argv[]) {
     vector<int> bestPartial;   // chunk indices
     size_t bestPartialSupers = 0, bestPartialOf = 0;
     auto keepDeepest = [&]() {
-        vector<int> p;
-        for (int si : g_deepestOrder) for (int ci : supernodes[si].chunks) p.push_back(ci);
+        vector<int> p = chunksOf(supernodes, g_deepestOrder);
         if (p.size() > bestPartial.size()) {
             bestPartial = std::move(p);
             bestPartialSupers = g_deepestOrder.size();
@@ -1814,8 +1647,7 @@ int main(int argc, char* argv[]) {
             if (isLayerIII && matchIters > 0 && !mr.order.empty()) {
                 std::unordered_set<uint64_t> forb;
                 auto breaksOf = [&](const MatchResult& r, vector<int>* where) {
-                    vector<int> sq;
-                    for (int si : r.order) for (int ci : supernodes[si].chunks) sq.push_back(ci);
+                    const vector<int> sq = chunksOf(supernodes, r.order);
                     return reservoirBreaks(metas, chunks, sq, sideInfo, maxReservoir, where);
                 };
                 const long dec0 = mr.decodes;   // later rounds hit the memo
@@ -1856,8 +1688,7 @@ int main(int argc, char* argv[]) {
             RunReport::set("matching", mr.order.empty() ? mr.failure : string("ok"));
             if (mr.order.empty()) { cout << " - " << mr.failure << "\n"; }
             else {
-                vector<int> seqm;
-                for (int si : mr.order) for (int ci : supernodes[si].chunks) seqm.push_back(ci);
+                vector<int> seqm = chunksOf(supernodes, mr.order);
                 int tj = 0;
                 for (size_t k = 1; k < seqm.size(); ++k) if (origIndexOf[seqm[k]] == origIndexOf[seqm[k - 1]] + 1) ++tj;
                 const bool ok = !isLayerIII || reservoirValid(metas, chunks, seqm, sideInfo, maxReservoir);
@@ -1904,7 +1735,7 @@ int main(int argc, char* argv[]) {
 
         vector<int> seq; // reconstructed chunk order
         if (foundByMatch && !matchSeq.empty()) seq = matchSeq;
-        else for (int si : result) for (int ci : supernodes[si].chunks) seq.push_back(ci);
+        else seq = chunksOf(supernodes, result);
 
         // Repair policy. Before the minimum-gain rule, an ordering found by the FIRST (strictest)
         // lock attempt was left alone: on one first-attempt success (cbr32_10s, 1 KB) the

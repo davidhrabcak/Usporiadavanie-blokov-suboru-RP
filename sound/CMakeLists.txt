@@ -6,7 +6,8 @@ find_package(Threads REQUIRED)
 
 # Everything but main(): rp and the dev tools link the same code.
 #   src/mp3      MPEG frame parsing, per-chunk metadata, Layer III side info / main data, bit reservoir
-#   src/graph    which chunk can follow which (adjacency, AC-3, gap slots for headerless chunks)
+#   src/graph    which chunk can follow which (adjacency, AC-3, gap slots for headerless chunks),
+#                staged into the search graph (chunk_graph), forced-chain collapse (supernodes)
 #   src/scoring  full-PCM junction scoring (vendored minimp3) and confident-edge locking
 add_library(rpcore STATIC
         src/config.cpp
@@ -28,6 +29,10 @@ add_library(rpcore STATIC
         src/graph/adjacency.hpp
         src/graph/slot_fill.cpp
         src/graph/slot_fill.hpp
+        src/graph/supernodes.cpp
+        src/graph/supernodes.hpp
+        src/graph/chunk_graph.cpp
+        src/graph/chunk_graph.hpp
         src/scoring/pcm_junction.cpp
         src/scoring/pcm_junction.hpp
         src/scoring/pcm_decoder_impl.cpp
