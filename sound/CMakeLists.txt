@@ -26,6 +26,8 @@ add_executable(rp
         slot_fill.hpp
         config.cpp
         config.hpp
+        reservoir.cpp
+        reservoir.hpp
         main.cpp)
 
 add_executable(evaluate_order

@@ -142,8 +142,6 @@ bool readHeaderAt(const std::vector<uint8_t>& buf, int off, const StreamProfile&
 
 // Layer III side-info block size in bytes: MPEG1 32 (stereo) / 17 (mono), MPEG2/2.5 17 (stereo) / 9 (mono).
 int sideInfoSize(int versionID, bool isMono);
-// Bit-reservoir capacity in bytes (the largest main_data_begin): 511 MPEG1, 255 MPEG2/2.5.
-inline int maxReservoirBytes(int versionID) { return versionID == 0b11 ? 511 : 255; }
 
 // `shortChunk`: this chunk is shorter than the others, i.e. the file's last chunk. Only then can
 // a chunk without any frame header be accepted (as a finalFragment).

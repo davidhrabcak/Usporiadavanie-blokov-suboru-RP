@@ -25,119 +25,13 @@
 #include "run_report.hpp"
 #include "slot_fill.hpp"
 #include "config.hpp"
+#include "reservoir.hpp"
 
 extern char** environ;
 
 using namespace std;
 
 vector<vector<uint8_t>> chunks; // moved for debugging
-
-// Bit-reservoir validator (Layer III only)
-
-/**
- * Advances the Layer III bit-reservoir level through a single frame and checks that
- * the frame's mainDataBegin is actually satisfiable by what has accumulated so far.
- *
- *
- * level_after = clamp(f.mainDataBegin*8 + producedBits - f.part23Bits, 0, maxReservoir*8).
- * Cross-checked against minimp3's L3_restore_reservoir/L3_save_reservoir: the "history"
- * contribution to level_after is `f.mainDataBegin`, NOT `level_before` - a frame only ever
- * reaches back exactly as far as its own mainDataBegin declares, so any reservoir surplus
- * beyond that is discarded, not carried forward. The separate check `f.mainDataBegin >
- * level_before` still applies: mainDataBegin(N) can never exceed what was genuinely
- * available after frame N-1.
- *
- * part2_3_length/producedBits are kept in BITS throughout, only compared against
- * mainDataBegin (byte-granular) at the byte level - rounding part2_3_length up to bytes
- * per frame would add ~7 bits of phantom consumption per frame, compounding into false
- * rejections over a whole file.
- *
- * @param level  Current reservoir fill level in bits; updated in place.
- * @param f      The frame to advance through.
- * @param sideInfo Side-information size in bytes for this stream (see sideInfoSize).
- * @param maxReservoir Reservoir capacity in bytes (511 for MPEG1, 255 for MPEG2/2.5).
- * @return False if `f.mainDataBegin` reaches further back than `level` allows, or if this
- *         frame's actual consumption (`part23Bits`) exceeds what became available.
- */
-static bool advanceReservoirFrame(int& level, const FrameSlice& f, const int sideInfo, const int maxReservoir) {
-    if (f.mainDataBegin > level / 8) return false; // mainDataBegin is byte-granular
-
-    int producedBits = (f.length - 4 - f.crcBytes - sideInfo) * 8;
-    if (producedBits < 0) producedBits = 0;
-
-    int newLevel = f.mainDataBegin * 8 + producedBits - f.part23Bits;
-    if (newLevel < 0) return false;
-    const int maxBits = maxReservoir * 8;
-    if (newLevel > maxBits) newLevel = maxBits;
-    level = newLevel;
-    return true;
-}
-
-/**
- * Advances the reservoir through every frame of a single chunk, in order. Used to
- * incrementally validate/extend the reservoir as each supernode is placed during the DFS,
- * rather than only checking the fully-assembled order at the end (see dfs()).
- *
- * `meta.frames` only holds *complete* frames (fully contained in this chunk) - a frame that
- * straddles a chunk boundary (routine, since chunk_size=1024 rarely divides evenly into
- * frame lengths of ~100-800 bytes) contributes no FrameSlice to *either* chunk on its own.
- *
- * When `prevMeta` is a Case-1 split (`prevMeta->tailPartialLen > 0`), the split frame's own
- * side info is decoded exactly from `prevMeta`'s tail bytes + `metaBytes`'s head
- * (`decodeSplitFrameSideInfo`, chunk_meta.cpp) and validated/consumed via `advanceReservoirFrame`
- * like any other frame - possible here because the DFS already knows both chunks of the
- * candidate edge being tried. If the exact decode isn't possible (not enough bytes to complete
- * the side-info block), this falls back to crediting `meta.headOffset` raw payload bytes without
- * validating the split frame's own mainDataBegin/part2_3_length.
- *
- * @param level     Current reservoir fill level in BITS; updated in place, even on failure
- *                  (the caller must restore it from a saved copy rather than trust it after false).
- * @param prevMeta  Metadata for the chunk immediately preceding `meta` in the candidate order,
- *                  or nullptr if `meta` is the first chunk placed (chunk 0).
- * @param meta      Metadata for the chunk being appended to the candidate order.
- * @param metaBytes Raw bytes of `meta`'s own chunk (needed to decode `prevMeta`'s split-frame
- *                  side info, which may extend past `prevMeta`'s own bytes).
- * @param sideInfo  Side-information size in bytes for this stream.
- * @param maxReservoir Reservoir capacity in bytes.
- * @return False as soon as any complete frame (or the exactly-decoded split frame) is invalid;
- *         true otherwise.
- */
-static bool advanceReservoirChunk(int& level,
-                                   const ChunkMeta* prevMeta,
-                                   const ChunkMeta& meta,
-                                   const vector<uint8_t>& metaBytes,
-                                   const int sideInfo,
-                                   const int maxReservoir) {
-    const int maxBits = maxReservoir * 8;
-    bool creditedExactly = false;
-
-    if (prevMeta != nullptr && prevMeta->gapAfter) {
-        // A headerless chunk (not placed yet) sits between: the straddling frame's side info
-        // is in it. A full reservoir is sound - the check is monotone in the entry level
-        // (PLAN_headerless_chunks.md).
-        level = maxBits;
-        creditedExactly = true;
-    } else if (prevMeta != nullptr && prevMeta->tailPartialLen > 0) {
-        const SideInfoResult side = decodeSplitFrameSideInfo(*prevMeta, metaBytes);
-        if (side.valid) {
-            FrameSlice splitFrame{-1, prevMeta->tailPartialLen, 0, side.mainDataBegin, side.part23Bits};
-            splitFrame.crcBytes = (prevMeta->tailBytes[1] & 1) ? 0 : 2;
-            if (!advanceReservoirFrame(level, splitFrame, sideInfo, maxReservoir)) return false;
-            creditedExactly = true;
-        }
-    }
-
-    if (!creditedExactly && meta.headOffset > 0) {
-        level += meta.headOffset * 8;
-        if (level > maxBits) level = maxBits;
-    }
-
-    for (const FrameSlice& f : meta.frames) {
-        if (!advanceReservoirFrame(level, f, sideInfo, maxReservoir)) return false;
-    }
-
-    return true;
-}
 
 // --------------------------------------------------------------------------
 // Greedy forced-chain collapse (Phase 3)
@@ -441,35 +335,6 @@ static OrderCost summedFlux(const vector<ChunkMeta>& metas, const vector<int>& s
         if (v < 0) ++c.unmeasured; else c.sum += v;
     }
     return c;
-}
-
-static bool reservoirValid(const vector<ChunkMeta>& metas, const vector<int>& seq,
-                           const int sideInfo, const int maxReservoir) {
-    int level = 0;
-    const ChunkMeta* prev = nullptr;
-    for (int ci : seq) {
-        if (!advanceReservoirChunk(level, prev, metas[ci], chunks[ci], sideInfo, maxReservoir)) return false;
-        prev = &metas[ci];
-    }
-    return true;
-}
-
-// Number of chunks at which the reservoir check fails, continuing after each failure with a
-// full reservoir (so later failures are counted independently). `where` gets their positions.
-static int reservoirBreaks(const vector<ChunkMeta>& metas, const vector<int>& seq,
-                           const int sideInfo, const int maxReservoir, vector<int>* where = nullptr) {
-    int level = 0, breaks = 0;
-    const ChunkMeta* prev = nullptr;
-    for (size_t k = 0; k < seq.size(); ++k) {
-        const int ci = seq[k];
-        if (!advanceReservoirChunk(level, prev, metas[ci], chunks[ci], sideInfo, maxReservoir)) {
-            ++breaks;
-            if (where) where->push_back((int)k);
-            level = maxReservoir * 8;
-        }
-        prev = &metas[ci];
-    }
-    return breaks;
 }
 
 // Two move types, each enumerated only where every new junction is a structural edge:
@@ -1306,7 +1171,7 @@ int main(int argc, char* argv[]) {
             if (prof0.isLayerIII()) {
                 vector<int> trueOrder(origMetas.size()), breakAt;
                 for (size_t i = 0; i < trueOrder.size(); ++i) trueOrder[i] = static_cast<int>(i);
-                const int reservoirBreaks = ::reservoirBreaks(origMetas, trueOrder,
+                const int reservoirBreaks = ::reservoirBreaks(origMetas, chunks, trueOrder,
                     sideInfoSize(prof0.versionID, prof0.isMono()), maxReservoirBytes(prof0.versionID), &breakAt);
                 for (int i : breakAt) cout << "  RESERVOIR BREAK at chunk " << i << "\n";
                 preShuffleResvBreaks = reservoirBreaks;
@@ -1951,7 +1816,7 @@ int main(int argc, char* argv[]) {
                 auto breaksOf = [&](const MatchResult& r, vector<int>* where) {
                     vector<int> sq;
                     for (int si : r.order) for (int ci : supernodes[si].chunks) sq.push_back(ci);
-                    return reservoirBreaks(metas, sq, sideInfo, maxReservoir, where);
+                    return reservoirBreaks(metas, chunks, sq, sideInfo, maxReservoir, where);
                 };
                 const long dec0 = mr.decodes;   // later rounds hit the memo
                 int bestBreaks = breaksOf(mr, nullptr);
@@ -1995,7 +1860,7 @@ int main(int argc, char* argv[]) {
                 for (int si : mr.order) for (int ci : supernodes[si].chunks) seqm.push_back(ci);
                 int tj = 0;
                 for (size_t k = 1; k < seqm.size(); ++k) if (origIndexOf[seqm[k]] == origIndexOf[seqm[k - 1]] + 1) ++tj;
-                const bool ok = !isLayerIII || reservoirValid(metas, seqm, sideInfo, maxReservoir);
+                const bool ok = !isLayerIII || reservoirValid(metas, chunks, seqm, sideInfo, maxReservoir);
                 cout << (ok ? " - reservoir OK" : " - reservoir check FAILED")
                      << " [vs source: " << tj << "/" << (seqm.size() - 1) << " true junctions]\n";
                 // Repair (moves on the full structural graph). If the order is reservoir-invalid
@@ -2005,7 +1870,7 @@ int main(int argc, char* argv[]) {
                     const auto r0 = chrono::steady_clock::now();
                     double gap = std::numeric_limits<double>::quiet_NaN();
                     const int mv = repairOrdering(seqm, metas, adjFull, isLayerIII, sideInfo, maxReservoir, cfg.repair, &gap);
-                    const bool ok2 = reservoirValid(metas, seqm, sideInfo, maxReservoir);
+                    const bool ok2 = reservoirValid(metas, chunks, seqm, sideInfo, maxReservoir);
                     int tj2 = 0;
                     for (size_t k = 1; k < seqm.size(); ++k) if (origIndexOf[seqm[k]] == origIndexOf[seqm[k - 1]] + 1) ++tj2;
  (void)ok;
