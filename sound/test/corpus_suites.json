@@ -1,0 +1,4 @@
+{
+  "fixtures": {"corpus": "test", "recipe": "orig", "chunk": [1024], "env": {"RP_TIME_BUDGET": "20"}},
+  "musiclib": {"corpus": "musiclib", "recipe": "orig", "chunk": [4096, 1024], "env": {}}
+}

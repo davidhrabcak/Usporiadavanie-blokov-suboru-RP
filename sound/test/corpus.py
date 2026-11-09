@@ -1,32 +1,126 @@
 #!/usr/bin/env python3
-"""Corpus tests for rp (PLAN_test_automation.md). Python 3 standard library only.
+"""Tests for rp. Python 3 standard library only. Run from sound/.
 
-  test/corpus.py scan                   manifest of every *.mp3 under musiclib/ (cached)
-  test/corpus.py run [options]          run rp over a matrix, append to a results CSV
-  test/corpus.py report RESULTS.csv     summary.md next to the results
-  test/corpus.py compare RESULTS.csv    outcome changes vs test/corpus_baseline.tsv (exit 1 on
-                                        a regression); --update-baseline rewrites the baseline
+  test/corpus.py fixtures               the files in test/ (whole files, 1 KB chunks, 20 s budget)
+  test/corpus.py musiclib               the musiclib/ corpus (whole files, 1 and 4 KB chunks)
+  test/corpus.py score REPORT.json      the metrics of one rp report (CI: --expect-exact)
 
-Run from sound/. The corpus (sound/musiclib/) and everything derived from it
-(sound/musiclib/.derived/) are gitignored; only test/corpus_baseline.tsv (ids, names and outcome
-classes, no audio) and test/corpus_configs.json are committed.
+A suite (test/corpus_suites.json) runs rp on every input, resumes where it stopped (results are
+kept per suite and binary), and writes RESULTS.csv + RESULTS.md (the summary).
+Comparing two runs is done by hand on those files. RP_* variables set when calling are passed to
+rp (an A/B run gets its own results file). Options: --match SUBSTRING..., --jobs N.
+
+The metrics depend only on the order rp outputs, not on how it found it or on the file format:
+rp's RP_REPORT JSON carries `status`, `n` (chunks in the stream) and `order` (the source index of
+each output chunk; for a failed run the deepest partial path), and everything is computed here.
+For a partial path the denominators stay n, so missing chunks count as wrong.
+
+  exact             the order is the source order (output byte-identical to the source)
+  neighbor_acc      output neighbours (k-1, k) that are true neighbours, / (n-1)
+  position_acc      chunks at their source position, / n
+  kendall_tau       rank correlation of the placed chunks with the source order (+1 = in order)
+  longest_run_frac  longest stretch of true neighbours, in chunks, / n
+  start_correct     the first output chunk is the stream's first chunk
+  coverage          placed chunks / n (1 for a complete order)
+  budget_exhausted  the search stopped on its time or node budget
+  wall_s            rp's wall-clock time (load to exit; not CPU time, so threads don't add up)
+
+Derived files (manifest, cut inputs, logs, full reports with the order, results) go to the
+gitignored musiclib/.derived/.
 """
 import argparse, concurrent.futures as cf, csv, gzip, hashlib, json, os, shutil, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SOUND = os.path.dirname(HERE)
-# RP_CORPUS points at another folder of mp3s (e.g. test/ for the fixtures tier); its derived
-# files still go under the gitignored musiclib/.derived/corpus-<name>/.
-CORPUS = os.path.abspath(os.environ.get("RP_CORPUS", os.path.join(SOUND, "musiclib")))
-DERIVED = os.path.join(SOUND, "musiclib", ".derived")
-if CORPUS != os.path.join(SOUND, "musiclib"):
-    DERIVED = os.path.join(DERIVED, "corpus-" + os.path.basename(CORPUS))
-MANIFEST = os.path.join(DERIVED, "manifest.tsv")
-BASELINE = os.path.join(HERE, "corpus_baseline.tsv")
-CONFIGS = os.path.join(HERE, "corpus_configs.json")
+MUSICLIB = os.path.join(SOUND, "musiclib")
+SUITES = os.path.join(HERE, "corpus_suites.json")
+THREADS = 3   # RP_THREADS per run
+TIMEOUT = 900 # seconds per run
+
+# STRUCTURAL = a complete order with most neighbours right but most chunks off their position
+# (blocks in the wrong place). Not calibrated yet: while either is None no run is STRUCTURAL.
+# Changing them reclassifies existing results (the class is recomputed from the metric columns).
+STRUCTURAL_NEIGHBOR_MIN = None   # neighbor_acc >= this ...
+STRUCTURAL_POSITION_MAX = None   # ... and position_acc < this
+
+
+def derived_dir(corpus):
+    d = os.path.join(MUSICLIB, ".derived")
+    return d if corpus == MUSICLIB else os.path.join(d, "corpus-" + os.path.basename(corpus))
 
 # --------------------------------------------------------------------------------------------
-# MPEG audio frame headers (MPEG 1 / 2 / 2.5, Layers I-III)
+# Metrics
+
+
+def inversions(a):
+    """Number of pairs i < j with a[i] > a[j] (merge sort, O(n log n))."""
+    if len(a) < 2:
+        return a, 0
+    m = len(a) // 2
+    l, x = inversions(a[:m])
+    r, y = inversions(a[m:])
+    out, inv, i, j = [], x + y, 0, 0
+    while i < len(l) and j < len(r):
+        if l[i] <= r[j]:
+            out.append(l[i]); i += 1
+        else:
+            out.append(r[j]); j += 1; inv += len(l) - i
+    return out + l[i:] + r[j:], inv
+
+
+def metrics(n, order, complete):
+    """All metrics of one run from its order (source indices, possibly a partial path)."""
+    if not n or not order:
+        return {}
+    pairs = sum(1 for k in range(1, len(order)) if order[k] == order[k - 1] + 1)
+    run = best = 1
+    for k in range(1, len(order)):
+        run = run + 1 if order[k] == order[k - 1] + 1 else 1
+        best = max(best, run)
+    m = len(order)
+    tau = None if m < 2 else 1 - 4 * inversions(list(order))[1] / (m * (m - 1))
+    return dict(
+        exact=complete and list(order) == list(range(n)),
+        neighbor_acc=pairs / max(1, n - 1),
+        position_acc=sum(1 for k, c in enumerate(order) if c == k) / n,
+        kendall_tau=tau,
+        longest_run_frac=best / n,
+        start_correct=order[0] == 0,
+        coverage=m / n)
+
+
+METRIC_COLS = ["exact", "neighbor_acc", "position_acc", "kendall_tau", "longest_run_frac",
+               "start_correct", "coverage", "budget_exhausted", "wall_s"]
+
+
+def classify(r):
+    """Outcome class from a row's columns (strings, as read from a CSV)."""
+    if r.get("timed_out") == "1":
+        return "TIMEOUT"
+    if r.get("status", "") == "":
+        return "CRASH"          # rp wrote no report
+    if r["status"] == "error":
+        return "ERROR"
+    if r["status"] != "complete":
+        return "SEARCH_FAIL"    # its metrics describe the deepest partial path
+    if r["exact"] == "true":
+        return "EXACT"
+    if STRUCTURAL_NEIGHBOR_MIN is not None and STRUCTURAL_POSITION_MAX is not None and \
+       float(r["neighbor_acc"]) >= STRUCTURAL_NEIGHBOR_MIN and float(r["position_acc"]) < STRUCTURAL_POSITION_MAX:
+        return "STRUCTURAL"
+    return "WRONG"
+
+
+def cell(v):
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, float):
+        return f"{v:.4f}"
+    return "" if v is None else v
+
+# --------------------------------------------------------------------------------------------
+# MPEG audio frames: the manifest's format columns and the secN cut. Other formats need their
+# own describe() and cut().
 
 BITRATES = {  # (mpeg1?, layer) -> kbps by index
     (True, 1): [0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448],
@@ -37,7 +131,6 @@ BITRATES = {  # (mpeg1?, layer) -> kbps by index
     (False, 3): [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
 }
 SAMPLE_RATES = {3: [44100, 48000, 32000], 2: [22050, 24000, 16000], 0: [11025, 12000, 8000]}
-MPEG_NAME = {3: "1", 2: "2", 0: "2.5"}
 
 
 def parse_header(d, i):
@@ -49,9 +142,7 @@ def parse_header(d, i):
     if ver == 1 or lay == 0 or bi in (0, 15) or si == 3:
         return None
     layer = 4 - lay
-    kbps = BITRATES[(ver == 3, layer)][bi]
-    sr = SAMPLE_RATES[ver][si]
-    pad = (d[i + 2] >> 1) & 1
+    kbps, sr, pad = BITRATES[(ver == 3, layer)][bi], SAMPLE_RATES[ver][si], (d[i + 2] >> 1) & 1
     if layer == 1:
         length = (12000 * kbps // sr + pad) * 4
     elif layer == 3 and ver != 3:
@@ -59,8 +150,7 @@ def parse_header(d, i):
     else:
         length = 144000 * kbps // sr + pad
     spf = 384 if layer == 1 else (1152 if layer == 2 or ver == 3 else 576)
-    return dict(ver=ver, layer=layer, kbps=kbps, sr=sr, len=length, spf=spf,
-                crc=not (d[i + 1] & 1), mono=(d[i + 3] >> 6) == 3)
+    return dict(ver=ver, layer=layer, kbps=kbps, sr=sr, len=length, spf=spf)
 
 
 def same_stream(a, b):
@@ -68,7 +158,7 @@ def same_stream(a, b):
 
 
 def frames_of(d):
-    """(first frame offset, [(offset, header)...]) of the main frame run (after any ID3v2 tag)."""
+    """[(offset, header)...] of the main frame run (after any ID3v2 tag)."""
     i = 0
     if d[:3] == b"ID3" and len(d) >= 10:
         i = 10 + ((d[6] & 0x7F) << 21 | (d[7] & 0x7F) << 14 | (d[8] & 0x7F) << 7 | (d[9] & 0x7F))
@@ -80,451 +170,314 @@ def frames_of(d):
                 break
         i += 1
     else:
-        return None, []
-    first, frames = i, []
+        return []
+    frames = []
     while True:
         h = parse_header(d, i)
         if not h or (frames and not same_stream(h, frames[0][1])) or i + h["len"] > len(d):
-            break
+            return frames
         frames.append((i, h))
         i += h["len"]
-    return first, frames
 
 
-def has_tag(d, off, h):
-    """Xing/Info/VBRI tag in the frame at `off`."""
-    return any(t in d[off + 4: off + 4 + 2 + 32 + 8] for t in (b"Xing", b"Info", b"VBRI"))
-
-
-def describe(path):
-    d = open(path, "rb").read()
-    first, frames = frames_of(d)
+def describe(d):
+    frames = frames_of(d)
     if not frames:
-        return dict(frames=0)
-    h0 = frames[0][1]
-    tag = has_tag(d, first, h0)
+        return dict(format="mp3", frames=0)
+    off, h0 = frames[0]
+    tag = any(t in d[off + 4: off + 46] for t in (b"Xing", b"Info", b"VBRI"))
     audio = frames[1:] if tag and len(frames) > 1 else frames
     rates = {h["kbps"] for _, h in audio}
-    end = frames[-1][0] + frames[-1][1]["len"]
-    trailing = d[end:]
-    kind = ("" if not trailing else "id3v1" if trailing[-128:-125] == b"TAG" else
-            "ape" if b"APETAGEX" in trailing else "other")
-    row = dict(
-        frames=len(frames), mpeg=MPEG_NAME[h0["ver"]], layer=h0["layer"], sample_rate=h0["sr"],
-        mode="CBR" if len(rates) == 1 else "VBR",
-        kbps=round(sum(h["kbps"] for _, h in audio) / max(1, len(audio))),
-        crc=int(h0["crc"]), mono=int(h0["mono"]),
-        duration_s=round(sum(h["spf"] for _, h in frames) / h0["sr"], 1),
-        audio_bytes=end - first, max_frame=max(h["len"] for _, h in frames),
-        info_tag=int(tag), trailing_bytes=len(trailing), trailing_kind=kind)
-    for C in (1024, 2048):          # chunks (rp's chunking: from the first frame) holding no whole header
-        whole = {(o - first) // C for o, _ in frames if (o - first) % C <= C - 4}
-        n = (end - first) // C
-        row["noheader_%dk" % (C // 1024)] = sum(1 for c in range(1, n) if c not in whole)
-    return row
+    return dict(format="mp3", frames=len(frames), mode="CBR" if len(rates) == 1 else "VBR",
+                kbps=round(sum(h["kbps"] for _, h in audio) / max(1, len(audio))), sample_rate=h0["sr"],
+                duration_s=round(sum(h["spf"] for _, h in frames) / h0["sr"], 1))
 
 
-MANIFEST_COLS = ["id", "path", "source", "duplicates", "size", "mtime", "frames", "mpeg", "layer",
-                 "sample_rate", "mode", "kbps", "crc", "mono", "duration_s", "audio_bytes", "max_frame",
-                 "info_tag", "trailing_bytes", "trailing_kind", "noheader_1k", "noheader_2k"]
-
-
-def load_manifest():
-    if not os.path.exists(MANIFEST):
-        sys.exit("no manifest - run: test/corpus.py scan")
-    with open(MANIFEST) as f:
-        return list(csv.DictReader(f, delimiter="\t"))
-
-
-def cmd_scan(args):
-    old = {}
-    if os.path.exists(MANIFEST):
-        with open(MANIFEST) as f:
-            for r in csv.DictReader(f, delimiter="\t"):
-                old[r["path"]] = r
-                for p in filter(None, r["duplicates"].split("|")):
-                    old[p] = dict(r, path=p)
-    paths = []
-    for root, dirs, files in os.walk(CORPUS):
-        dirs[:] = sorted(x for x in dirs if not x.startswith(".") and os.path.join(root, x) != os.path.join(SOUND, "musiclib"))
-        paths += [os.path.join(root, f) for f in sorted(files) if f.lower().endswith(".mp3")]
-    by_id, reused = {}, 0
-    for p in paths:
-        rel = os.path.relpath(p, CORPUS)
-        st = os.stat(p)
-        o = old.get(rel)
-        if o and o["size"] == str(st.st_size) and o["mtime"] == str(int(st.st_mtime)):
-            row, reused = dict(o, path=rel, duplicates=""), reused + 1
-        else:
-            fid = hashlib.sha1(open(p, "rb").read()).hexdigest()[:12]
-            row = dict(id=fid, path=rel, size=st.st_size, mtime=int(st.st_mtime), duplicates="", **describe(p))
-        row["source"] = rel.split(os.sep)[0] if os.sep in rel else "."
-        if row["id"] in by_id:
-            by_id[row["id"]]["duplicates"] += ("|" if by_id[row["id"]]["duplicates"] else "") + rel
-        else:
-            by_id[row["id"]] = row
-    os.makedirs(DERIVED, exist_ok=True)
-    with open(MANIFEST, "w", newline="") as f:
-        w = csv.DictWriter(f, MANIFEST_COLS, delimiter="\t", extrasaction="ignore")
-        w.writeheader()
-        for r in sorted(by_id.values(), key=lambda r: r["path"]):
-            w.writerow(r)
-    rows = list(by_id.values())
-    dups = sum(len(filter_dups(r)) for r in rows)
-    print(f"{len(paths)} mp3 files, {len(rows)} unique ({dups} duplicates), {reused} reused from cache -> {MANIFEST}")
-    for src in sorted({r["source"] for r in rows}):
-        rs = [r for r in rows if r["source"] == src]
-        modes = {m: sum(1 for r in rs if r.get("mode") == m) for m in ("CBR", "VBR")}
-        print(f"  {src}: {len(rs)} unique - CBR {modes['CBR']}, VBR {modes['VBR']}, "
-              f"no frames {sum(1 for r in rs if str(r.get('frames')) == '0')}")
-
-
-def filter_dups(r):
-    return [p for p in str(r.get("duplicates", "")).split("|") if p]
+def cut_seconds(d, secs):
+    """The first `secs` seconds of whole frames, from the first frame (empty bit reservoir).
+    Mid-track stream-copy cuts are not offered: their first frames' reservoir points before
+    the cut."""
+    frames = frames_of(d)
+    first, end, samples = frames[0][0], frames[0][0], 0
+    for o, h in frames:
+        if samples >= secs * h["sr"]:
+            break
+        end, samples = o + h["len"], samples + h["spf"]
+    return d[first:end]
 
 # --------------------------------------------------------------------------------------------
-# Inputs: a manifest row + a recipe.
-#   orig       the file as it is
-#   strip      audio frames only (leading/trailing tags removed)
-#   headN      the first N chunks' worth of whole frames at the run's chunk size (N = target
-#              chunk count): the input differs per chunk size
-#   secN       the first N seconds of whole frames: the same input at every chunk size
-# Both start at the real start (empty bit reservoir); mid-track stream-copy cuts are not offered,
-# their first frames' reservoir points before the cut.
+# Inputs
 
 
-def materialize(row, recipe, chunk):
-    src = os.path.join(CORPUS, row["path"])
+MANIFEST_COLS = ["id", "path", "size", "mtime", "format", "frames", "mode", "kbps", "sample_rate", "duration_s"]
+
+
+def manifest(corpus, derived):
+    """One row per distinct file content under `corpus` (cached by size + mtime)."""
+    path = os.path.join(derived, "manifest.tsv")
+    old = {}
+    if os.path.exists(path):
+        with open(path) as f:
+            rd = csv.DictReader(f, delimiter="\t")
+            if rd.fieldnames == MANIFEST_COLS:   # a manifest of another version is rebuilt
+                old = {r["path"]: r for r in rd}
+    rows, seen = [], set()
+    for root, dirs, files in os.walk(corpus):
+        dirs[:] = sorted(x for x in dirs if not x.startswith(".") and os.path.join(root, x) != MUSICLIB)
+        for name in sorted(files):
+            if not name.lower().endswith(".mp3"):
+                continue
+            p = os.path.join(root, name)
+            rel, st = os.path.relpath(p, corpus), os.stat(p)
+            o = old.get(rel)
+            if o and o["size"] == str(st.st_size) and o["mtime"] == str(int(st.st_mtime)):
+                row = o
+            else:
+                d = open(p, "rb").read()
+                row = dict(id=hashlib.sha1(d).hexdigest()[:12], path=rel, size=st.st_size,
+                           mtime=int(st.st_mtime), **describe(d))
+            if row["id"] not in seen:
+                seen.add(row["id"])
+                rows.append(row)
+    os.makedirs(derived, exist_ok=True)
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, MANIFEST_COLS, delimiter="\t", extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
+    return [r for r in rows if str(r.get("frames")) != "0"]
+
+
+def materialize(corpus, derived, row, recipe):
+    """recipe: `orig` (the file as it is) or `secN` (its first N seconds)."""
+    src = os.path.join(corpus, row["path"])
     if recipe == "orig":
         return src
-    out_dir = os.path.join(DERIVED, "inputs")
-    os.makedirs(out_dir, exist_ok=True)
-    name = f"{row['id']}_{recipe}" + (f"_c{chunk}" if recipe.startswith("head") else "") + ".mp3"
-    out = os.path.join(out_dir, name)
-    if os.path.exists(out):
-        return out
-    d = open(src, "rb").read()
-    first, frames = frames_of(d)
-    if recipe == "strip":
-        end = frames[-1][0] + frames[-1][1]["len"]
-    elif recipe.startswith("head") or recipe.startswith("sec"):
-        bytes_target = int(recipe[4:]) * chunk if recipe.startswith("head") else None
-        samples_target = int(recipe[3:]) * frames[0][1]["sr"] if recipe.startswith("sec") else None
-        end, samples = first, 0
-        for o, h in frames:
-            if (bytes_target is not None and end - first >= bytes_target) or \
-               (samples_target is not None and samples >= samples_target):
-                break
-            end, samples = o + h["len"], samples + h["spf"]
-    else:
+    if not recipe.startswith("sec"):
         sys.exit("unknown recipe " + recipe)
-    tmp = out + ".tmp"
-    with open(tmp, "wb") as f:
-        f.write(d[first:end])
-    os.replace(tmp, out)
+    out = os.path.join(derived, "inputs", f"{row['id']}_{recipe}.mp3")
+    if not os.path.exists(out):
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with open(out + ".tmp", "wb") as f:
+            f.write(cut_seconds(open(src, "rb").read(), int(recipe[3:])))
+        os.replace(out + ".tmp", out)
     return out
 
 # --------------------------------------------------------------------------------------------
-# Running rp
-
-RESULT_COLS = ["run_id", "class", "binary", "config", "seed", "chunk_size", "input", "id", "recipe",
-               "name", "source", "mode", "kbps", "sample_rate", "layer", "crc", "max_frame",
-               "trailing_kind", "rc", "timed_out", "status", "error", "chunks", "pre_breaks",
-               "resv_breaks", "edges", "supernodes", "lock_attempts", "locks", "locks_correct",
-               "matching", "exact", "exact_pct", "true_junctions", "junctions", "provenance",
-               "repair_moves", "budget_exhausted", "partial_chunks", "partial_true_junctions",
-               "wall_s", "log", "start_candidates", "start_xing", "start_correct"]
+# Running a suite
 
 
-def classify(r):
-    if r["timed_out"] == "1":
-        return "TIMEOUT"
-    if r["status"] == "":
-        return "CRASH"
-    if r["status"] == "error":
-        return "ERROR"
-    if r["exact"] == "true":
-        return "EXACT"
-    broken = any(r[k] not in ("", "0") for k in ("pre_breaks", "resv_breaks"))
-    if broken:
-        return "STRUCTURAL"
-    return "WRONG" if r["status"] == "complete" else "SEARCH_FAIL"
+RESULT_COLS = ["run_id", "class", "binary", "suite", "chunk_size", "id", "recipe", "name", "format", "mode",
+               "kbps", "sample_rate", "status", "error", "rc", "timed_out", "n"] + METRIC_COLS + ["log"]
+
+
+def run_rp(rp, inp, env):
+    """Runs rp on `inp` in a scratch directory -> (rc, timed_out, log bytes, report dict)."""
+    work = tempfile.mkdtemp()
+    try:
+        env = dict({k: v for k, v in os.environ.items() if not k.startswith("RP_")}, **env,
+                   RP_REPORT=os.path.join(work, "report.json"))
+        try:
+            p = subprocess.run([rp, inp], cwd=work, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               timeout=TIMEOUT)
+            rc, out, timed_out = p.returncode, p.stdout, False
+        except subprocess.TimeoutExpired as e:
+            rc, out, timed_out = -9, e.stdout or b"", True
+        try:
+            rep = json.load(open(env["RP_REPORT"]))
+        except (OSError, ValueError):
+            rep = {}
+        return rc, timed_out, out, rep
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def row_of(rep):
+    """The status and metric columns of one rp report."""
+    r = dict(status=rep.get("status", ""), error=rep.get("error", ""), n=rep.get("n", ""),
+             budget_exhausted=rep.get("budget_exhausted"), wall_s=rep.get("wall_s"))
+    r.update(metrics(rep.get("n"), rep.get("order"), rep.get("status") == "complete"))
+    return {k: cell(v) for k, v in r.items()}
 
 
 def one_run(job):
-    rp, binary, cfg_name, cfg_env, seed, chunk, inp, row, recipe, threads, timeout = job
-    work = tempfile.mkdtemp(dir=os.path.join(DERIVED, "work"))
-    report = os.path.join(work, "report.json")
-    env = {k: v for k, v in os.environ.items() if not k.startswith("RP_")}
-    env.update(cfg_env)
-    env.update(RP_SEED=str(seed), RP_CHUNK_SIZE=str(chunk), RP_THREADS=str(threads), RP_REPORT=report)
-    t0, timed_out = time.time(), False
-    try:
-        p = subprocess.run([rp, inp], cwd=work, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                           timeout=timeout)
-        rc, out = p.returncode, p.stdout
-    except subprocess.TimeoutExpired as e:
-        rc, out, timed_out = -9, e.stdout or b"", True
-    rep = {}
-    if os.path.exists(report):
-        try:
-            rep = json.load(open(report))
-        except ValueError:
-            rep = {}
-    run_id = job_id(binary, cfg_name, seed, chunk, row["id"], recipe, cfg_env)
-    log = os.path.join(DERIVED, "logs", run_id + ".log.gz")
+    rp, binary, suite, env, chunk, inp, row, recipe, derived, run_id = job
+    t0 = time.time()
+    rc, timed_out, out, rep = run_rp(rp, inp, dict(env, RP_SEED="1", RP_CHUNK_SIZE=str(chunk), RP_THREADS=str(THREADS)))
+    log = os.path.join(derived, "logs", run_id + ".log.gz")   # the run's stdout
     os.makedirs(os.path.dirname(log), exist_ok=True)
     with gzip.open(log, "wb") as f:
         f.write(out)
-    shutil.rmtree(work, ignore_errors=True)
+    if rep:   # the full report (with the order), to recompute or extend the metrics later
+        os.makedirs(os.path.join(derived, "reports"), exist_ok=True)
+        with gzip.open(os.path.join(derived, "reports", run_id + ".json.gz"), "wt") as f:
+            json.dump(rep, f)
     r = {c: "" for c in RESULT_COLS}
-    r.update(run_id=run_id, binary=binary, config=cfg_name, seed=seed, chunk_size=chunk,
-             input=f"{row['id']}:{recipe}", id=row["id"], recipe=recipe, name=os.path.basename(row["path"]),
-             rc=rc, timed_out=int(timed_out), log=os.path.relpath(log, CORPUS),
-             wall_s=rep.get("wall_s", round(time.time() - t0, 2)))
-    for k in ("source", "mode", "kbps", "sample_rate", "layer", "crc", "max_frame", "trailing_kind"):
-        r[k] = row.get(k, "")
-    for k, v in rep.items():
-        if k in r and k not in ("wall_s",):
-            r[k] = json.dumps(v) if isinstance(v, bool) else ("" if v is None else v)
+    r.update(run_id=run_id, binary=binary, suite=suite, chunk_size=chunk, id=row["id"], recipe=recipe,
+             name=row["path"], rc=rc, timed_out=int(timed_out), log=os.path.relpath(log, derived),
+             **{k: row.get(k, "") for k in ("format", "mode", "kbps", "sample_rate")})
+    r.update(row_of(rep))
+    if not r["wall_s"]:   # no report: time the process from outside
+        r["wall_s"] = f"{time.time() - t0:.3f}"
     r["class"] = classify({k: str(v) for k, v in r.items()})
     return r
 
 
-def job_id(binary, cfg, seed, chunk, fid, recipe, cfg_env):
-    # the config's environment is part of the id: editing corpus_configs.json mustn't resume
-    # old results under the same config name
-    env = json.dumps(cfg_env, sort_keys=True)
-    return hashlib.sha1(f"{binary}|{cfg}|{env}|{seed}|{chunk}|{fid}|{recipe}".encode()).hexdigest()[:16]
-
-
-def select(rows, args):
-    out = []
-    for r in rows:
-        if str(r.get("frames")) == "0":
-            continue
-        if args.source and r["source"] not in args.source:
-            continue
-        if args.mode and r["mode"] != args.mode:
-            continue
-        if args.match and not any(m.lower() in r["path"].lower() for m in args.match):
-            continue
-        out.append(r)
-    return out[: args.limit] if args.limit else out
-
-
-def cmd_run(args):
-    rows = select(load_manifest(), args)
-    configs = json.load(open(CONFIGS))
-    rp = os.path.abspath(args.rp)
+def cmd_suite(args):
+    suite = json.load(open(SUITES))[args.suite]
+    corpus = os.path.join(SOUND, suite["corpus"])
+    derived = derived_dir(corpus)
+    rows = all_rows = manifest(corpus, derived)
+    if args.match:
+        rows = [r for r in rows if any(m.lower() in r["path"].lower() for m in args.match)]
+    rp = os.path.join(SOUND, "build", "rp")
     binary = hashlib.sha1(open(rp, "rb").read()).hexdigest()[:12]
-    results = args.results or os.path.join(DERIVED, "results", "results.csv")
+    extra = {k: v for k, v in os.environ.items() if k.startswith("RP_")}   # an A/B run
+    env = dict(suite.get("env", {}), **extra)
+    tag = f"{args.suite}-{binary}" + ("-" + hashlib.sha1(json.dumps(extra, sort_keys=True).encode()).hexdigest()[:6]
+                                      if extra else "")
+    results = os.path.join(derived, "results", tag + ".csv")
     os.makedirs(os.path.dirname(results), exist_ok=True)
-    os.makedirs(os.path.join(DERIVED, "work"), exist_ok=True)
-    done = set()
+    have = {}
     if os.path.exists(results):
         with open(results) as f:
-            done = {r["run_id"] for r in csv.DictReader(f)}
+            have = {r["run_id"]: r for r in csv.DictReader(f)}
     jobs = []
-    for cfg in args.config:
-        for seed in args.seed:
-            for chunk in args.chunk:
-                for recipe in args.recipe:
-                    for row in rows:
-                        if job_id(binary, cfg, seed, chunk, row["id"], recipe, configs[cfg]) in done:
-                            continue
-                        inp = materialize(row, recipe, chunk)
-                        jobs.append((rp, binary, cfg, configs[cfg], seed, chunk, inp, row, recipe,
-                                     args.threads, args.timeout))
-    print(f"{len(rows)} inputs, {len(jobs)} runs to do ({len(done)} already in {results}), binary {binary}")
+    for chunk in suite["chunk"]:
+        for row in rows:
+            run_id = hashlib.sha1(f"{tag}|{json.dumps(env, sort_keys=True)}|{chunk}|{row['id']}|{suite['recipe']}"
+                                  .encode()).hexdigest()[:16]
+            if run_id not in have:
+                jobs.append((rp, binary, args.suite, env, chunk, materialize(corpus, derived, row, suite["recipe"]),
+                             row, suite["recipe"], derived, run_id))
+    print(f"{args.suite}: {len(rows)} inputs x {len(suite['chunk'])} chunk sizes, {len(jobs)} runs to do, "
+          f"binary {binary}" + (f", extra env {extra}" if extra else ""), flush=True)
     new = not os.path.exists(results)
-    if not new:
-        with open(results) as f:
-            header = next(csv.reader(f), [])
-        if header != RESULT_COLS:   # appending rows under another header would shift the columns
-            sys.exit(f"{results} has other columns than this corpus.py writes (an older version?) - "
-                     "use a new --results file")
     with open(results, "a", newline="") as f, cf.ThreadPoolExecutor(args.jobs) as ex:
         w = csv.DictWriter(f, RESULT_COLS)
         if new:
             w.writeheader()
-        for k, r in enumerate(ex.map(one_run, jobs), 1):
+        for k, fut in enumerate(cf.as_completed([ex.submit(one_run, j) for j in jobs]), 1):
+            r = fut.result()
             w.writerow(r)
             f.flush()
-            print(f"[{k}/{len(jobs)}] {r['class']:<11} {r['chunk_size']:>5} {r['recipe']:<8} {r['name'][:60]} ({r['wall_s']}s)", flush=True)
-    print("results:", results)
+            na = f" nb={float(r['neighbor_acc']):.3f}" if r["neighbor_acc"] else ""
+            print(f"[{k}/{len(jobs)}] {r['class']:<11}{na:<10} {r['chunk_size']:>5} {r['name'][-60:]} ({r['wall_s']}s)",
+                  flush=True)
+    live = {r["id"] for r in all_rows}   # inputs since removed or split from the corpus drop out
+    with open(results) as f:
+        R = [r for r in csv.DictReader(f) if r["id"] in live]
+    for r in R:
+        r["class"] = classify(r)   # the thresholds may have changed since the run
+    summary(R, results, results[:-4] + ".md")
+    print("results:", results, "\nsummary:", results[:-4] + ".md")
+    print("  ".join(f"{k} {sum(r['class'] == k for r in R)}" for k in CLASSES))
+    return 0
 
 # --------------------------------------------------------------------------------------------
-# Report and compare
-
-CLASSES = ["EXACT", "WRONG", "SEARCH_FAIL", "STRUCTURAL", "TIMEOUT", "ERROR", "CRASH"]
+# Summary
 
 
-def load_results(path, binary=None):
-    """Rows of one binary: `binary` (prefix) or, by default, the last one appended. A results
-    file accumulates runs of several builds; mixing them double-counts every input."""
-    with open(path) as f:
-        rows = list(csv.DictReader(f))
-    if not rows:
-        return rows, None
-    if binary is None:
-        binary = rows[-1]["binary"]
-    sel = [r for r in rows if r["binary"].startswith(binary)]
-    others = sorted({r["binary"] for r in rows} - {r["binary"] for r in sel})
-    print(f"{path}: binary {binary} ({len(sel)} of {len(rows)} rows"
-          + (f"; also in the file: {', '.join(others)} - --binary selects" if others else "") + ")")
-    return sel, binary
+CLASSES = ["EXACT", "STRUCTURAL", "WRONG", "SEARCH_FAIL", "TIMEOUT", "ERROR", "CRASH"]
 
 
 def table(head, rows):
-    out = ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
-    out += ["| " + " | ".join(str(c) for c in r) + " |" for r in rows]
-    return "\n".join(out)
+    return "\n".join(["| " + " | ".join(head) + " |", "|" + "---|" * len(head)] +
+                     ["| " + " | ".join(str(c) for c in r) + " |" for r in rows])
 
 
-def structural_cause(r):
-    if r["class"] != "STRUCTURAL":
-        return ""
-    if int(r["max_frame"] or 0) > int(r["chunk_size"]):
-        return "frames > chunk"
-    if r["trailing_kind"]:
-        return "trailing " + r["trailing_kind"]
-    return "other"
+def mean(rows, k):
+    v = [float(r[k]) for r in rows if r[k] not in ("", None)]
+    return f"{sum(v) / len(v):.3f}" if v else ""
 
 
-def cmd_report(args):
-    R, binary = load_results(args.results, args.binary)
+def rate(rows, k):
+    v = [r[k] for r in rows if r[k] in ("true", "false")]
+    return f"{sum(x == 'true' for x in v)}/{len(v)}" if v else ""
+
+
+def summary(R, results, out):
     chunks = sorted({int(r["chunk_size"]) for r in R})
-    md = [f"# Corpus test summary\n\n`{args.results}` - {len(R)} runs of binary {binary}, "
-          f"generated {time.strftime('%Y-%m-%d %H:%M')}\n"]
-    if any(r["recipe"].startswith("head") for r in R):
-        md.append("`headN` inputs are the first N chunks at each chunk size, so they differ between "
-                  "chunk-size columns; `secN` inputs are the same at every chunk size.\n")
+    by_chunk = {c: [r for r in R if int(r["chunk_size"]) == c] for c in chunks}
+    md = [f"# Test summary\n\n`{os.path.basename(results)}` - {len(R)} runs, {time.strftime('%Y-%m-%d %H:%M')}. "
+          "Metrics are over all n chunks of the stream; for SEARCH_FAIL they describe the deepest partial "
+          "path (missing chunks count as wrong; `kendall_tau` covers only the placed chunks). STRUCTURAL = "
+          f"complete, neighbor_acc >= {STRUCTURAL_NEIGHBOR_MIN} and position_acc < {STRUCTURAL_POSITION_MAX}.\n"]
     md.append("## Outcome by chunk size\n")
     md.append(table(["chunk"] + CLASSES + ["runs"],
-                    [[c] + [sum(1 for r in R if int(r["chunk_size"]) == c and r["class"] == k) for k in CLASSES]
-                     + [sum(1 for r in R if int(r["chunk_size"]) == c)] for c in chunks]))
-    def fmt(r):   # CBR by bitrate, VBR pooled
-        return (r["mode"], r["kbps"] if r["mode"] == "CBR" else "avg", r["sample_rate"])
+                    [[c] + [sum(r["class"] == k for r in by_chunk[c]) for k in CLASSES] + [len(by_chunk[c])]
+                     for c in chunks]))
+    md.append("\n## Metrics by chunk size and outcome (means; start_correct / budget_exhausted as counts)\n")
+    rows = []
+    for c in chunks:
+        for k in CLASSES:
+            g = [r for r in by_chunk[c] if r["class"] == k]
+            if g and k not in ("TIMEOUT", "ERROR", "CRASH"):
+                wall = sorted(float(r["wall_s"]) for r in g if r["wall_s"])
+                rows.append([c, k, len(g)] + [mean(g, m) for m in ("neighbor_acc", "position_acc", "kendall_tau",
+                                                                    "longest_run_frac", "coverage")]
+                            + [rate(g, "start_correct"), rate(g, "budget_exhausted"),
+                               f"{wall[len(wall) // 2]:.1f}" if wall else "", f"{sum(wall):.0f}"])
+    md.append(table(["chunk", "class", "runs", "neighbor", "position", "tau", "longest run", "coverage",
+                     "start ok", "budget out", "wall median s", "wall total s"], rows))
 
-    def exact_of(g, c):
-        cell = [r for r in R if fmt(r) == g and int(r["chunk_size"]) == c]
-        return f"{sum(1 for r in cell if r['class'] == 'EXACT')} / {len(cell)}"
-
-    groups = sorted({fmt(r) for r in R}, key=lambda g: (g[0], -int(g[1]) if g[1].isdigit() else 0, g[2]))
+    def fmt(r):
+        rate = r["kbps"] + " kbps" if r["mode"] == "CBR" else "avg"
+        return f"{r['format']} {r['mode']} {rate} @ {int(r['sample_rate'] or 0) / 1000:g} kHz"
     md.append("\n## Exact runs by format and chunk size (exact / runs)\n")
     md.append(table(["format"] + [f"{c // 1024} KB" for c in chunks],
-                    [[f"{g[0]} {g[1]}{' kbps' if g[1].isdigit() else ''} @ {int(g[2]) / 1000:g} kHz"]
-                     + [exact_of(g, c) for c in chunks] for g in groups]))
-    md.append("\n## By source\n")
-    md.append(table(["source"] + CLASSES,
-                    [[s] + [sum(1 for r in R if r["source"] == s and r["class"] == k) for k in CLASSES]
-                     for s in sorted({r["source"] for r in R})]))
-    causes = {}
-    for r in R:
-        c = structural_cause(r)
-        if c:
-            causes[c] = causes.get(c, 0) + 1
-    if causes:
-        md.append("\n## Structural failures by cause\n")
-        md.append(table(["cause", "runs"], sorted(causes.items(), key=lambda x: -x[1])))
-    md.append("\n## Per input\n")
-    inputs = sorted({(r["name"], r["recipe"], r["config"], r["seed"]) for r in R})
-    cell = {(r["name"], r["recipe"], r["config"], r["seed"], int(r["chunk_size"])): r for r in R}
-    rows = []
-    for (n, rec, cfg, seed) in inputs:
-        cs = [cell.get((n, rec, cfg, seed, c)) for c in chunks]
-        rows.append([n[:50], rec, cfg, seed] + [
-            "" if x is None else x["class"] + (f" {float(x['exact_pct']):.0f}%" if x["class"] == "WRONG" and x["exact_pct"] else "")
-            for x in cs])
-    md.append(table(["input", "recipe", "config", "seed"] + [f"{c // 1024} KB" for c in chunks], rows))
-    out = args.out or os.path.join(os.path.dirname(os.path.abspath(args.results)), "summary.md")
+                    [[g] + [f"{sum(r['class'] == 'EXACT' for r in by_chunk[c] if fmt(r) == g)} / "
+                            f"{sum(fmt(r) == g for r in by_chunk[c])}" for c in chunks]
+                     for g in sorted({fmt(r) for r in R})]))
+    bins = [0, 0.25, 0.5, 0.75, 0.9, 1.0001]   # where the complete-but-wrong orders fall
+    wrong = [r for r in R if r["status"] == "complete" and r["exact"] != "true"]
+    if wrong:
+        def b(v):
+            return next(i for i in range(len(bins) - 1) if float(v) < bins[i + 1])
+        lab = [f"{bins[i]:g}-{min(bins[i + 1], 1):g}" for i in range(len(bins) - 1)]
+        md.append("\n## Complete but not exact: neighbor_acc (rows) x position_acc (columns), runs\n")
+        md.append(table(["neighbor \\ position"] + lab,
+                        [[lab[i]] + [sum(1 for r in wrong if b(r["neighbor_acc"]) == i and b(r["position_acc"]) == j)
+                                     for j in range(len(lab))] for i in reversed(range(len(lab)))]))
+    md.append("\n## Per input (class, neighbor_acc)\n")
+    at = {(r["name"], int(r["chunk_size"])): r for r in R}
+
+    def show(x):
+        if x is None:
+            return ""
+        return x["class"] + (f" {float(x['neighbor_acc']):.2f}" if x["neighbor_acc"] and x["class"] != "EXACT" else "")
+    md.append(table(["input"] + [f"{c // 1024} KB" for c in chunks],
+                    [[n[-60:]] + [show(at.get((n, c))) for c in chunks] for n in sorted({r["name"] for r in R})]))
     open(out, "w").write("\n".join(md) + "\n")
-    print("summary:", out)
+
+# --------------------------------------------------------------------------------------------
 
 
-def key_of(r):
-    return (r["id"], r["recipe"], str(r["chunk_size"]), r["config"], str(r["seed"]))
-
-
-def is_regression(old, new):
-    if new in ("CRASH", "ERROR") and old not in ("CRASH", "ERROR"):
-        return True
-    if old == "EXACT" and new != "EXACT":
-        return True
-    return old in ("WRONG", "SEARCH_FAIL") and new == "STRUCTURAL"
-
-
-BASE_COLS = ["id", "recipe", "chunk_size", "config", "seed", "class", "name"]
-
-
-def cmd_compare(args):
-    new = {key_of(r): r for r in load_results(args.results, args.binary)[0]}
-    if args.update_baseline:
-        base = {}
-        if os.path.exists(BASELINE):
-            with open(BASELINE) as f:
-                base = {key_of(r): r for r in csv.DictReader(f, delimiter="\t")}
-        base.update(new)
-        with open(BASELINE, "w", newline="") as f:
-            w = csv.DictWriter(f, BASE_COLS, delimiter="\t", extrasaction="ignore")
-            w.writeheader()
-            for k in sorted(base):
-                w.writerow(base[k])
-        print(f"baseline: {len(base)} rows -> {BASELINE}")
-        return 0
-    if args.against:
-        old = {key_of(r): r for r in load_results(args.against, args.against_binary)[0]}
-    else:
-        if not os.path.exists(BASELINE):
-            sys.exit("no baseline - run with --update-baseline first")
-        with open(BASELINE) as f:
-            old = {key_of(r): r for r in csv.DictReader(f, delimiter="\t")}
-    changes, regressions = [], 0
-    for k in sorted(set(old) & set(new)):
-        o, n = old[k]["class"], new[k]["class"]
-        if o != n:
-            reg = is_regression(o, n)
-            regressions += reg
-            changes.append(["REGRESSION" if reg else "change", new[k]["name"][:50], k[1], k[2], k[3], k[4], o, n])
-    print(f"{len(set(old) & set(new))} runs compared ({len(set(new) - set(old))} new, "
-          f"{len(set(old) - set(new))} not rerun), {len(changes)} changed, {regressions} regressions")
-    if changes:
-        print(table(["", "input", "recipe", "chunk", "config", "seed", "before", "after"], changes))
-    return 1 if regressions else 0
+def cmd_score(args):
+    rep = json.load((gzip.open if args.report.endswith(".gz") else open)(args.report, "rt"))
+    r = row_of(rep)
+    r["class"] = classify(r)
+    for k in ["class", "status", "n"] + METRIC_COLS:
+        print(f"{k:<17} {r.get(k, '')}")
+    if args.expect_exact and r["class"] != "EXACT":
+        print("FAIL: expected an exact reconstruction")
+        return 1
+    return 0
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("scan")
-    r = sub.add_parser("run")
-    r.add_argument("--rp", default=os.path.join(SOUND, "build", "rp"))
-    r.add_argument("--results", help="results CSV (default musiclib/.derived/results/results.csv)")
-    r.add_argument("--recipe", nargs="+", default=["orig"],
-                   help="orig | strip | headN (first N chunks; differs per chunk size) | secN (first N seconds)")
-    r.add_argument("--chunk", nargs="+", type=int, default=[1024])
-    r.add_argument("--config", nargs="+", default=["default"], help="names from test/corpus_configs.json")
-    r.add_argument("--seed", nargs="+", type=int, default=[1])
-    r.add_argument("--source", nargs="+", help="top-level folders of musiclib/")
-    r.add_argument("--mode", choices=["CBR", "VBR"])
-    r.add_argument("--match", nargs="+", help="substrings of the path")
-    r.add_argument("--limit", type=int)
-    r.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) // 3))
-    r.add_argument("--threads", type=int, default=3, help="RP_THREADS per run")
-    r.add_argument("--timeout", type=int, default=900, help="seconds per run")
-    p = sub.add_parser("report")
-    p.add_argument("results")
-    p.add_argument("--out")
-    p.add_argument("--binary", help="binary hash (prefix); default: the last one in the file")
-    c = sub.add_parser("compare")
-    c.add_argument("results")
-    c.add_argument("--against", help="another results CSV instead of the baseline")
-    c.add_argument("--update-baseline", action="store_true")
-    c.add_argument("--binary", help="binary of RESULTS (prefix); default: the last one in the file")
-    c.add_argument("--against-binary", help="binary of --against (prefix); default: its last one")
+    for name in json.load(open(SUITES)):
+        p = sub.add_parser(name)
+        p.add_argument("--match", nargs="+", help="only inputs whose path contains one of these")
+        p.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) // THREADS))
+        p.set_defaults(func=cmd_suite, suite=name)
+    s = sub.add_parser("score")
+    s.add_argument("report")
+    s.add_argument("--expect-exact", action="store_true")
+    s.set_defaults(func=cmd_score)
     args = ap.parse_args()
-    return {"scan": cmd_scan, "run": cmd_run, "report": cmd_report, "compare": cmd_compare}[args.cmd](args)
+    return args.func(args)
 
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@ src/scoring/      junction costs for the ranking (junction_scorer; full-PCM flux
 src/search/       ordering the supernodes: DFS (dfs), global matching (global_match),
                   block-move repair (repair), and the lock schedule around them (reconstruct)
 tools/            measurement probes, linked against the same code (rpcore)
-test/             scripts (ci_sanity, regression, corpus.py) and fixtures
+test/             ci_sanity.sh (CI), corpus.py (all other tests) and fixtures
 docs/             HOW_IT_WORKS.md (the algorithm, chapter by chapter), PLAN_*.md, benchmarks
 third_party/      minimp3 (CC0)
 ```

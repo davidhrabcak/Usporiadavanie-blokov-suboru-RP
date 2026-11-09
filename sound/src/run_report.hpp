@@ -60,6 +60,11 @@ inline void set(const std::string& k, double v) {
 }
 inline void setNull(const std::string& k)                   { report().put(k, "null"); }
 inline void setRaw(const std::string& k, const std::string& json) { report().put(k, json); }
+inline void set(const std::string& k, const std::vector<int>& v) {
+    std::string o = "[";
+    for (size_t i = 0; i < v.size(); ++i) { if (i) o += ","; o += std::to_string(v[i]); }
+    report().put(k, o + "]");
+}
 
 // The run's RP_* environment variables (RP_REPORT itself left out), as the "env" object.
 inline void recordEnvironment() {

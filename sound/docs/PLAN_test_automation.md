@@ -1,5 +1,23 @@
 # PLAN - automated corpus tests and test output (2026-10-26)
 
+
+> **2026-11-08 - simplified; this section supersedes the rest of the plan where they differ.**
+> Metrics are computed by `corpus.py` from the order `rp` reports (`status`, `n`, `order` = source
+> index per output chunk or the deepest partial path, `budget_exhausted`, `wall_s`), so they are
+> the same for every format and search method: `exact`, `neighbor_acc`, `position_acc`,
+> `kendall_tau`, `longest_run_frac`, `start_correct`, `coverage`, `budget_exhausted`, `wall_s`.
+> Graph-dependent fields (`pre_breaks`, `resv_breaks`, `edges`, `supernodes`, locks, matching,
+> repair) stay in `rp`'s JSON as diagnostics but are not results columns. `STRUCTURAL` now means
+> "complete, most neighbours right, most chunks off their position" (thresholds not calibrated
+> yet), and SEARCH_FAIL runs are scored on their deepest partial path. Regression = EXACT lost or
+> a new TIMEOUT / ERROR / CRASH. The
+> `scan` / `report` / `compare` commands are gone: `test/corpus.py fixtures|musiclib` runs a suite
+> (`test/corpus_suites.json`), resumes and writes the summary. **2026-11-09: no baseline** - `corpus_baseline.tsv` and
+> `--update-baseline` are removed, runs are compared by hand; `musiclib` runs whole files, not
+> the first 10 s (long files split by `test/split_long_tracks.sh`).
+> `regression.sh`, `measurements.sh` and `test/bench/` are removed. Current usage:
+> CLAUDE.md, Build / Tests.
+
 ## Why
 
 Testing on the real corpus (`sound/musiclib/`) has been done by hand: ad-hoc scripts, `grep`
