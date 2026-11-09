@@ -316,10 +316,10 @@ is found at all. Cheapest, most-decisive levers first:
   lock-step with the chunks; after a reconstruction `rp` prints "X/N chunks in
   original position" and "EXACT (byte-identical to the source stream)" when fully
   correct. No more running `evaluate_order` by hand for a spot check.
-- [x] **C3 - `test/measurements.sh`.** Regenerates the quantitative claims in this
+- [x] **C3 - `test/measurements.sh`** (removed 2026-11-08, see Build / Tests). Regenerated the quantitative claims in this
   file (pre-shuffle / reservoir breaks, chunk & supernode counts, one-valid-successor
   ratio, `global_gain` AUC + rank-1 rate) in one command, so a stale claim is caught.
-- [x] **C4 - `test/regression.sh` + `test/regression_baseline.tsv`.** Local accuracy
+- [x] **C4 - `test/regression.sh` + `test/regression_baseline.tsv`** (replaced 2026-11-08 by `test/corpus.py fixtures`). Local accuracy
   regression check (fails if breaks increase or exact-position % drops >3 points).
   Not in CI - needs the fixtures.
 
@@ -482,16 +482,13 @@ Output is written to `output.mp3` in the current directory. The first chunk is f
 | `RP_GAP` | on | frames larger than the chunk (`PLAN_headerless_chunks.md`): split-tail chunks become nodes, headerless chunks are taken out before the search and put into the slots after the demanders at output. `=0` off. |
 | `RP_SLOT_FILL` | on | slot assignment by PCM flux + header/CRC constraints (`slot_fill`). `=0`: pool order. |
 | `RP_SLOT_ORACLE` | off | diagnostic: `=1` skips the search, takes the true order of the chunks with a header and only fills the slots. |
-| `RP_REPORT` | unset | path: write one JSON object describing the run (input, profile, true-order checks, graph, locks, result, timings) on any normal exit - used by `test/corpus.py`. |
+| `RP_REPORT` | unset | path: write one JSON object describing the run (`status`, `n`, `order` or the deepest partial path, `budget_exhausted`, `wall_s`, plus input / profile / graph diagnostics) on any normal exit - used by `test/corpus.py`. |
 | `RP_PROGRESS` | ~10M | print a `[nodes=… depth=… elapsed=…]` line every N placements. |
 
-**Verification scripts** (in `sound/`, run from there):
-- `test/ci_sanity.sh build` - end-to-end pipeline check on the committed synthetic fixture (also run by CI). It also runs `graph_check` (`tools/graph_check.cpp`): `buildAdjacency`'s indexed graph must equal `canFollow` over every ordered pair, at 1 and 4 KB. `build/graph_check FILE...` runs it on any file.
-- `test/measurements.sh build` - regenerate this doc's quantitative claims (C3).
-- `test/regression.sh [--update] build` - local accuracy regression vs `test/regression_baseline.tsv` (C4; needs the fixtures).
-- `test/corpus.py` - corpus tests (`PLAN_test_automation.md`; Python stdlib only; run from `sound/`):
-  - `scan`: manifest of every `*.mp3` under `musiclib/` (any layout; cached; `musiclib/` is gitignored, derived files go to `musiclib/.derived/`).
-  - `run --recipe orig|strip|headN --chunk 1024 4096 --config default ...`: parallel, resumable matrix; each run writes `RP_REPORT` JSON; one row per run in `musiclib/.derived/results/*.csv` with an outcome class (EXACT / WRONG / SEARCH_FAIL / STRUCTURAL / TIMEOUT / ERROR / CRASH). `headN` = the first N chunks' worth of whole frames at that chunk size (differs per chunk size), `secN` = the first N seconds (same input at every chunk size); both start at the real start (empty bit reservoir). Configs: `test/corpus_configs.json`.
-  - `report RESULTS.csv`: `summary.md` (outcomes by chunk size, format, source, structural cause, per input).
-  - `compare RESULTS.csv [--against OTHER.csv | --update-baseline]`: outcome changes vs `test/corpus_baseline.tsv`; exit 1 on a regression (EXACT lost, new STRUCTURAL, new CRASH or ERROR).
-  - `RP_CORPUS=test test/corpus.py ...`: the fixtures in `test/` (same outcomes as `regression.sh` with config `budget20`).
+**Tests** (run from `sound/`; simplified 2026-11-08). Two layers:
+- `test/ci_sanity.sh build` - CI, every push: `graph_check` (`buildAdjacency`'s indexed graph equals `canFollow` on every ordered pair, at 1 and 4 KB; `build/graph_check FILE...` on any file), then `rp` on the committed synthetic `test/ci_sanity.mp3`, which must score EXACT (`test/corpus.py score REPORT --expect-exact`).
+- `test/corpus.py fixtures` (the files in `test/`, whole, 1 KB, `RP_TIME_BUDGET=20`) and `test/corpus.py musiclib` (`musiclib/`, gitignored, whole files, 4 and 1 KB); suites in `test/corpus_suites.json`. Runs `build/rp` on every input (resumes; results per suite and binary in `musiclib/.derived[/corpus-test]/results/SUITE-BINARY.csv` + `.md` summary; logs and full JSON reports next to it). No baseline: two runs are compared by hand on those files. `--match S...` limits the inputs; `RP_*` variables set when calling are passed to `rp` (A/B run, own results file). Results of inputs no longer in the corpus are left out of the summary.
+- `test/split_long_tracks.sh [-n] [-m MIN] [DIR]` (2026-11-09): splits musiclib files longer than MIN minutes (8 used) into round(D/L) pieces, L = clamp(6 - D/10, 2, 5) min. Piece 1 is a stream copy; pieces 2..n are re-encoded one ffmpeg call each (libmp3lame, same rate/channels, CBR bitrate or VBR -q:a 2) so each starts with an empty bit reservoir (a byte or stream-copy split would start mid-reservoir, item 9). Originals go to `musiclib/.long_originals/`. Run on 2026-11-09: 32 files -> 80 pieces.
+- Metrics, all computed by `corpus.py` from the order in `rp`'s `RP_REPORT` JSON (`status`, `n`, `order` = source index of each output chunk or the deepest partial path, `budget_exhausted`, `wall_s`), so they don't depend on the format or the search: `exact`, `neighbor_acc` (true neighbour pairs / (n-1)), `position_acc` (chunks in place / n), `kendall_tau` (placed chunks only), `longest_run_frac` (longest true-neighbour run / n), `start_correct`, `coverage` (placed / n), `budget_exhausted`, `wall_s` (rp's wall-clock time from load to exit, not CPU time). For a partial path the denominators stay n.
+- Classes: EXACT / STRUCTURAL (complete, `neighbor_acc >= STRUCTURAL_NEIGHBOR_MIN` and `position_acc < STRUCTURAL_POSITION_MAX`: the blocks are right, their placement isn't) / WRONG (other complete orders) / SEARCH_FAIL (no complete ordering; metrics are the partial path's) / TIMEOUT / ERROR / CRASH. The class is recomputed from the metric columns when a results file is read.
+- Removed 2026-11-08/09: the baseline (`test/corpus_baseline.tsv`, `--update-baseline`; comparing is manual), `test/regression.sh` + `regression_baseline.tsv` (= `corpus.py fixtures`), `test/measurements.sh`, `test/bench/` (the 2026-10 benchmark's log parser), `corpus.py`'s `scan` / `report` / `compare` commands, recipes other than `orig` / `secN`, configs (now suites) and seeds other than 1; all in git history. `tools/evaluate_order` stays as a manual tool.

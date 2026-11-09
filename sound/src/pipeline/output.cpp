@@ -39,7 +39,7 @@ vector<int> assignSlots(const Problem& p, const JunctionScorer& scorer, const ve
     return slotPool;
 }
 
-// Provenance label (a line of its own - regression.sh/parse.py grep the lines around it).
+// Provenance label (a line of its own; humans read it, test/corpus.py does not).
 // A global-matching ordering is the min-cost assignment patched + repaired: reservoir-valid, but
 // nothing proves it is the original order, and on some files a wrong order is cheaper than the
 // true one (Queen 4 KB, cbr192_10s 2 KB). The gap is the summed-flux margin to the nearest valid
@@ -168,11 +168,11 @@ int writeOutput(const Problem& p, JunctionScorer& scorer, const Reconstruction& 
          << fixed << setprecision(1) << (100.0 * exactPos / std::max<size_t>(1, reconOrig.size())) << "%)"
          << (exactMatch ? "  --  EXACT (output.mp3 is byte-identical to the source stream)" : "")
          << "\n";
+    // The report carries the order itself; test/corpus.py derives every metric from it.
     RunReport::set("status", "complete");
-    RunReport::set("exact", exactMatch);
-    RunReport::set("exact_pct", 100.0 * exactPos / std::max<size_t>(1, reconOrig.size()));
-    RunReport::set("true_junctions", trueJ);
-    RunReport::set("junctions", reconOrig.empty() ? size_t(0) : reconOrig.size() - 1);
+    RunReport::set("n", chunks.size() + pool.size());
+    RunReport::set("order", reconFull);
+    RunReport::set("budget_exhausted", r.budgetExhausted);
     RunReport::set("provenance", provenanceKey(r.source));
     RunReport::set("repair_moves", r.repairMoves);
     cout << "Reconstruction junctions: " << trueJ << "/" << (reconOrig.empty() ? 0 : reconOrig.size() - 1)
@@ -186,8 +186,11 @@ void reportFailure(const Problem& p, const Reconstruction& r) {
          << (r.budgetExhausted ? " within the search budget" : "") << ").\n";
     // How right was the deepest partial path? Chunk-level junctions whose successor is the
     // true next chunk, and where the first wrong one is.
-    vector<int> path;
-    for (int ci : r.partial) path.push_back(p.origIndexOf[ci]);
+    vector<int> path, pathFull;   // source index among the chunks with a header / in the full stream
+    for (int ci : r.partial) {
+        path.push_back(p.origIndexOf[ci]);
+        pathFull.push_back(p.keptFull.empty() ? p.origIndexOf[ci] : p.keptFull[p.origIndexOf[ci]]);
+    }
     int good = 0, firstBad = -1;
     for (size_t k = 1; k < path.size(); ++k) {
         if (path[k] == path[k - 1] + 1) ++good;
@@ -195,8 +198,8 @@ void reportFailure(const Problem& p, const Reconstruction& r) {
     }
     RunReport::set("status", "no_ordering");
     RunReport::set("budget_exhausted", r.budgetExhausted);
-    RunReport::set("partial_chunks", path.size());
-    RunReport::set("partial_true_junctions", good);
+    RunReport::set("n", p.chunks.size() + p.pool.size());
+    RunReport::set("order", pathFull);   // the deepest partial path (headerless chunks not placed)
     cout << "Deepest partial path: " << r.partialSupers << "/" << r.partialOf << " supernodes, "
          << path.size() << " chunks; true junctions " << good << "/" << (path.empty() ? 0 : path.size() - 1)
          << "; correct prefix = " << (firstBad < 0 ? (int)path.size() : firstBad) << " chunks\n";

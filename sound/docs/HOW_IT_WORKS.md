@@ -777,8 +777,8 @@ So today **no label means "verified"**. This is the main open problem, chapter 7
 ## 5. A worked example: reading one real log
 
 `CBR.mp3`: a 658-chunk constant-bitrate song at 1 KB - the hardest of the old fixtures.
-The committed regression baseline (`test/regression_baseline.tsv`) records it as FAILED. Run for this document with `RP_SEED=1
-RP_TIME_BUDGET=20 build/rp test/CBR.mp3` (as `test/regression.sh` does). Key lines:
+The regression baseline of the time (`test/regression_baseline.tsv`, since replaced by `test/corpus.py`) recorded it as FAILED. Run for this document with `RP_SEED=1
+RP_TIME_BUDGET=20 build/rp test/CBR.mp3` (as the since-removed `test/regression.sh` did). Key lines:
 
 ```
 Edge locking total: 37 edges (20434 decodes, 0.34s) [vs source: 36/37 correct]
@@ -829,7 +829,7 @@ The output is complete, valid and wrong. 92.8% of junctions are right, yet only 
 chunks are "in place", because an early block moved and shifted everything after it - which
 is why junctions are the measure to trust.
 
-`test/regression.sh` reports this file as "OK" (it only flags a drop below the baseline, and
+`test/regression.sh` (since removed) reported this file as "OK" (it only flags a drop below the baseline, and
 the baseline was FAILED). Counted honestly, it is one more wrong output: before, the program
 said "I could not do it"; now it gives an answer that is 93% right and does not say it is
 wrong.
