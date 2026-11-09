@@ -37,11 +37,13 @@ SUITES = os.path.join(HERE, "corpus_suites.json")
 THREADS = 3   # RP_THREADS per run
 TIMEOUT = 900 # seconds per run
 
-# STRUCTURAL = a complete order with most neighbours right but most chunks off their position
-# (blocks in the wrong place). Not calibrated yet: while either is None no run is STRUCTURAL.
-# Changing them reclassifies existing results (the class is recomputed from the metric columns).
-STRUCTURAL_NEIGHBOR_MIN = None   # neighbor_acc >= this ...
-STRUCTURAL_POSITION_MAX = None   # ... and position_acc < this
+# STRUCTURAL = a complete order whose blocks are right but placed wrong: neighbor_acc >= this.
+# Set 2026-11-09 from the 143 complete-but-wrong runs (musiclib whole files at 1 and 4 KB +
+# fixtures): neighbor_acc rises smoothly from 0.06 to 0.999 with one small break between 0.969 and
+# 0.980; position_acc separates nothing (0-0.9 among the >= 0.98 runs, set by where the misplaced
+# block sits), so it is not used. Changing this reclassifies existing results (the class is
+# recomputed from the metric columns).
+STRUCTURAL_NEIGHBOR_MIN = 0.98
 
 
 def derived_dir(corpus):
@@ -105,8 +107,7 @@ def classify(r):
         return "SEARCH_FAIL"    # its metrics describe the deepest partial path
     if r["exact"] == "true":
         return "EXACT"
-    if STRUCTURAL_NEIGHBOR_MIN is not None and STRUCTURAL_POSITION_MAX is not None and \
-       float(r["neighbor_acc"]) >= STRUCTURAL_NEIGHBOR_MIN and float(r["position_acc"]) < STRUCTURAL_POSITION_MAX:
+    if float(r["neighbor_acc"]) >= STRUCTURAL_NEIGHBOR_MIN:
         return "STRUCTURAL"
     return "WRONG"
 
@@ -401,7 +402,7 @@ def summary(R, results, out):
     md = [f"# Test summary\n\n`{os.path.basename(results)}` - {len(R)} runs, {time.strftime('%Y-%m-%d %H:%M')}. "
           "Metrics are over all n chunks of the stream; for SEARCH_FAIL they describe the deepest partial "
           "path (missing chunks count as wrong; `kendall_tau` covers only the placed chunks). STRUCTURAL = "
-          f"complete, neighbor_acc >= {STRUCTURAL_NEIGHBOR_MIN} and position_acc < {STRUCTURAL_POSITION_MAX}.\n"]
+          f"complete and neighbor_acc >= {STRUCTURAL_NEIGHBOR_MIN} (the blocks are right, their placement isn't).\n"]
     md.append("## Outcome by chunk size\n")
     md.append(table(["chunk"] + CLASSES + ["runs"],
                     [[c] + [sum(r["class"] == k for r in by_chunk[c]) for k in CLASSES] + [len(by_chunk[c])]
