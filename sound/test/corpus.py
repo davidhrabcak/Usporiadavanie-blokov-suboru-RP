@@ -471,7 +471,7 @@ def main():
     for name in json.load(open(SUITES)):
         p = sub.add_parser(name)
         p.add_argument("--match", nargs="+", help="only inputs whose path contains one of these")
-        p.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) // THREADS))
+        p.add_argument("--jobs", type=int, default=8)   # rp is mostly single-threaded; 10 OOM-killed a 6 GB 1 KB run on 14 GB
         p.set_defaults(func=cmd_suite, suite=name)
     s = sub.add_parser("score")
     s.add_argument("report")
