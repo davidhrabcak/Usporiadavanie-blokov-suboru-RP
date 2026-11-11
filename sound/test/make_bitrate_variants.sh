@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Generates short constant- and variable-bitrate test fixtures from one source track, for the
-# bitrate / chunk-size matrix in BENCHMARK_pcm_vs_main.md.
+# bitrate / chunk-size matrix in docs/HOW_IT_WORKS.md ch. 6.
 #
 #   test/gen/cbr<K>_<D>s.mp3    CBR at K kbps (32 64 128 192 320), D seconds long (10, 30)
 #   test/gen/vbrq<Q>_<D>s.mp3   LAME VBR -q:a Q (2, 5), same lengths

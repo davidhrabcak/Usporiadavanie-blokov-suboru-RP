@@ -17,7 +17,7 @@ struct Problem {
     StreamProfile profile;                      // from chunk 0, + the CBR bitrate filter
     long chunkSize = 0;
 
-    // Frames longer than the chunk (PLAN_headerless_chunks.md): the chunks with no frame header
+    // Frames longer than the chunk (HOW_IT_WORKS 4.18): the chunks with no frame header
     // ("pool") are taken out before the shuffle and put into the slots after their demanders
     // at output.
     std::vector<std::vector<uint8_t>> pool;     // shuffled like the rest

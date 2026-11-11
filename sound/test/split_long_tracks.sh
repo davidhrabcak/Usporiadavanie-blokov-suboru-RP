@@ -13,8 +13,8 @@
 # Why ffmpeg and not split(1): a byte split cuts through frames, and every piece after the first
 # then starts mid-stream, where main_data_begin points into the previous piece's bytes. rp finds
 # the start chunk by main_data_begin == 0 and the reservoir check rejects such a start, so those
-# pieces would be useless as test inputs (CLAUDE.md, item 9, "Clips must start at the track's
-# start"). A stream copy (-c copy, or ffmpeg's segment muxer) has the same problem. So:
+# pieces would be useless as test inputs (CLAUDE.md, Findings, "Clips must start at the
+# track's start"). A stream copy (-c copy, or ffmpeg's segment muxer) has the same problem. So:
 #   - piece 1 is a stream copy of the first L minutes (the original encoder's bytes, valid start);
 #   - pieces 2..n are each re-encoded by their own ffmpeg call (libmp3lame, same sample rate and
 #     channel count; CBR at the source bitrate, VBR at -q:a 2), so each starts with an empty

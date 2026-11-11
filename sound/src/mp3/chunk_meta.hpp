@@ -102,7 +102,7 @@ struct ChunkMeta {
     // (no frame header inside). It is then valid with headOffset = frameStarts[0] = its size
     // (the "next frame" would start right after its last byte) and has no successors.
     bool                  finalFragment = false;
-    // Demander (PLAN_headerless_chunks.md): this chunk's tail frame contains the whole next
+    // Demander (HOW_IT_WORKS 4.18): this chunk's tail frame contains the whole next
     // chunk, so a headerless chunk always follows it. Set by main from findGapSlots.
     bool                  gapAfter = false;
     StreamProfile         profile;

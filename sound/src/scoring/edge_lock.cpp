@@ -88,7 +88,7 @@ std::vector<LockedEdge> findConfidentEdges(const std::vector<std::vector<uint8_t
         if (!metas[a].valid || adj[a].empty()) return;
         // A demander's edges cross a slot: never scored, so never locked - and, unscored, it
         // blocks every lock into its successors on the predecessor side below, where its
-        // invisible true edge could otherwise be out-competed (PLAN_headerless_chunks.md).
+        // invisible true edge could otherwise be out-competed (HOW_IT_WORKS 4.18).
         if (metas[a].gapAfter) return;
         std::vector<int> ctx;
         if (a == start) ctx.push_back(-1);

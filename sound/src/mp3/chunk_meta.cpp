@@ -365,14 +365,14 @@ ChunkMeta computeChunkMeta(const int chunkIndex,
 
         // Composite (tailQuality, frameCount) comparison, tailQuality first: in CBR streams
         // the wrong alignment can win on raw frame count alone (aliased headers repeating
-        // every frameLength bytes - see CLAUDE.md "computeChunkMeta picks the wrong
-        // headOffset"), but the true boundary almost always has a cleanly-readable tail.
+        // every frameLength bytes - see CLAUDE.md, Findings, "CBR aliasing"), but the true
+        // boundary almost always has a cleanly-readable tail.
         // Preferring quality over count fixes that class of bug even when it means
         // accepting fewer frames.
         // Third key, ties only: a candidate whose side info is impossible loses (it used to be
         // "earlier offset wins"). At 320 kbps / 1 KB a chunk holds at most one real frame
         // start, so any false sync before it tied and won, giving the chunk a wrong tail
-        // (1-7 true-order breaks per musiclib track; PLAN_headerless_chunks.md).
+        // (1-7 true-order breaks per musiclib track; HOW_IT_WORKS 4.18).
         const bool plausible = sideInfoPlausible(chunk, off, h) != 0;
         if (quality > bestQuality || (quality == bestQuality && count > bestCount) ||
             (quality == bestQuality && count == bestCount && plausible && !bestPlausible)) {

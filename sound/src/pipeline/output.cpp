@@ -13,7 +13,7 @@ using namespace std;
 
 namespace {
 
-// Stage B (PLAN_headerless_chunks.md): assign the pool to the slots after the demanders by PCM
+// Slot filling (HOW_IT_WORKS 4.18): assign the pool to the slots after the demanders by PCM
 // flux (SlotFill). Returns the pool index per slot, in order (-1 none).
 vector<int> assignSlots(const Problem& p, const JunctionScorer& scorer, const vector<int>& seq, const int threads) {
     const vector<ChunkMeta>& metas = p.metas;
@@ -115,7 +115,7 @@ int writeOutput(const Problem& p, JunctionScorer& scorer, const Reconstruction& 
         reconOrig.push_back(origIndexOf[ci]);
         reconFull.push_back(p.keptFull.empty() ? origIndexOf[ci] : p.keptFull[origIndexOf[ci]]);
         // A demander is followed by a slot. Stage A fills slots in pool order; the
-        // assignment by flux is stage B (PLAN_headerless_chunks.md).
+        // assignment by flux is SlotFill (HOW_IT_WORKS 4.18).
         if (metas[ci].gapAfter && k + 1 < seq.size()) {
             ++slots;
             int pi = -1;

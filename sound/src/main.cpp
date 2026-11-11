@@ -23,7 +23,7 @@
 int main(int argc, char* argv[]) {
     const Config cfg = Config::fromEnv(argc, argv);
 
-    // RP_REPORT (PLAN_test_automation.md): starts the clock; written on any return from main.
+    // RP_REPORT: starts the clock; written on any return from main.
     RunReport::set("file", cfg.input);
     RunReport::set("status", "error");
     RunReport::recordEnvironment();

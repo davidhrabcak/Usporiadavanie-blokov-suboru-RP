@@ -1,67 +1,41 @@
 # rp — Chunk Reconstruction
 
-Research project on **file carving**: given a file that has been split into
-equal-sized chunks and shuffled, reconstruct the original chunk order using
-only structural/content heuristics — no filenames, no metadata, no external
-state. Two independent subprojects apply this to different file types.
+Research project on **file carving**: a file is split into equal-sized chunks and shuffled,
+and the original order is reconstructed from the chunks' content alone — no filenames, no
+metadata, no external state. Two independent subprojects apply this to different file types.
 
-## Subprojects
+## `text/`
 
-### `text/`
-Reconstructs a shuffled plain-text file. A training corpus is used to build a
-frequency dictionary of 3-word sequences, which scores how plausible it is
-for one chunk to follow another. A backtracking search then searches chunk
-permutations, pruned by that scoring, to find valid reconstructions.
+Reconstructs a shuffled plain-text file. A training corpus builds a frequency dictionary of
+3-word sequences, which scores how plausible it is for one chunk to follow another; a
+backtracking search over chunk permutations, pruned by that score, finds reconstructions.
 
-Implemented:
 - `Segmenter` — splits an input file into fixed-size chunks
-- `ThreeSequenceDictionaryCreator` / `ThreeSequenceDictionary` — builds and loads
-  a word-sequence frequency dictionary from a training corpus
-- `FrequencyThreeWordsValidator` — validates/scores a candidate chunk ordering
-- `Backtrack` — backtracking search over chunk permutations, writes valid
-  reconstructions to `found.txt`
+- `ThreeSequenceDictionaryCreator` / `ThreeSequenceDictionary` — build and load the dictionary
+- `FrequencyThreeWordsValidator` — scores a candidate ordering
+- `Backtrack` — the search; writes reconstructions to `found.txt`
 
-### `sound/`
-Reconstructs a shuffled MP3 file using MP3 frame-header structure. Each chunk
-is analyzed for frame alignment, an adjacency graph is built from which
-chunks can legally follow which others, and a DFS search (sped up by
-collapsing forced chains) finds a valid reconstruction, verified with a
-bit-reservoir sanity check.
-
-Implemented:
-- `Header` / `frame_scanner` — MPEG frame header parsing and stream scanning
-- `chunk_meta` — per-chunk frame alignment and tail-byte analysis, including
-  exact cross-chunk Layer III side-info decoding for split frames
-- `adjacency` — builds the chunk-adjacency graph (`canFollow`)
-- `huffman_tables` — Layer III Huffman code tables (data only so far, sourced
-  from minimp3; not yet wired into a decoder)
-- `main` — supernode collapse + DFS reconstruction, writes `output.mp3`
-
-Known limitation: on constant-bitrate files, aliased frame headers can make
-several chunks structurally indistinguishable, so the DFS finds *a* valid
-ordering that isn't always the *original* one. See `sound/CLAUDE.md` for
-full algorithm notes and open problems.
-
-## Build & run
-
-Each subproject builds independently with CMake.
-
-### text
 ```
 cd text
 cmake -B build && cmake --build build
 ./build/main
 ```
-Expects `in.txt` (the file to reconstruct, pre-chunked via `Segmenter`) and
-`data.txt` (training corpus for the frequency dictionary) in the working
-directory. Output is written to `found.txt`.
 
-### sound
+Expects `in.txt` (the file to reconstruct, pre-chunked via `Segmenter`) and `data.txt` (the
+training corpus) in the working directory.
+
+## `sound/`
+
+Reconstructs a shuffled MP3 file from the MP3 format and the decoded audio: a graph of which
+chunk can structurally follow which, pruned with the bit reservoir, scored by how smooth each
+junction sounds, then ordered by a ranked search and global matching with repair. Byte-exact
+on 192 of 367 real-music inputs at 4 KB chunks (2026-11-09).
+
 ```
 cd sound
-cmake -B cmake-build-debug && cmake --build cmake-build-debug
-./cmake-build-debug/rp path/to/input.mp3
+cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+./build/rp path/to/input.mp3      # writes output.mp3
 ```
-The input file's first chunk is treated as pinned. Output is written to
-`output.mp3` in the current directory. An `RP_SEED` environment variable
-overrides the shuffle's RNG seed, for reproducible A/B comparisons.
+
+See `sound/README.md` (layout), `sound/docs/HOW_IT_WORKS.md` (the algorithm) and
+`sound/CLAUDE.md` (options, tests, results, open problems).

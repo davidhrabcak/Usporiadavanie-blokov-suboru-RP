@@ -9,7 +9,7 @@
 
 // The chunk graph the search runs on, built in stages:
 //   1. structural: buildAdjacency (canFollow) and, with headerless chunks taken out, the gap
-//      slots after their demanders and the gap edges a => b (PLAN_headerless_chunks.md);
+//      slots after their demanders and the gap edges a => b (HOW_IT_WORKS 4.18);
 //   2. reservoir arc filter: arcs that fail the bit-reservoir check from any entry level;
 //   3. arc consistency (AC-3).
 // Stages 2 and 3 are only sound when the true order passed the same checks, so they are gated

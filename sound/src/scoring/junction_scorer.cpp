@@ -103,7 +103,7 @@ double JunctionScorer::pcmRaw(const int* left, int nLeft, const int cand) {
     while (nLeft > 1 && !metas_[left[0]].valid) { ++left; --nLeft; }
     // A window spanning a slot (a headerless chunk not placed yet) can't be decoded: neutral
     // once calibrated, never "unmeasured" - the repair would otherwise bunch slots together
-    // to share such windows (PLAN_headerless_chunks.md). Not memoised: neutral is set later.
+    // to share such windows (HOW_IT_WORKS 4.18). Not memoised: neutral is set later.
     for (int k = 0; k < nLeft; ++k)
         if (metas_[left[k]].gapAfter) return pcmNeutral_ > 0 ? pcmNeutral_ : -1.0;
     PcmKey key;

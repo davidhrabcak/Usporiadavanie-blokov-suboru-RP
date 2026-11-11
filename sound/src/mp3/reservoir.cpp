@@ -28,7 +28,7 @@ bool advanceReservoirChunk(int& level,
     if (prevMeta != nullptr && prevMeta->gapAfter) {
         // A headerless chunk (not placed yet) sits between: the straddling frame's side info
         // is in it. A full reservoir is sound - the check is monotone in the entry level
-        // (PLAN_headerless_chunks.md).
+        // (HOW_IT_WORKS 4.18).
         level = maxBits;
         creditedExactly = true;
     } else if (prevMeta != nullptr && prevMeta->tailPartialLen > 0) {

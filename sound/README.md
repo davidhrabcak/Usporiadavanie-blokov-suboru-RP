@@ -26,7 +26,7 @@ src/search/       ordering the supernodes: DFS (dfs), global matching (global_ma
                   block-move repair (repair), and the lock schedule around them (reconstruct)
 tools/            measurement probes, linked against the same code (rpcore)
 test/             ci_sanity.sh (CI), corpus.py (all other tests) and fixtures
-docs/             HOW_IT_WORKS.md (the algorithm, chapter by chapter), PLAN_*.md, benchmarks
+docs/             HOW_IT_WORKS.md (the algorithm, chapter by chapter)
 third_party/      minimp3 (CC0)
 ```
 
@@ -34,12 +34,13 @@ third_party/      minimp3 (CC0)
 
 1. Cut the file into chunks; find the stream profile and whether it is CBR.
 2. Shuffle; find the first chunk from content.
-3. Per chunk: where the frames start and how the last one spills over (`ChunkMeta`).
+3. Per chunk: where the frames start and how the last one spills over (`ChunkMeta`). Chunks
+   lying wholly inside one frame go to a pool, to be put back into slots at the end.
 4. Build the graph of chunks that can structurally follow each other; prune it with the bit
    reservoir and arc consistency; lock edges whose decoded audio is clearly best.
 5. Collapse forced chains, then search (DFS ranked by junction cost, global matching as a
    fallback) and repair the order on the summed PCM flux.
-6. Write `output.mp3` and compare it with the source.
+6. Fill the slots, write `output.mp3` and compare it with the source.
 
 `docs/HOW_IT_WORKS.md` explains each step. `CLAUDE.md` holds the measurements, the open
 problems and the full table of `RP_*` options.

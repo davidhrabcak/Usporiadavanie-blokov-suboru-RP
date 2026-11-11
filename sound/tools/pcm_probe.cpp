@@ -1,6 +1,6 @@
 // pcm_probe <fixture.mp3> [maxJunctions]
 //
-// PLAN_full_pcm_decode.md steps 1-2. Runs on the TRUE (unshuffled) chunk order - adjacency
+// Measures the PCM junction flux (HOW_IT_WORKS 4.7). Runs on the TRUE (unshuffled) chunk order - adjacency
 // is content-based and shuffle-invariant, so chunk i's true successor is i+1 and adj[i] is
 // exactly the candidate set the DFS sees.
 //

@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <vector>
 
-// Full-decode junction scoring (PLAN_full_pcm_decode.md). Decodes a short window of chunks
+// Full-decode junction scoring (HOW_IT_WORKS 4.7). Decodes a short window of chunks
 // all the way to PCM with the vendored minimp3 (requantisation, stereo, IMDCT, synthesis) and
 // scores how continuous the audio is across the boundary between the left and right side.
 //

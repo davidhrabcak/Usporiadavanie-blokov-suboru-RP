@@ -25,7 +25,7 @@ constexpr int PCM_LEFT_MAX = 8;   // most path chunks a PCM window takes on its 
 // Per-chunk Layer III side-info features at each end, for the continuity ranking heuristic.
 // *First = granule 0 of the chunk's first complete frame; *Last = last granule of the last
 // complete frame. -1 when unavailable (no complete frame / side info didn't fit).
-// See PLAN_sideinfo_mainbits.md Step 1 + A2: `global_gain` (granule loudness) is the dominant
+// Measured with sideinfo_probe (CLAUDE.md, Findings): `global_gain` (granule loudness) is the dominant
 // junction-continuity signal - |Δ global_gain| ranks the true successor #1 in ~60-74% of VBR
 // branch points (vs ~30% for the graph's own order). A2: adding a small |Δ big_values|
 // (spectral-occupancy) term robustly nudges rank-1 up ~1-3pp on every fixture.
@@ -103,7 +103,7 @@ private:
     double specScale_ = 10.0;
     std::unordered_map<long long, Mp3MainData::GranuleSpectrum> specHead_, specTail_;
 
-    // Full-PCM term (PLAN_full_pcm_decode.md), memoised by the window's chunk tuple.
+    // Full-PCM term (HOW_IT_WORKS 4.7), memoised by the window's chunk tuple.
     bool pcm_ = true;
     double pcmScale_ = 1.0;     // set by calibration
     double pcmNeutral_ = 0.0;   // raw value used when a junction can't be measured

@@ -11,7 +11,7 @@
 // The goal is NOT a full decoder - no IMDCT, no synthesis filterbank, and (for now) no
 // requantisation. Just enough to recover, per granule, which of the 576 frequency lines carry
 // energy, bucketed into a small per-band occupancy profile that adjacent audio frames should
-// have in common. See PLAN_sideinfo_mainbits.md Milestone 2.
+// have in common. See CLAUDE.md, Findings, "Junction signals".
 
 namespace Mp3MainData {
 

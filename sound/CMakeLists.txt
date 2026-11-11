@@ -71,7 +71,7 @@ function(rp_tool name)
 endfunction()
 
 rp_tool(evaluate_order)       # compare an output .mp3 with the original, metric by metric
-rp_tool(sideinfo_probe)       # side-info continuity signals on the true order (PLAN_sideinfo_mainbits.md)
-rp_tool(pcm_probe)            # full-PCM junction flux on the true order (PLAN_full_pcm_decode.md)
+rp_tool(sideinfo_probe)       # side-info continuity signals on the true order
+rp_tool(pcm_probe)            # full-PCM junction flux on the true order
 rp_tool(left_context_check)   # PcmJunction::LeftContext == scoreJunction, bit for bit (+ timing)
 rp_tool(graph_check)          # buildAdjacency agrees with canFollow on every pair (test/ci_sanity.sh)

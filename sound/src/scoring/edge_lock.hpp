@@ -7,7 +7,7 @@
 #include <vector>
 #include "mp3/chunk_meta.hpp"
 
-// Confident-edge locking from the full-PCM junction flux (PLAN_full_pcm_decode.md, step 5).
+// Confident-edge locking from the full-PCM junction flux (HOW_IT_WORKS 4.9).
 //
 // The flux score depends on the path context before the junction, which isn't known before
 // the search. So every edge a->b is scored under EVERY structural predecessor p of a (window

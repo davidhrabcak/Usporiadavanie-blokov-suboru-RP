@@ -1,12 +1,11 @@
 // sideinfo_probe <fixture.mp3> [num_random_pairs]
 //
-// Step 1 of PLAN_sideinfo_mainbits.md: measure whether Layer III *side-info* fields (no
-// Huffman / main-data decode) discriminate a chunk's true successor from other chunks, to
-// decide whether the full spectral decode in Milestone 2 is worth building.
+// Measure whether Layer III *side-info* fields (no Huffman / main-data decode) discriminate
+// a chunk's true successor from other chunks (the measurements behind the ranking terms).
 //
 // Runs on the TRUE (unshuffled) chunk order - `buildAdjacency`/`canFollow` are content-based
 // and shuffle-invariant, so the true successor of chunk i is always chunk i+1 and the
-// candidate graph `adj` is identical to what `main.cpp` sees after shuffling (CLAUDE.md item 7).
+// candidate graph `adj` is identical to what `main.cpp` sees after shuffling.
 //
 // Two measurements:
 //   A. Per-feature separability: AUC (Mann-Whitney) between the junction-delta distribution
@@ -144,8 +143,8 @@ int main(int argc, char** argv) {
 
     // ---- A3a probe: how many frameStarts a bitrate filter in StreamProfile::matches would
     // reject as false positives (headers that decode as the profile stream but at a different
-    // bitrate). For CBR this is the whole point - see CLAUDE.md TODO "Bitrate as a
-    // discriminator". Also reports the bitrate distribution over all real complete frames.
+    // bitrate). For CBR this is the whole point - see CLAUDE.md, Findings,
+    // "Junction signals". Also reports the bitrate distribution over all real complete frames.
     {
         int brHist[16] = {0};                 // by bitrate index is awkward; bucket by kbps/8 -> coarse
         int total = 0, nonModal = 0;
@@ -598,7 +597,7 @@ int main(int argc, char** argv) {
     // (a) its TRUE tail bytes and (b) the head bytes of many WRONG chunks, using the true
     // reservoir. True should always land on part2_3_length; a wrong successor should almost
     // always fail (invalid leaf, or bit-count far off). This is the go/no-go for turning the
-    // decoder into a hard structural prune - see PLAN_huffman_junction_filter.md.
+    // decoder into a hard structural prune - measured NO-GO (CLAUDE.md, Findings).
     {
         using namespace Mp3MainData;
         vector<uint8_t> stream;

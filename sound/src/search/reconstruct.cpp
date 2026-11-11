@@ -114,7 +114,7 @@ int Reconstructor::trueJunctions(const vector<int>& seq) const {
     return tj;
 }
 
-// Confident-edge locking (PLAN_full_pcm_decode.md step 5): force edges whose full-PCM junction
+// Confident-edge locking (HOW_IT_WORKS 4.9): force edges whose full-PCM junction
 // flux beats every competitor - on both the successor and predecessor side - by a factor >= tau
 // (median over the predecessor contexts), iterated with AC-3. RP_LOCK_TAU sets the schedule
 // (comma list, e.g. "1.5" for a single attempt); RP_LOCK=0 disables. Same soundness gate as
@@ -398,7 +398,7 @@ void Reconstructor::finalRepair(vector<int>& seq) {
 }
 
 bool Reconstructor::run(Reconstruction& out) {
-    // RP_SLOT_ORACLE=1 (diagnostic, PLAN_headerless_chunks.md stage B): skip the search and take
+    // RP_SLOT_ORACLE=1 (diagnostic, HOW_IT_WORKS 4.18): skip the search and take
     // the true order of the chunks with a header, so the slot assignment is measured alone.
     if (cfg_.slotOracle) {
         matchSeq_.assign(chunks_.size(), 0);

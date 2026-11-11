@@ -1,17 +1,15 @@
-# How `rp` finds the original chunk order - the whole process, explained
+# How `rp` finds the original chunk order
 
-Branch `global-matching`, HEAD `60e8c4a`, written 2026-10-20.
+Written 2026-10-20, updated 2026-11-11.
 
-This document explains, in plain language and in full, how the program `rp` puts a shuffled
-MP3 file back together. It covers every stage, why each one exists, which choices were made
-along the way and why, what was tried and thrown away, and what the stage costs or risks.
-It is meant to be read from top to bottom by someone who has not followed the project day
-by day. It is deliberately long. Where a number appears, it comes from a dated measurement
-(the benchmark of 2026-10-18 in `tmp/bench/runs.csv`, or a run done for this document) -
-not from memory.
+This document explains in plain language how `rp` puts a shuffled MP3 file back together:
+every stage, why it exists, what was tried and dropped, and what it costs or risks. It is
+written for someone who has not followed the project day by day. Numbers come from dated
+measurements (mostly the development benchmark of 2026-10-18), not from memory. Current
+corpus results, the option table and the full list of findings are in `../CLAUDE.md`.
 
-If you only want the short version: chapter 1 (the problem), chapter 3 (the pipeline in
-one picture), chapter 6 (results) and chapter 8 (the keep-or-roll-back decision).
+Short version: chapter 1 (the problem), chapter 3 (the pipeline), chapter 6 (results) and
+chapter 7 (the wrong outputs).
 
 ---
 
@@ -25,27 +23,26 @@ one picture), chapter 6 (results) and chapter 8 (the keep-or-roll-back decision)
    - 4.2 Reading each chunk on its own (`ChunkMeta`)
    - 4.3 Which chunk can follow which: the structural graph
    - 4.4 The bit reservoir: a second, stricter rule
-   - 4.5 NEW - the reservoir arc filter
+   - 4.5 The reservoir arc filter
    - 4.6 Arc consistency (AC-3), and the bug the filter exposed
    - 4.7 Listening to the junction: the PCM flux score
-   - 4.8 NEW - `LeftContext`: decoding the left side only once
+   - 4.8 `LeftContext`: decoding the left side only once
    - 4.9 Locking the obvious edges (confident-edge locking)
    - 4.10 Gluing forced chains: supernodes
    - 4.11 The depth-first search (DFS)
-   - 4.12 NEW - global matching: solving the whole puzzle at once
+   - 4.12 Global matching: solving the whole puzzle at once
    - 4.13 Repair: fixing a nearly-right order with block moves
-   - 4.14 NEW - the minimum-gain rule for repair
+   - 4.14 The minimum-gain rule for repair
    - 4.15 The matching as a hint for the DFS
    - 4.16 Iterated matching (built, measured, switched off)
    - 4.17 Output, the provenance label and the stability gap
+   - 4.18 Frames larger than the chunk: headerless chunks and slots
 5. A worked example: reading one real log
 6. Results
 7. The wrong outputs: what they are and why they happen
-8. Keep or roll back? The decision and its reasoning
-9. Honest caveats
-10. What comes next
-11. Quick reference: the switches
-12. Where the ideas come from
+8. Honest caveats
+9. What comes next
+10. Where the ideas come from
 
 ---
 
@@ -59,16 +56,12 @@ using only what is inside the pieces themselves.
 This is a real problem in digital forensics ("file carving"): when a disk is damaged or a
 file is deleted, its blocks are often still on the disk but no longer linked together.
 
-Two simplifications are made:
+One simplification is made: **all pieces are present** and none is damaged. The answer is a
+reordering of exactly the pieces we have. (The first piece is shuffled like the rest and
+found from its content, 4.1.)
 
-- **Chunk 0 is known.** The first piece is never shuffled. It contains the start of the
-  stream (often an ID3 tag and the first frames), so it is easy to find in practice, and it
-  gives us the stream's basic settings (sample rate, stereo/mono, MPEG version).
-- **All pieces are present** and none is damaged. The answer is a reordering of exactly
-  the pieces we have.
-
-So the task is: find the one order of `n` pieces, starting from piece 0, that is the
-original file. With `n` pieces there are `(n-1)!` possible orders. For a 30-second file at
+So the task is: find the one order of `n` pieces that is the original file. With `n` pieces
+there are `n!` possible orders. For a 30-second file at
 1 KB chunks that is roughly 500 pieces - a number of orders with over a thousand digits. We
 can not try them all. Everything below is about cutting that space down, and about
 recognising the right answer when we see it.
@@ -172,16 +165,17 @@ is reproducible.
  input.mp3
     |
     v
- [4.1] cut into chunks, pin chunk 0, shuffle the rest (fixed seed)
+ [4.1] cut into chunks, shuffle (fixed seed), find the first chunk from content
     |
     v
  [4.2] read every chunk on its own: where do frames start? what does the tail look like?
+       [4.18] chunks inside an oversized frame go to a pool; their predecessors get gap edges
     |
     v
  [4.3] structural graph: arrow a->b if b's frame starts are where a's cut frame says they must be
     |
     v
- [4.5] NEW reservoir arc filter: delete arrows that break the bit reservoir in every possible case
+ [4.5] reservoir arc filter: delete arrows that break the bit reservoir in every possible case
     |
     v
  [4.6] AC-3: forced arrows remove competitors, repeat until nothing changes
@@ -192,7 +186,7 @@ is reproducible.
  |  [4.10] glue forced chains into supernodes                                                     |
  |  [4.11] DFS from chunk 0: try candidates best-sounding first, check the reservoir as it goes  |
  |      found?  -> stop trying lock attempts                                                      |
- |      not found -> [4.12] NEW global matching (whole-file assignment + cycle splicing)          |
+ |      not found -> [4.12] global matching (whole-file assignment + cycle splicing)              |
  |                   [4.13/4.14] repair it (breaks first, then flux, with a minimum gain)         |
  |                   valid?  -> done                                                              |
  |                   not valid -> [4.15] DFS again, with the matching's choices tried first       |
@@ -202,17 +196,16 @@ is reproducible.
  [4.13/4.14] repair the found order (block moves/swaps on the full graph, minimum gain 1.0)
     |
     v
- [4.17] write output.mp3, print provenance label + diagnostics
+ [4.18] fill the slots with the pooled chunks; [4.17] write output.mp3, print provenance + diagnostics
 ```
 
-The stages marked NEW are the work on this branch. The rest existed before (on
-`full-pcm-decode`, called "PCM final" in the results) but some of them were changed to fit -
-those changes are described in place.
-
-**The single most important idea of this branch** is the change from "search for a path,
-step by step, from the start" to "solve for the whole file at once, then fix the few
-mistakes". Section 4.12 explains why the step-by-step search hit a wall and why the global
-view gets past it.
+The project went through three generations, which the results compare: header signals +
+DFS; then decoding each junction to sound (PCM) with locking and repair ("PCM final",
+`1c5abe1`); then global matching, the reservoir filter, `LeftContext` and the minimum-gain
+rule ("current"). The key step of the last one is the change from "search for a path, step
+by step, from the start" to "solve for the whole file at once, then fix the few mistakes".
+Section 4.12 explains why the step-by-step search hit a wall and why the global view gets
+past it.
 
 ---
 
@@ -225,7 +218,7 @@ view gets past it.
 Alongside the shuffle, the program keeps a hidden list of where each chunk *really* came
 from (`origIndexOf`).
 
-**Finding the first chunk (since 2026-10-27; before, chunk 0 was simply kept first).** The
+**Finding the first chunk (since 2026-10-27; before, chunk 0 was kept first).** The
 first chunk must start exactly on a frame header, and its first frame must have
 `main_data_begin == 0`: nothing came before it, so the bit reservoir is empty. Mid-stream
 chunks rarely meet both. If several do, one whose first frame is a Xing/Info/VBRI frame wins,
@@ -233,18 +226,18 @@ because only a stream's first frame is one. The chunk found is moved to the fron
 later stage treats it as the start, as before. On the fixtures this always finds the right
 chunk. On the `musiclib` corpus it fails to decide on about 5% of the files: their encoders
 write no Xing frame and often leave `main_data_begin` at 0. Then the choice is a guess, and
-the log says `AMBIGUOUS` (`CLAUDE.md`, Project Goal).
+the log says `AMBIGUOUS`.
 
 **Why a fixed seed.** Early in the project the seed came from the clock, so two runs of the
-same file gave different results and claims in the notes could not be re-checked (the
-"CBR in 0.17 s" story in `CLAUDE.md` item 1 is the cautionary tale). Since 2026-09-07 the
-seed is fixed; `RP_SEED=random` restores the old behaviour.
+same file gave different results and claims in the notes could not be re-checked (a claimed
+"CBR in 0.17 s" never reproduced). Since 2026-09-07 the seed is fixed; `RP_SEED=random`
+restores the old behaviour.
 
 **What the hidden list is used for - and what it must never be used for.** `origIndexOf` is
 used only to *report* how good the answer is ("610/657 true junctions", "[vs source: 36/37
 correct]"). Every line in the log that says "vs source" is a report card, not an input. The
 algorithm itself must not peek. There is one important exception, discussed honestly in
-chapter 9: two safety gates look at the *unshuffled* file.
+chapter 8: two safety gates look at the *unshuffled* file.
 
 **Pre-shuffle diagnostics.** Before shuffling, the program runs its own rules on the true
 order:
@@ -255,13 +248,14 @@ order:
 
 These two answers are used as *gates*: the stages that would become unsafe if a rule had a
 blind spot (the reservoir arc filter, AC-3, edge locking) only run when the rules passed the
-true order. Chapter 9 explains why this is a research-prototype convenience.
+true order. Chapter 8 explains why this is a research-prototype convenience.
 
 ### 4.2 Reading each chunk on its own (`ChunkMeta`)
 
 **What happens.** For every chunk, `computeChunkMeta` (in `chunk_meta.cpp`) tries every byte
 position as a possible frame start. A position counts if there is a valid header there that
-matches the stream (same MPEG version, layer, sample rate, channel mode as chunk 0). From
+matches the stream (same MPEG version, layer, sample rate and protection bit as the start;
+on CBR files also the same bitrate). From
 each such position it walks forward frame by frame. The best starting position becomes the
 chunk's `headOffset`. From that walk the chunk learns:
 
@@ -276,12 +270,18 @@ chunk's `headOffset`. From that walk the chunk learns:
 **Why "best position" is ranked tail-first.** A random byte pattern can look like a valid
 header. An earlier version picked the position with the most complete frames, which often
 chose a false alignment with a messy tail. Ranking by "how clean is the tail" first and
-"how many frames" second (`tailQuality`) removed most of those mistakes (`CLAUDE.md` item 2).
+"how many frames" second (`tailQuality`) removed most of those mistakes. Remaining ties go
+against side info that no real frame can have (`sideInfoPlausible`).
 
 **Why chunks with zero complete frames are kept.** With large VBR frames (up to 835 bytes in
 a 1024-byte chunk) a chunk may contain only the end of one frame and the start of the next.
 An old rule threw such chunks away as "invalid", which cut the true path in 17 places on
-`test7_shorter` (item 6). Now any chunk with a believable frame start is valid.
+`test7_shorter`. Now any chunk with a believable frame start is valid.
+
+**False headers and the CRC.** If the protection bit is 0, a 16-bit CRC sits between the
+header and the side info; every side-info read skips it. The protection bit never changes
+inside a stream, so a header with the other value is a false sync. This check removed the
+last structural breaks on `test7.mp3`.
 
 ### 4.3 Which chunk can follow which: the structural graph
 
@@ -304,9 +304,8 @@ but still ambiguous: short quiet frames of 104 bytes appear dozens of times.
 
 **Tried and rejected.** Requiring one *more* complete frame after the required position
 made things worse (many true successors start with a large frame that does not fit twice in
-a chunk) - item 7. Comparing the bytes of `a`'s tail with `b`'s head does not work at all:
-they are two different, consecutive parts of one frame, not two copies of the same bytes -
-item 1.
+a chunk). Comparing the bytes of `a`'s tail with `b`'s head does not work at all: they are
+two different, consecutive parts of one frame, not two copies of the same bytes.
 
 ### 4.4 The bit reservoir: a second, stricter rule
 
@@ -327,7 +326,7 @@ For every frame it checks:
 Note the update starts from the frame's own `main_data_begin`, not from the previous level.
 This was a hard-won detail (checked byte by byte against the `minimp3` decoder): any spare
 room the frame does not point back to is gone, it is not carried forward. The first
-version got this wrong and rejected the true order by chunk 7 (`CLAUDE.md` TODO list).
+version got this wrong and rejected the true order by chunk 7.
 
 When a frame is cut by a chunk boundary, its side information is rebuilt from the two
 chunks (`decodeSplitFrameSideInfo`) and checked like any other frame - which is only
@@ -340,7 +339,7 @@ every fixture where the metadata is right). But it is a *path* rule: the level d
 everything that came before, so it can not be turned into a simple per-arrow yes/no... or
 so it seemed. The next section is about the part of it that *can*.
 
-### 4.5 NEW - the reservoir arc filter
+### 4.5 The reservoir arc filter
 
 **What it does.** For every arrow `a -> b` the program asks: *if we arrive at `a` with the
 reservoir completely full - the best possible situation - can `b` still follow `a` without a
@@ -368,18 +367,16 @@ stages look at the graph *before* any reservoir check runs:
 **Effect.** The filter removes 40-85% of arrows on CBR files and **zero true arrows on
 every fixture** (the log line `[vs source: 0 true arcs removed]` is the report card). It
 lets AC-3 cascade much further: on `cbr128_30s` at 1 KB the graph goes from 11 003 arrows
-to 1 437. Graphs became 5-20x smaller overall. This is the single biggest reason the new
-pipeline is faster.
+to 1 437. Graphs became 5-20x smaller overall. This is the single biggest reason the
+current pipeline is faster than PCM final.
 
-**Its side effect.** The filter never removes a true arrow, but it changes *which* valid order
-the DFS meets first. On a very small graph the first valid order can be slightly wrong. This
-is what happened in the 3 cells that used to be exact and are now wrong (chapter 6). With the
-filter off, all three are exact again.
+**Its side effect.** It changes *which* valid order the DFS meets first; on a very small
+graph that can be slightly wrong (the three regressions in chapter 6).
 
 **Its gate.** The argument above assumes the reservoir model is correct for this file. If
 the model wrongly rejected a true pair, the filter would delete a true arrow, and AC-3 could
 then *force* a wrong one. So the filter only runs when the reservoir check passed the true
-order (see 4.1 and chapter 9). `RP_RESV_FILTER=0` turns it off, `=1` forces it past the
+order (see 4.1 and chapter 8). `RP_RESV_FILTER=0` turns it off, `=1` forces it past the
 gate.
 
 ### 4.6 Arc consistency (AC-3), and the bug the filter exposed
@@ -414,9 +411,6 @@ caught because every run prints how many true arrows each stage removed.
 
 ### 4.7 Listening to the junction: the PCM flux score
 
-This stage existed before this branch, but everything new builds on it, so here is how it
-works.
-
 **The idea.** If `b` really follows `a`, then decoding `a` followed by `b` gives smooth,
 continuous music. If not, the decoder produces a frame made of two unrelated halves, plus a
 jump to a different moment in the song. That sounds like a click, and it shows up as a spike
@@ -424,8 +418,9 @@ in spectral flux.
 
 **How it is measured** (`pcm_junction.cpp`):
 
-1. Take a window of chunks: up to three chunks of the already-placed path (the *left
-   side*), then the candidate `b` (the *right side*).
+1. Take a window of chunks: a few chunks of the already-placed path (the *left side*,
+   3 by default, more when frames are long - `RP_PCM_LEFT`), then the candidate `b` (the
+   *right side*).
 2. Decode it all the way to sound with `minimp3` (a small, public-domain MP3 decoder that is
    included in the project), starting with a fresh decoder. The earlier left chunks are
    warm-up: the decoder needs some frames before it produces the same samples as a decoder
@@ -462,7 +457,7 @@ of evidence.
 32 kbps (more frames per byte). With tens of thousands of arrows and several contexts each,
 decoding is the main cost of the whole program. That is why the next section matters.
 
-### 4.8 NEW - `LeftContext`: decoding the left side only once
+### 4.8 `LeftContext`: decoding the left side only once
 
 **The observation.** When the program scores several candidates `b1, b2, b3...` after the
 same path, the left side of every window is identical. And the decoder's work on the left
@@ -482,8 +477,6 @@ scoring.
 to score many candidates after the same few paths.
 
 ### 4.9 Locking the obvious edges (confident-edge locking)
-
-Existed before; described because the new stages run inside its loop.
 
 **The idea.** Some junctions are obvious: `a -> b` sounds smooth while every other option
 for `a`, and every other option for `b`, sounds terrible. Such an arrow can be *locked*
@@ -553,8 +546,8 @@ terminates.
 
 **Why first-valid and not "best of all".** Keeping the search going to find the *cheapest*
 complete order sounds better, but was measured worse: with the older header scores the
-cheapest order was *not* the true one (only 25% correct vs 76-100% for first-valid,
-`CLAUDE.md` item 7). A cheap score is good for ranking nearby choices, not necessarily as a
+cheapest order was *not* the true one (only 25% correct vs 76-100% for first-valid).
+A cheap score is good for ranking nearby choices, not necessarily as a
 global goal. This lesson matters again in chapter 7.
 
 **The wall the DFS hit.** Even with PCM ranking, on hard files the DFS took one wrong turn
@@ -564,7 +557,7 @@ early is buried under all the later ones. The notes of 2026-10-08 say it plainly
 bottleneck is now the search, not the signal."* That sentence is the reason for the next
 stage.
 
-### 4.12 NEW - global matching: solving the whole puzzle at once
+### 4.12 Global matching: solving the whole puzzle at once
 
 **The idea in one sentence.** Instead of building the order from left to right, give every
 supernode its best-sounding successor *all at the same time*, under the rule that no
@@ -639,13 +632,14 @@ shows three wrong DFS results.
 ~140 successors x 8 contexts), just scoring all junctions took over 15 minutes. So the
 number of predecessor contexts is halved (8, 4, 2, 1) until the decodes still needed fit
 under 100 000 (`RP_MATCH_MAX_DECODES`); if even one context is too many, the matching is
-skipped. A count, not a time, for the same reason as in 4.9.
+skipped. A count, not a time, for the same reason as in 4.9. (Since 2026-11-09 the misses
+are counted with an early exit before any window is built; building them all first took
+6 GB on a 7500-chunk file.)
 
 ### 4.13 Repair: fixing a nearly-right order with block moves
 
-The repair existed before this branch (it ran after the DFS). It was substantially
-rewritten here, because the matching needed it to be fast and needed it to fix reservoir
-breaks, not just lower flux.
+The repair first ran only after the DFS. It was rewritten for the matching, which needs it
+to be fast and to fix reservoir breaks, not just lower flux.
 
 **What a move is.**
 
@@ -680,7 +674,7 @@ best, applies it, and starts again (up to 50 passes).
 
 **Making it fast enough - the rewrite.** A naive repair rebuilds and re-scores the whole
 order for every candidate move: tens of thousands of candidates x hundreds of junctions,
-each needing decodes. The new version is about 10-50x faster through three ideas:
+each needing decodes. The current version is about 10-50x faster through three ideas:
 
 - **Suspects first.** Wrong junctions are usually high-flux (true ones have median ~1.05,
   wrong ones ~3). So each pass first looks only at moves that cut one of the worst
@@ -701,7 +695,7 @@ moves, same costs as before.
 **Time budget.** 60 s by default (`RP_REPAIR_BUDGET`); when it runs out, the best move found
 so far is still applied.
 
-### 4.14 NEW - the minimum-gain rule for repair
+### 4.14 The minimum-gain rule for repair
 
 **The problem.** Lowering summed flux is *usually* good. But when the program already has a
 valid order, tiny improvements are mostly noise, and they can turn the true order into a
@@ -721,11 +715,9 @@ or unmeasured junctions are not affected.
 **How 1.0 was chosen, honestly.** 1.0 was set as a provisional value before the final
 comparison. Then 0.25 and 1.0 were compared on both the main and the held-out set: 49 vs 48
 exact on main (a tie, in practice) and 44 vs 41 on held-out. So the held-out set helped pick
-the value - it is no longer a clean, untouched test for this one setting. See chapter 9.
+the value - it is no longer a clean, untouched test for this one setting. See chapter 8.
 
-**Its cost.** A threshold always cuts both ways. Chapter 6 shows the three cells where the
-new pipeline is wrong but the old one was exact: in all three, the move that would have fixed
-the order was found and rejected because it gained only 0.26, 0.51 and 0.72.
+**Its cost.** It blocked the fix in the three regressions of chapter 6 (gains 0.26-0.72).
 
 **Consequence for the old "skip repair" rule.** Previously, an order found by the strictest
 lock attempt was never repaired (one such repair had broken an exact result). With the
@@ -772,13 +764,72 @@ itself be wrong (3 cases in the benchmark). And the stability gap did not separa
 from wrong either (wrong outputs had gaps of 0.013 and 0.037, but an exact one had 0.046).
 So today **no label means "verified"**. This is the main open problem, chapter 7.
 
+### 4.18 Frames larger than the chunk: headerless chunks and slots
+
+**The problem.** A frame longer than the chunk can contain a whole chunk. That chunk has no
+frame header, so 4.2 marks it invalid, nothing can connect to it, and the true order is not
+representable. It happens with MPEG-1 Layer III at 320 kbps / 44.1 kHz (1045 B frames),
+256-320 kbps at 32 kHz (up to 1441 B), Layer II, and MPEG-2.5 at 8-11 kHz - in practice only
+at 1 KB chunks. Since a frame is at most 1441 B, there are never two such chunks in a row.
+In `musiclib` at 1 KB about 2% of a 320 kbps track (one chunk in ~50) is headerless.
+
+**The key observation: the slot is decided by its predecessor.** Let `a` be the chunk where
+the oversized frame `F` starts. If `a` demands `rem >= C` bytes of `F` (C = chunk size), no
+chunk with a header can follow it, so **`a`'s successor is always a headerless chunk**, and
+the chunk after that, `b`, must have a frame start at `rem - C`. Such an `a` is a *demander*.
+So, before any search:
+
+- which chunks are followed by a slot is known: exactly the demanders;
+- free check: the number of demanders must equal the number of headerless chunks (the
+  *pool*); a mismatch is reported;
+- the search does not need to know what fills a slot. It orders the chunks that have a
+  header, with a *gap edge* `a => b` meaning `a, (slot), b`. The pool is assigned afterwards.
+
+**Split tails.** When only 1-3 header bytes of `F` lie in `a` (the header is split), the
+slot is really two chunks: a *split tail* (end of the previous frame plus the first 1-3 bytes
+of `F`'s header) and then the headerless interior. The split tail is fully determined by its
+predecessor too, so it is promoted to a normal node (`promoteSplitTails`: frame start at
+`C - t`, Case-2 tail of `t` bytes) and becomes a demander itself; only interior chunks go to
+the pool. In CBR the frame grid drifts ~20 B per chunk against the chunk grid, so every slot
+of a file lands at about the same offset: on 35 of 61 affected tracks *all* slots are of this
+kind.
+
+**What a gap edge does to each stage.**
+
+- *Reservoir:* `F`'s side info lies partly in the unknown slot chunk, so across a gap edge
+  the level is set to full. This is safe by the monotonicity of 4.5; it only weakens pruning
+  at gap edges.
+- *Flux:* a window spanning a slot would decode garbage, so it gets the neutral value - not
+  "unmeasured", which would make the repair (4.13) bunch slots together to hide them.
+- *Locking:* a gap edge is never locked, and no edge into a `b` that has a gap-edge
+  predecessor is locked: that predecessor can not be scored, so a wrong edge could win
+  against the invisible true one.
+- *Repair:* moves can not create or remove slots.
+
+**Filling the slots** (`slot_fill.cpp`). Once the order of the chunks with headers is known,
+the cost of putting pool chunk `m` into slot `(a, b)` is `log1p(flux)` of a window with the
+path up to `a` on the left and `m`, `b` (and `b`'s successor when known) on the right. Two
+right-side chunks are what makes the junction measurable at 320 kbps. Hard constraints: for
+split slots, `m`'s first bytes must complete `F`'s header to a length that lands on `b`'s frame
+start; on CRC-protected streams the frame CRC must match (a wrong `m` passes 1 time in 14 640).
+A window whose frames fail to decode after the junction costs a large constant - most wrong
+candidates do. The slots x pool assignment is solved exactly (Hungarian). With the true order
+given (`RP_SLOT_ORACLE=1`): 80/80, 245/245 and 240/241 slots right on three tracks, and the
+output exact on all three; 204/209 and 52/57 on two others.
+
+**Limits.** A false sync inside a headerless chunk makes it a node that can not connect, and
+the count check fails by one. Some VBR tracks mix split-tail lengths including `t = 3`, which
+can not be classified and give count mismatches. And this makes the true order
+*representable*; it does not make 320 kbps / 1 KB files *solvable*, because ordinary edges
+still have only one right-side chunk to judge by.
+
 ---
 
 ## 5. A worked example: reading one real log
 
-`CBR.mp3`: a 658-chunk constant-bitrate song at 1 KB - the hardest of the old fixtures.
-The regression baseline of the time (`test/regression_baseline.tsv`, since replaced by `test/corpus.py`) recorded it as FAILED. Run for this document with `RP_SEED=1
-RP_TIME_BUDGET=20 build/rp test/CBR.mp3` (as the since-removed `test/regression.sh` did). Key lines:
+`CBR.mp3`: a 658-chunk constant-bitrate song at 1 KB - the hardest of the old fixtures, which
+PCM final failed on. Run with `RP_SEED=1 RP_TIME_BUDGET=20 build/rp test/CBR.mp3` (2026-10-20).
+Key lines:
 
 ```
 Edge locking total: 37 edges (20434 decodes, 0.34s) [vs source: 36/37 correct]
@@ -827,16 +878,18 @@ Reconstruction junctions: 610/657 are true successor pairs
 ```
 The output is complete, valid and wrong. 92.8% of junctions are right, yet only 5.3% of
 chunks are "in place", because an early block moved and shifted everything after it - which
-is why junctions are the measure to trust.
-
-`test/regression.sh` (since removed) reported this file as "OK" (it only flags a drop below the baseline, and
-the baseline was FAILED). Counted honestly, it is one more wrong output: before, the program
-said "I could not do it"; now it gives an answer that is 93% right and does not say it is
-wrong.
+is why junctions are the measure to trust. Before, the program said "I could not do it";
+now it gives an answer that is 93% right and does not say it is wrong.
 
 ---
 
 ## 6. Results
+
+This chapter is the development benchmark of 2026-10-18, which compared the pipeline
+generations on short clips. Later work added start finding, CRC handling and headerless
+chunks, and moved testing to whole tracks of the `musiclib` corpus (2026-11-09, 4 KB:
+192 of 367 exact, 42 more with every block right but misplaced; `../CLAUDE.md`, "Current
+results").
 
 ### The benchmark
 
@@ -848,12 +901,10 @@ wrong.
   material the algorithm was not developed on (with the one exception in 4.14).
 - Seed 1, one run per cell. Timeout 900 s.
 - Compared configurations:
-  - **PCM final** - `1c5abe1`, the pipeline before this branch (DFS + locking + repair);
+  - **PCM final** - `1c5abe1`, the previous pipeline (DFS + locking + repair);
   - **global matching v2** - `57965af`, the first matching version (no filter, no
     `LeftContext`, no minimum gain);
-  - **current** - `844fe4b` defaults. HEAD (`60e8c4a`) is the same algorithm: its only code
-    change since `844fe4b` is the `+ N repair move(s)` text in the provenance line (checked
-    with `git diff 844fe4b HEAD`).
+  - **current** - `844fe4b` defaults.
 
 ### Totals
 
@@ -951,51 +1002,21 @@ signal is not automatically a good *global objective*. PCM flux is much closer t
 (in 97-100% of tested swaps the true pair had the lower flux) - but over hundreds of
 junctions, a few percent of exceptions add up to a cheaper wrong order.
 
-### Why the label can not warn about them (yet)
+Neither kind is flagged: 5 of the 16 come from the DFS (3 wrong as first found, 2 changed by
+repair), so the provenance label and the stability gap can not tell them apart (4.17).
 
-The matching's outputs were meant to be the risky ones and are labelled "best-effort". But
-with the filter, 5 wrong outputs come from the DFS (3 wrong as first found, 2 changed by
-repair), and the stability gap does not separate wrong from right. So currently the program
-can not tell a user "this one is probably wrong". That is the honest cost of this branch:
-PCM final *never* produced a wrong order; it said "failed" instead.
+### The trade-off that was accepted
 
----
-
-## 8. Keep or roll back? The decision and its reasoning
-
-**The question asked was:** finish the algorithm improvements, present them, and roll them
-back if they are not enough.
-
-**Verdict: keep them.** The reasons:
-
-1. **The gains are large and on both sets.** Exact results +14 on main (35 -> 49) and +11 on
-   held-out (33 -> 44). Failures 29 -> 7 and 23 -> 4. Junctions recovered from ~81% to ~94%.
-2. **They are not bought with lost successes.** The paired comparison shows 28 cells
-   failed -> exact and 0 cells exact -> failed. Only 3 of 120 cells went exact -> wrong, each
-   by 3-4 junctions, each one rejected repair move away from exact.
-3. **It is much faster.** 2-3x less total time, 4-5x per cell, median run ~0.25 s.
-4. **The risk is understood and documented.** The wrong outputs are explained (chapter 7),
-   reproducible, and split into a fixable kind and a kind that needs a better signal.
-
-**What keeping them costs.** The program can now return a complete-but-wrong order where it
-used to admit failure, and its provenance label does not reliably warn about it. If, for
-the intended use, *a wrong answer is worse than no answer*, that is a real argument for the
-old behaviour. Two cheaper alternatives to a full rollback exist:
-
-- `RP_MATCH=0` turns off the matching. This is **not** a cheap fix: the matching is the
-  source of 11 of the 16 wrong outputs, but also of 16 exact results (10 main, 6 held-out,
-  provenance `best-effort (global matching + repair)`). Turning it off could lose up to 16
-  exact results to remove 11 wrong ones. "Up to", because a later lock attempt's DFS might
-  still solve some of them; a 120-cell rerun would give the exact number. Not measured;
-- treat every output as "best-effort" until a confidence measure exists (chapter 10).
-
-**If a rollback is wanted anyway,** it should be done by *not merging* the branch, not by
-deleting or resetting it: `global-matching` exists only on this machine (it was never
-pushed), so its commits are the only copy of this work.
+PCM final *never* produced a wrong order; it said "failed" instead. The current pipeline
+was kept anyway (2026-10-20): +14 exact on main and +11 on held-out, 28 cells failed ->
+exact against 3 exact -> wrong (each 3-4 junctions off), and 2-5x faster. If *a wrong answer
+is worse than no answer* for some use, `RP_MATCH=0` is not a cheap way back: the matching
+produces 11 of the 16 wrong outputs but also 16 exact ones. The real fix is a confidence
+measure (chapter 9).
 
 ---
 
-## 9. Honest caveats
+## 8. Honest caveats
 
 - **One seed.** Every benchmark number is from seed 1. Earlier work saw seed-dependent
   outcomes on some files (e.g. Queen 4 KB was wrong on all 3 seeds; `test7_short` finished
@@ -1009,24 +1030,24 @@ pushed), so its commits are the only copy of this work.
   encoder?"), and could be replaced by a check that does not need the answer - for example,
   whether the shuffled graph still has a valid path after the filter - but that has not been
   built.
-- **The fixtures are few.** Two source tracks for the benchmark plus the older fixtures.
-  Different music (silence, speech, very dense electronic music) may behave differently -
-  long silent passages, for example, are ambiguous by nature (any order of identical silent
-  frames is "right").
-- **MPEG-1 Layer III only** for the decoding-based parts (the partial decoder and side-info
-  parsing paths are tested only on MPEG-1 files).
+- **The benchmark fixtures are few.** Two source tracks plus the older fixtures; the
+  `musiclib` corpus (~100 real tracks, mostly 256-320 kbps CBR) has since broadened this.
+  Long silent passages are ambiguous by nature (any order of identical silent frames is
+  "right").
+- **MPEG-1 Layer III** is where the decoding-based parts are tested; the partial spectral
+  decoder supports only MPEG-1.
 - **"Junctions recovered" counts complete outputs and partial paths alike.** For failed runs,
   the deepest partial path's junctions are counted.
 
 ---
 
-## 10. What comes next
+## 9. What comes next
 
 In rough order of expected value per effort:
 
 1. **A confidence signal for outputs.** Without it, a wrong output can not be told from a
    right one. Candidates: the margin between the found order and the best *different* order
-   found by a few perturbed repairs; or calibrated probabilities (item 4).
+   found by a few perturbed repairs; or calibrated junction probabilities.
 2. **Repair escapes (iterated local search).** 9 of the 16 wrong outputs are search failures.
    Allow a few "kick" moves (random block moves that may worsen the cost) followed by a new
    repair, and keep the best order seen. The three regressions in chapter 6 would likely be
@@ -1034,51 +1055,16 @@ In rough order of expected value per effort:
    when it also lowers the maximum single-junction flux).
 3. **Cheaper scoring at low bitrate.** `bohemoan` at 2 KB spends 221 s just on locking
    decodes; a frame-capped window would cut that.
-4. **Edge probabilities and a most-probable path** - `PLAN_probabilistic_hamiltonian_path.md`.
-   Turn each junction's evidence into a calibrated probability, then search for the *most
-   probable* complete order with an exact or near-exact solver, handling the reservoir with
-   lazy constraints. This is the route for the objective failures, and it gives a natural
-   confidence measure. It is the largest piece of work.
+4. **A better objective** for the objective failures. One route was tried and abandoned:
+   calibrated edge probabilities with an exact most-probable-path solver (asymmetric TSP,
+   assignment-based branch and bound, reservoir as lazy constraints; plan `cb53497`).
+
+The switches are listed in `../CLAUDE.md` ("Options"), the code layout in `../README.md`.
+Benchmark data (`tmp/bench/runs.csv`, `tmp/bench/move_study.txt`) is local and not committed.
 
 ---
 
-## 11. Quick reference: the switches
-
-The full table is in `CLAUDE.md` ("Environment variables"). The ones introduced or changed on
-this branch:
-
-| variable | default | what it does |
-|---|---|---|
-| `RP_RESV_FILTER` | auto (on if the reservoir model passes the true order) | 4.5 reservoir arc filter. `0` off, `1` force. |
-| `RP_MATCH` | 1 | 4.12 global matching. `1` after a failed DFS, `2` before it, `0` off. |
-| `RP_MATCH_MAX_DECODES` | 100000 | 4.12 decode cap for the matching. |
-| `RP_MATCH_ITERS` | 0 | 4.16 iterated matching rounds (off: changed nothing). |
-| `RP_REPAIR_MIN_GAIN` | 1.0 | 4.14 minimum summed-flux gain for a flux-only move on a valid order. `0` = old behaviour. |
-| `RP_REPAIR_SUSPECTS` | max(16, n/20) | 4.13 how many worst junctions the first repair phase looks at. |
-| `RP_REPAIR_BUDGET` | 60 | 4.13 repair time budget in seconds. |
-| `RP_SCORE_ORDER` | off | print the found vs true summed flux (diagnostic, needs the source). |
-
-Unchanged but central: `RP_SEED` (1), `RP_CHUNK_SIZE` (1024), `RP_LOCK_TAU` (1.5,1.25,1.1),
-`RP_THREADS` (all cores), `RP_TIME_BUDGET`, `RP_PCM`, `RP_REPAIR`.
-
-**Where the code lives:**
-
-- `src/main.cpp` - the pipeline in five calls (load, score, graph, reconstruct, output).
-- `src/search/global_match.cpp` - `globalMatch` (matching + splicing); `src/search/repair.cpp`
-  - `OrderRepair` (repair); `src/search/reconstruct.cpp` - the lock schedule and `tryMatch`
-  (matching -> repair -> hint rerun); `src/pipeline/output.cpp` - the provenance output.
-- `src/graph/chunk_graph.cpp` - the reservoir arc filter (`filterReservoirArcs`) and AC-3 gate.
-- `src/scoring/pcm_junction.cpp` - window decode, flux, `LeftContext`.
-- `src/scoring/edge_lock.cpp` - locking and `scoreWindows` (parallel scoring shared with the matching).
-- `src/graph/adjacency.cpp` - `canFollow`, `buildAdjacency`, `propagateArcConsistency` (with the
-  end-of-stream fix).
-- `tools/left_context_check.cpp` - proves `LeftContext` is bit-identical.
-- Benchmark data and scripts: `tmp/bench/runs.csv`, `tmp/bench/move_study.txt`,
-  `tmp/scripts/` (not committed).
-
----
-
-## 12. Where the ideas come from
+## 10. Where the ideas come from
 
 Added 2026-10-27. This chapter says, for each idea in this document, where it came from.
 There are three kinds:
@@ -1108,8 +1094,7 @@ one of the C ideas.
   `level_after = main_data_begin x 8 + produced - part2_3_length`. It was checked frame by
   frame against minimp3's `L3_restore_reservoir` / `L3_save_reservoir` (commit `823b173`,
   2026-07-11).
-- **The 16-bit CRC after the header** (CLAUDE.md item 9, added after this document was
-  written): ISO/IEC 11172-3. The idea that the protection bit can never change inside one
+- **The 16-bit CRC after the header** (4.2): ISO/IEC 11172-3. The idea that the protection bit can never change inside one
   stream also follows from the standard. Using a changed bit to detect false headers is
   this project's (commit `d432335`).
 - **Xing / Info / VBRI headers** (4.2): these are not standardised. Xing Technology's
@@ -1136,8 +1121,8 @@ one of the C ideas.
   reservoir check 4.4). S. Garfinkel, "Carving contiguous and fragmented files with fast
   object validation", Digital Investigation 4S (DFRWS 2007). That paper validates whole
   objects. `rp` applies the same principle to every junction separately. The same paper
-  measured how fragmented real disks are, which is the background for the note in CLAUDE.md
-  item 9 that real fragmentation is milder than this test model.
+  measured how fragmented real disks are, which is the background for the note in `../CLAUDE.md`
+  that real fragmentation is milder than this test model.
 - Related, not used: A. Pal, H. T. Sencar, N. Memon, "Detecting file fragmentation point
   using sequential hypothesis testing", Digital Investigation 5 (DFRWS 2008). It finds where
   a file breaks. `rp` instead assumes every chunk boundary may be a break.
@@ -1190,7 +1175,7 @@ one of the C ideas.
   traveling-salesman problem", SIAM J. Computing 8(4), 1979. `rp`'s cycle splicing is a
   version of this. It only allows real arrows of the graph and inserts each cycle at its
   cheapest place in the path.
-- Named in `PLAN_probabilistic_hamiltonian_path.md` but not used yet: assignment-based
+- Considered for the abandoned exact solver, not used: assignment-based
   branch and bound for the asymmetric TSP (G. Carpaneto, M. Dell'Amico, P. Toth, ACM Trans.
   Math. Software 21(4), 1995), LKH-3 (K. Helsgaun, Roskilde University, 2017) and Concorde.
 
@@ -1212,7 +1197,7 @@ one of the C ideas.
 - **Kendall's tau** (how close a found order is to the true one): M. G. Kendall, "A new
   measure of rank correlation", Biometrika 30(1/2), 1938.
 - **A held-out set** that is not used to tune the program: standard practice in experiment
-  design. Chapter 9 explains where this project broke that rule (the choice of
+  design. Chapter 8 explains where this project broke that rule (the choice of
   `RP_REPAIR_MIN_GAIN`).
 
 ### C. Ideas worked out in this project
@@ -1221,30 +1206,30 @@ The commit or plan where each idea first appears. Dates are those of the commits
 
 | idea | section | first appears | related published work |
 |---|---|---|---|
-| Test model: equal chunks shuffled, chunk 0 pinned | 4.1 | project start (`dc7b392`, 2025-11-20) | - |
+| Test model: equal chunks shuffled, chunk 0 pinned (start found from content since 2026-10-27) | 4.1 | project start (`dc7b392`, 2025-11-20) | - |
 | Chunk-local frame scan; Case 1 / Case 2 successor rules (`canFollow`) | 4.2, 4.3 | `72d89ff` (2026-04-17); `frameStarts` index `5c6a045` (2026-04-29) | Garfinkel 2007 (validation by parsing) |
 | Choosing a chunk's alignment by tail quality before frame count | 4.2 | `27988a6` (2026-07-08) | - |
 | Reservoir check per placement during the search; real `part2_3_length` consumption | 4.4 | `823b173` (2026-07-11) | ISO 11172-3 + minimp3 (the rule itself, A) |
-| Decoding a split frame's side info from both chunks of a candidate edge | 4.4 | `9aeace0` (2026-07-18), `PLAN_sideinfo_mainbits.md` M1 | - |
+| Decoding a split frame's side info from both chunks of a candidate edge | 4.4 | `9aeace0` (2026-07-18) | - |
 | Ranking candidates by `global_gain` continuity | 4.11 | `f059553` (2026-09-04), measured with `sideinfo_probe` | - |
 | Beam limit + iterative broadening for large graphs | 4.11 | `949d331` (2026-09-07) | Lowerre 1976; Ginsberg & Harvey 1992 |
 | "Best-of" search (measured worse, kept off) | 4.11 | `95dcc3a` (2026-09-07) | Land & Doig 1960 |
 | Degree-based arc consistency before the search | 4.6 | `b0f5eaa` (2026-09-09) | Mackworth 1977 |
-| Partial spectral decode as a junction signal ("Milestone 2") | 4.11 | `6fbd6bd`, `44c6ab6` (2026-09-10); listed earlier in CLAUDE.md "Alternative approaches" | - |
-| Checking the straddling frame's Huffman bits (measured, rejected) | - | `656dca1` (2026-09-10), `PLAN_huffman_junction_filter.md` | - |
-| Judging a junction by the PCM flux spike divided by the median flux before it | 4.7 | `PLAN_full_pcm_decode.md` (`8789498`, 2026-10-08), `494063e` | Bello et al. 2005 (the flux measure) |
+| Partial spectral decode as a junction signal ("Milestone 2") | 4.11 | `6fbd6bd`, `44c6ab6` (2026-09-10) | - |
+| Checking the straddling frame's Huffman bits (measured, rejected) | - | `656dca1` (2026-09-10) | - |
+| Judging a junction by the PCM flux spike divided by the median flux before it | 4.7 | `8789498` (2026-10-08), `494063e` | Bello et al. 2005 (the flux measure) |
 | Confident-edge locking: lock `a -> b` when it beats every rival on both sides by `tau` | 4.9 | `be2de45` (2026-10-09) | closest analogue: "best buddies" (mutually best pieces) in D. Pomeranz, M. Shemesh, O. Ben-Shahar, "A fully automated greedy square jigsaw puzzle solver", CVPR 2011 |
 | Median over predecessor contexts for a context-dependent edge score | 4.9 | `be2de45` | - |
 | Lock-threshold schedule with restart from the unlocked graph | 4.9 | `89ebcba` (2026-10-09) | - |
 | Repair on the graph from before locking, so wrong locks can be undone | 4.13 | `89ebcba` | Or 1976; Croes 1958 (the moves) |
 | Decode caps that count decodes instead of measuring time, so the result is the same on every machine | 4.9, 4.12 | `ef55e44`, `f9ad99c` (2026-10-12) | - |
-| Global min-cost successor matching with a virtual END slot | 4.12 | `9d705fe` (2026-10-12); the idea was first listed as "Hungarian" in CLAUDE.md "Alternative approaches" and `PLAN_huffman_junction_filter.md` | Kuhn 1955; Karp 1979 |
+| Global min-cost successor matching with a virtual END slot | 4.12 | `9d705fe` (2026-10-12) | Kuhn 1955; Karp 1979 |
 | Repair cost in a fixed order: breaks, then unmeasured junctions, then flux; "suspects first"; reservoir re-sync | 4.13 | `9d705fe`, `7fee039` (2026-10-18) | - |
 | Provenance label and stability gap | 4.17 | `eac8255` (2026-10-17) | - |
 | Reservoir arc filter, sound because the check is monotone in the starting level | 4.5 | argument in `c3732a1` (2026-10-17), code in `7fee039` (2026-10-18) | - |
 | AC-3 forces a last remaining successor only once the stream's end is known | 4.6 | `844fe4b` (2026-10-18) | - |
 | `LeftContext`: decode the left side once, copy the decoder state for each candidate | 4.8 | `7fee039` | - |
 | Minimum-gain rule for flux-only repair moves | 4.14 | `7fee039`; threshold from `tmp/bench/move_study.txt` | - |
-| Iterated matching (forbid arcs at breaks, solve again; measured, off) | 4.16 | `7fee039` | related to adding constraints only when they are violated in branch and bound (`PLAN_probabilistic_hamiltonian_path.md`) |
-| *After this document:* PCM left side sized by frame length | CLAUDE.md item 9 | `b115cae` (2026-10-26) | - |
-| *After this document:* headerless chunks as a pool placed into gap slots by assignment on flux + CRC | CLAUDE.md item 9 | `PLAN_headerless_chunks.md`, `5c3e370` (2026-10-26) | Kuhn 1955 (the assignment) |
+| Iterated matching (forbid arcs at breaks, solve again; measured, off) | 4.16 | `7fee039` | related to adding constraints only when they are violated in branch and bound |
+| PCM left side sized by frame length | 4.7 | `b115cae` (2026-10-26) | - |
+| Headerless chunks as a pool placed into gap slots by assignment on flux + CRC; split tails as nodes | 4.18 | `5c3e370` (2026-10-26) | Kuhn 1955 (the assignment) |

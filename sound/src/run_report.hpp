@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-// RP_REPORT=path.json: one JSON object per run for test/corpus.py (PLAN_test_automation.md).
+// RP_REPORT=path.json: one JSON object per run for test/corpus.py.
 // main() sets fields where it prints the matching log line; the object is written when the
 // process exits normally (any return from main), so a missing report means a crash or a kill.
 // Keys keep their first-set order; setting a key again overwrites its value.

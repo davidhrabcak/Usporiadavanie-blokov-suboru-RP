@@ -11,7 +11,7 @@
 #include "mp3/chunk_meta.hpp"
 #include "scoring/junction_scorer.hpp"
 
-// Block-move repair (PLAN_full_pcm_decode.md step 6). The DFS returns the FIRST valid ordering;
+// Block-move repair (HOW_IT_WORKS 4.13). The DFS returns the FIRST valid ordering;
 // when locking/ranking took one wrong turn it can be complete-but-wrong with a whole block of
 // the song in the wrong place (A-C-B instead of A-B-C). Summed PCM flux points at the true order
 // (2-opt test: 97-100% of swaps), so: repeatedly move a contiguous block of chunks to another

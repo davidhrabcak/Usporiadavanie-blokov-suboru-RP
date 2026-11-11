@@ -6,7 +6,7 @@
 
 #include "mp3/chunk_meta.hpp"
 
-// Stage B of PLAN_headerless_chunks.md: once the chunks with a header are ordered, put the
+// Headerless chunks (HOW_IT_WORKS 4.18): once the chunks with a header are ordered, put the
 // headerless ("pool") chunks into the slots after the demanders. Exact min-cost assignment of
 // slots to pool chunks on the PCM flux of each slot's window, with hard constraints.
 namespace SlotFill {
@@ -27,7 +27,7 @@ struct Stats {
 
 // Cost of pool chunk m in slot s (lower = better). The right side of the window is m, b and, when
 // known, the chunk after b: one chunk holds less than one frame at 320 kbps / 1 KB, and the flux
-// only ranks successors well with two (PLAN_headerless_chunks.md, CLAUDE.md item 9).
+// only ranks successors well with two (HOW_IT_WORKS 4.18).
 // Constraints (pair excluded when violated):
 //   - a Case-2 demander (split tail): m's first bytes must complete a's header to a frame whose
 //     remainder ends exactly at a frame start of b;

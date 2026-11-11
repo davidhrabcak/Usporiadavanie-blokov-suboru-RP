@@ -8,7 +8,7 @@ bool canFollow(const ChunkMeta& a, const ChunkMeta& b);
 
 std::vector<std::vector<int>> buildAdjacency(const std::vector<ChunkMeta>& metas);
 
-// --- Frames longer than the chunk (PLAN_headerless_chunks.md) ---
+// --- Frames longer than the chunk (HOW_IT_WORKS 4.18) ---
 // A full-size chunk with no frame header at all: it lies wholly inside one frame.
 bool isHeaderless(const ChunkMeta& m, size_t chunkBytes, long chunkSize);
 // For every chunk that must be followed by a headerless chunk ("demander"), the frame offsets
@@ -55,7 +55,7 @@ void addGapEdges(std::vector<std::vector<int>>& adj, const std::vector<ChunkMeta
 // already a singleton forces that edge and lets the competing edges be deleted; deletions
 // cascade to a fixpoint. Also deletes every edge into `start`. Returns the number of edges
 // removed, or -1 (with `adj` restored) if propagation hit a contradiction - which means
-// `canFollow` is missing a real edge (e.g. embedded non-audio, item 5), so forcing on the
+// `canFollow` is missing a real edge (e.g. a false sync), so forcing on the
 // survivors would be unsafe.
 long propagateArcConsistency(std::vector<std::vector<int>>& adj, int n, int start);
 

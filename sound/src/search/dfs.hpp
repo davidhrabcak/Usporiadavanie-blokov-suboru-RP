@@ -63,7 +63,7 @@ private:
      * The Layer III bit-reservoir check runs incrementally as each candidate supernode is
      * tried (see advanceReservoirChunk), instead of only once the whole order is complete - a
      * candidate that would break the reservoir chain is pruned immediately rather than explored
-     * to the end, per CLAUDE.md TODO "Incremental validateReservoir inside the DFS".
+     * to the end (HOW_IT_WORKS 4.4).
      * @param state The current state of the search. state.reservoirLevel must already reflect
      *              every chunk in state.order.
      * @param result If found, the valid supernode sequence is filled into result.
@@ -106,7 +106,7 @@ private:
     // genuinely contains large global_gain steps at transients/section edges. global_gain is a
     // good *local rank* signal, not a good *global objective*. Kept behind the flag for
     // experimenting with a better objective (reservoir margin, or a multi-feature score verified
-    // to have the true order as its argmin). See CLAUDE.md item 7.
+    // to have the true order as its argmin). See CLAUDE.md, Findings, "Junction signals".
     long long bestScore_ = LLONG_MAX;
     std::vector<int> bestOrder_;
 

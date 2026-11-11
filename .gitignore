@@ -9,7 +9,7 @@ dictionary_creator
 __pycache__
 
 # Audio test fixtures are third-party / rights-restricted - never commit them.
-# See sound/PLAN_sideinfo_mainbits.md "Test fixtures" for where to obtain them.
+# See sound/CLAUDE.md "Build, run, test" for where they are kept.
 *.mp3
 # ...except the synthetic CI sanity fixture (pure ffmpeg synthesis, no third-party audio -
 # see sound/test/make_ci_sanity.sh). It is committed so CI is hermetic.
