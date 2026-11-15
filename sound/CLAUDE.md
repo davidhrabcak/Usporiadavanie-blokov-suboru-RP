@@ -208,6 +208,23 @@ is in HOW_IT_WORKS ch. 6.
   (locking ~99%), and on 320 kbps tracks with a full reservoir the wrong joins leave no
   perfect successor matching. Not a default. Next: continuity as a cost inside the matching
   (no forced joins), or joins with a fallback to the unjoined graph like the lock schedule.
+- **`RP_CONT` (continuity as a cost, never a filter), A/B 2026-11-15**, commit `9174916`, one
+  binary, arms run one after the other, 4 KB:
+
+  | | default | `RP_CONT=cal` | `RP_CONT=fixed` |
+  |---|---|---|---|
+  | 32 CBR tracks: EXACT/STRUCT/WRONG/FAIL | 0/1/25/6 | 0/3/28/1 | 0/3/28/1 |
+  | 32 CBR tracks: mean (median) neighbor_acc | 0.653 (0.701) | 0.785 (0.866) | 0.785 (0.865) |
+  | 20 VBR musiclib tracks: EXACT | 10 | 13 | 13 |
+  | 38 fixtures: EXACT | 29 | 34 | 34 |
+
+  cal vs default: CBR 17 better / 2 worse, VBR 4 / 0, fixtures 6 / 2 (both worse ones are
+  CBR: the DFS now finds a complete order first, slightly wrong, where before it failed and
+  the matching found the exact one). VBR gains: Queen VBR and 3 musiclib tracks STRUCTURAL/
+  WRONG -> EXACT, 2 FAIL -> complete; no VBR loss. The matching runs on 5 more CBR tracks
+  (hole arcs aren't decoded, so it fits under its cap). cal and fixed give identical
+  outcomes (74/90 identical orders, no neighbor_acc change > 0.01): the per-file strength
+  doesn't matter, the classes do.
 - **Cleanup check (2026-11-15):** fixtures at 4 KB: all 38 orders identical before and after (29 EXACT, 4
   STRUCTURAL, 5 WRONG); at 1 KB the same class counts (20 EXACT), orders differ only on failing
   files with frames > 1 KB. The 19 musiclib tracks with a trailing tag (4 KB, 2026-11-15): 0
