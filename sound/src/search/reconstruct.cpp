@@ -224,14 +224,15 @@ void Reconstructor::chooseBeamSchedule() {
     beamSchedule_ = broaden_ ? vector<int>{1, 2, 3, 4, 6, 9, 0} : vector<int>{0};
 }
 
-// One DFS run under a wall-clock budget: RP_TIME_BUDGET, else 45 s when broadening. With a lock
-// schedule no attempt may run an unbounded exhaustive DFS either: locking can shrink a large
-// graph below the broadening threshold (test7_short at tau 1.25: 108 supernodes, ran > 500 s),
-// so 30 s per attempt with a fallback left, 45 s for the last one.
+// One DFS run under a wall-clock budget: RP_TIME_BUDGET, else 30 s for a lock attempt with a
+// fallback left and 45 s otherwise. No run is unbounded: even a graph below the broadening
+// threshold can make the exhaustive DFS run for hours (test7_short at tau 1.25: 108 supernodes,
+// > 500 s; with locking off, 47-109 supernodes hit the 900 s test timeout).
 void Reconstructor::search(const size_t lockAttempt) {
     if (cfg_.timeBudget) dfs_.setDeadline(*cfg_.timeBudget);
     else if (broaden_) dfs_.setDeadline(45.0);
-    else if (lockTaus_.size() > 1) dfs_.setDeadline((lockAttempt + 1 < lockTaus_.size()) ? 30.0 : 45.0);
+    else if (lockAttempt + 1 < lockTaus_.size()) dfs_.setDeadline(30.0);
+    else dfs_.setDeadline(45.0);   // an exhaustive DFS on <= 120 supernodes can still run for hours
     if (dfs_.runSchedule(supernodes_, superAdj_, primed_, beamSchedule_, result_)) found_ = true;
 }
 

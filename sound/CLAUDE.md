@@ -168,7 +168,11 @@ Removed 2026-11-15 (measured worse, no effect, or outside the scope rule): `RP_G
 
 ## Current results
 
-**Whole-file musiclib run (2026-11-09, binary `4c3f912dd056`, 367 inputs after splitting):**
+**Whole-file musiclib run (2026-11-15, binary `9ee1d2804558` = commit `5017813`, 4 KB, 367 inputs):**
+201 EXACT, 38 STRUCTURAL, 79 WRONG, 49 SEARCH_FAIL, no timeout / error / crash. All 201 exact
+are VBR; CBR (117): 0 EXACT, 6 STRUCTURAL, 76 WRONG, 35 SEARCH_FAIL.
+
+Before the cleanup (2026-11-09, binary `4c3f912dd056`, with headerless support):
 
 | | EXACT | STRUCTURAL | WRONG | SEARCH_FAIL | median / max time |
 |---|---|---|---|---|---|
@@ -196,10 +200,15 @@ is in HOW_IT_WORKS ch. 6.
   pass 0.2-3%, most true ones do (1869/1874 on a 256 kbps track, but 256 of 2499 true
   junctions on pURE and 83 of 1125 on Rock On Elm leave a hole; the rest are untestable). As a hard filter it fails (0-10% true
   arcs have a hole). Next step: use it as a cost in the matching and the DFS ranking.
-  `RP_CHAIN=1` PoC (flux / 8 on tight edges): neighbor_acc 0.745 -> 0.781, 0.945 -> 0.951,
-  SEARCH_FAIL -> 0.912 complete, one track still fails; no exact result.
-- **Not re-measured after the 2026-11-15 cleanup:** the musiclib table below (binary
-  `4c3f912dd056`). Fixtures at 4 KB: all 38 orders identical before and after (29 EXACT, 4
+  `RP_CHAIN=1` PoC (segment growing, flux / 8 on tight edges), paired A/B on 32 CBR tracks
+  stratified by bitrate (2026-11-15, same binary and settings, arms run one after the other):
+  default 0 EXACT / 1 STRUCTURAL / 25 WRONG / 6 FAIL, mean neighbor_acc 0.653 (median 0.701);
+  chain 0 / 3 / 22 / 7, mean 0.726 (median 0.853); 15 better, 7 worse, 10 same (+-0.01).
+  6 FAIL -> complete (to 0.89-0.99), but 7 WRONG -> FAIL: the joins are only 88-97% correct
+  (locking ~99%), and on 320 kbps tracks with a full reservoir the wrong joins leave no
+  perfect successor matching. Not a default. Next: continuity as a cost inside the matching
+  (no forced joins), or joins with a fallback to the unjoined graph like the lock schedule.
+- **Cleanup check (2026-11-15):** fixtures at 4 KB: all 38 orders identical before and after (29 EXACT, 4
   STRUCTURAL, 5 WRONG); at 1 KB the same class counts (20 EXACT), orders differ only on failing
   files with frames > 1 KB. The 19 musiclib tracks with a trailing tag (4 KB, 2026-11-15): 0
   source-order breaks on all, 19 SEARCH_FAIL -> 6 EXACT, 7 WRONG, 6 SEARCH_FAIL.
@@ -217,6 +226,8 @@ is in HOW_IT_WORKS ch. 6.
 - **False-sync alignment inside a real frame.** A cross-candidate check ("reject offset X
   inside complete frame Y") is the known fix, not attempted (own aliasing risk). The protection
   bit check removed the known cases (`test7.mp3`).
+- **Unbounded DFS (fixed 2026-11-15):** with a single lock attempt and <= 120 supernodes the
+  exhaustive DFS had no deadline (hit the 900 s test timeout on 4 PoC runs); now 45 s.
 - **Silent runs** of identical frames are ambiguous in principle (harmless to the ear).
 - Real fragmentation is milder (few multi-cluster fragments) but adds foreign and missing
   clusters, which the tests don't model.

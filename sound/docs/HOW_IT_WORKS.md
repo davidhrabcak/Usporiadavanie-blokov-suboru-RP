@@ -992,8 +992,11 @@ In rough order of expected value per effort:
    leaves a hole removes 0-10% of the true ones, and then no complete path exists - so it has
    to enter as a cost: in the matching's edge cost and the DFS ranking, ahead of flux.
    `junctionSlack` (`reservoir.hpp`) computes it; `RP_CHAIN=1` is a first proof of concept
-   that uses it as a factor on the flux (first runs looked better on 3 of 4 tracks, but
-   without a controlled comparison yet; no exact result).
+   that joins segments on flux with that factor. On 32 CBR tracks against the default (paired,
+   2026-11-15) it raised the mean share of right junctions from 0.65 to 0.73 and turned 6
+   failed runs into near-complete orders, but turned 7 complete runs into failures: its joins
+   are only 88-97% right, and forced wrong joins leave no complete path. So the signal is
+   real, but it must not force anything - it belongs in the matching's cost.
 1. **A confidence signal for outputs.** Without it, a wrong output can not be told from a
    right one. Candidates: the margin between the found order and the best *different* order
    found by a few perturbed repairs; or calibrated junction probabilities.
