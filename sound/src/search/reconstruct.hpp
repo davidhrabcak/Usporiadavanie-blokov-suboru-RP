@@ -22,7 +22,7 @@
 // moves blocks on the graph before AC-3 and locking, so it can undo a wrong lock).
 
 struct Reconstruction {
-    enum class Source { Dfs, DfsMatchRanked, Matching, SlotOracle };
+    enum class Source { Dfs, DfsMatchRanked, Matching };
 
     bool found = false;
     std::vector<int> seq;                 // chunk order

@@ -4,13 +4,12 @@
 // is content-based and shuffle-invariant, so chunk i's true successor is i+1 and adj[i] is
 // exactly the candidate set the DFS sees.
 //
-//   Gate 1 (correctness): decode the window [i-1, i, i+1] with a fresh decoder and compare
-//     every frame from chunk i onward against a full-file decode, sample for sample.
-//   Gate 2 (signal): for every chunk i with >= 2 structural successors (true one included),
-//     score each candidate c with the PCM junction metrics on [i-1, i, c] and report AUC
-//     (true vs WRONG STRUCTURAL candidates - never random pairs), rank-1 and mean rank vs
-//     the (deg+1)/2 random baseline. Milestone 2's band-energy L2 on the same candidate sets
-//     is the baseline to beat.
+//   For every chunk i with >= 2 structural successors (true one included), each candidate c is
+//   scored with the PCM junction flux on [i-ctx..i, c]: AUC (true vs WRONG STRUCTURAL candidates
+//   - never random pairs), rank-1 and mean rank vs the (deg+1)/2 random baseline, next to the
+//   partial decoder's band-energy L2 on the same candidate sets. Then the 2-opt swap test of the
+//   summed-flux objective, the precision of confident-edge locking by margin, and the flux
+//   quantiles. RP_CHUNK_SIZE as in rp.
 
 #include <algorithm>
 #include <cmath>
@@ -21,6 +20,7 @@
 #include <string>
 #include <vector>
 
+#include "config.hpp"
 #include "mp3/frame_scanner.hpp"
 #include "probe_util.hpp"
 #include "mp3/chunk_meta.hpp"
@@ -31,14 +31,13 @@
 
 using namespace std;
 
-static int CHUNK_SIZE = 1024; // RP_CHUNK_SIZE overrides (as in rp)
 
 
 int main(int argc, char** argv) {
     if (argc < 2) { fprintf(stderr, "usage: %s <fixture.mp3> [maxJunctions]\n", argv[0]); return 2; }
     const string filename = argv[1];
     const int maxJ = argc > 2 ? atoi(argv[2]) : 1 << 30;
-    if (const char* cs = getenv("RP_CHUNK_SIZE")) CHUNK_SIZE = max(1024, atoi(cs));
+    const long CHUNK_SIZE = Config::fromEnv(0, nullptr).chunkSize;
 
     Mp3FrameScanner scanner(filename);
     if (scanner.getFrameCount() == 0) { fprintf(stderr, "No frames found\n"); return 1; }
@@ -52,7 +51,7 @@ int main(int argc, char** argv) {
            filename.c_str(), n, int(mpeg1), int(profile.isMono()), profile.sampleRate);
 
     vector<ChunkMeta> metas;
-    for (int i = 0; i < n; ++i) metas.push_back(computeChunkMeta(i, chunks[i], profile, chunks[i].size() < chunks[0].size()));
+    for (int i = 0; i < n; ++i) metas.push_back(computeChunkMeta(chunks[i], profile, chunks[i].size() < chunks[0].size()));
     const auto adj = buildAdjacency(metas);
     // Warm-up chunks before chunk i: like rp's DFS window (g_pcmLeft - 1), i.e. 2 (i-2, i-1)
     // unless frames are large vs the chunk size (PcmJunction::leftChunksNeeded on the p90 frame
@@ -73,61 +72,7 @@ int main(int argc, char** argv) {
     printf("window: %d warm-up chunks before the junction chunk\n", ctx);
     const EdgeLock::WarmChains warm = EdgeLock::buildWarmChains(adj, ctx - 2);
 
-    // ---- Gate 1: windowed decode == full decode ---------------------------------------
-    {
-        vector<const vector<uint8_t>*> all;
-        for (auto& c : chunks) all.push_back(&c);
-        const PcmJunction::Window full = PcmJunction::decodeWindow(all, n, 0);
-        map<long, int> fullByByte; // stream byte -> frame index in `full`
-        for (int k = 0; k < (int)full.frames.size(); ++k) fullByByte[full.frames[k].byteStart] = k;
-        printf("\n== Gate 1: windowed [i-%d..i,i+1] decode vs full-file decode ==\n", ctx);
-        printf("  full decode: %zu frames, %zu samples/ch, channels=%d\n",
-               full.frames.size(), full.mono.size(), full.channels);
-
-        long cmpFrames = 0, exactFrames = 0, noOutput = 0;
-        long cmpCur = 0, exactCur = 0;   // frames that start inside chunk i (the "pre" side)
-        long cmpNear = 0, exactNear = 0; // the last 3 pre-junction frames + every post frame
-        double maxDiff = 0;
-        for (int i = 1; i + 1 < n; ++i) {
-            const int first = max(0, i - ctx);
-            if (!metas[first].valid) continue;
-            vector<const vector<uint8_t>*> segs;
-            for (int k = first; k <= i + 1; ++k) segs.push_back(&chunks[k]);
-            const int curSeg = i - first;
-            const PcmJunction::Window w = PcmJunction::decodeWindow(segs, curSeg + 1, metas[first].headOffset);
-            const long base = (long)first * CHUNK_SIZE;
-            for (size_t fk = 0; fk < w.frames.size(); ++fk) {
-                const auto& fr = w.frames[fk];
-                const bool near = w.junctionFrame >= 0 && (long)fk >= (long)w.junctionFrame - 3;
-                if (fr.byteStart < (long)curSeg * CHUNK_SIZE) continue; // warm-up chunks
-                auto it = fullByByte.find(base + fr.byteStart);
-                if (it == fullByByte.end()) continue;
-                const auto& ff = full.frames[it->second];
-                ++cmpFrames;
-                const bool inCur = fr.byteStart < (long)(curSeg + 1) * CHUNK_SIZE;
-                if (inCur) ++cmpCur;
-                if (near) ++cmpNear;
-                if (fr.samples == 0 || ff.samples == 0) { ++noOutput; continue; }
-                const int ch = w.channels;
-                double d = 0;
-                for (int s = 0; s < fr.samples * ch; ++s)
-                    d = max(d, (double)fabs(w.interleaved[(size_t)fr.sampleStart * ch + s] -
-                                            full.interleaved[(size_t)ff.sampleStart * ch + s]));
-                maxDiff = max(maxDiff, d);
-                if (d == 0) { ++exactFrames; if (inCur) ++exactCur; if (near) ++exactNear; }
-            }
-        }
-        printf("  frames compared: %ld, sample-exact: %ld (%.2f%%), no output: %ld, max |diff| = %.3g\n",
-               cmpFrames, exactFrames, cmpFrames ? 100.0 * exactFrames / cmpFrames : 0.0, noOutput, maxDiff);
-        printf("  of which in chunk i (pre side): %ld, sample-exact: %ld (%.2f%%)\n",
-               cmpCur, exactCur, cmpCur ? 100.0 * exactCur / cmpCur : 0.0);
-        // The window is byte-capped (PcmJunction::PRE_BYTES), so at 4-8 KB chunks its first
-        // frames are warm-up and can't be exact; what the junction score sees is this subset.
-        printf("  near the junction (last 3 pre frames + post): %ld, sample-exact: %ld (%.2f%%)\n",
-               cmpNear, exactNear, cmpNear ? 100.0 * exactNear / cmpNear : 0.0);
-    }
-
-    // ---- Gate 2: signal on structural candidate sets ------------------------------------
+    // ---- Signal on structural candidate sets -------------------------------------------
     using namespace Mp3MainData;
     auto m2tail = [&](int prev, int c) -> GranuleSpectrum {
         if (!metas[c].valid || metas[c].frames.empty()) return {};
@@ -144,19 +89,8 @@ int main(int argc, char** argv) {
         return f.valid ? f.gr[0][0] : GranuleSpectrum{};
     };
 
-    struct MetricDef { const char* name; function<double(const PcmJunction::Metrics&)> f; };
-    const vector<MetricDef> defs = {
-        {"flux",     [](const PcmJunction::Metrics& m) { return m.flux; }},
-        {"specDist", [](const PcmJunction::Metrics& m) { return m.specDist; }},
-        {"rmsJump",  [](const PcmJunction::Metrics& m) { return m.rmsJump; }},
-        {"hfBurst",  [](const PcmJunction::Metrics& m) { return m.hfBurst; }},
-        {"peak",     [](const PcmJunction::Metrics& m) { return m.peak; }},
-    };
-    const int NM = (int)defs.size();
-    const int M2 = NM, COMBO = NM + 1, TOT = NM + 2; // extra columns: Milestone-2 L2, z-sum combo
-
-    // Collect raw per-junction candidate scores first (combo needs global z-scoring).
-    struct Cand { int c; bool truth; double v[16]; bool m2ok; int postFailed; };
+    const int M2 = 1, TOT = 2;   // columns: 0 = PCM flux, 1 = partial-decode band-energy L2
+    struct Cand { int c; bool truth; double v[2]; bool m2ok; int postFailed; };
     vector<vector<Cand>> junctions;
     int silentJ = 0, skippedJ = 0, considered = 0;
     long postFailTrue = 0, postFailWrong = 0, candTrue = 0, candWrong = 0;
@@ -169,14 +103,14 @@ int main(int argc, char** argv) {
         const GranuleSpectrum A = m2tail(i - 1, i);
         vector<Cand> cs;
         bool trueOk = false, silent = false;
+        vector<const vector<uint8_t>*> segs;
+        for (int k = first; k <= i; ++k) segs.push_back(&chunks[k]);
+        const PcmJunction::LeftContext left(segs, metas[first].headOffset);
         for (int c : cand) {
-            vector<const vector<uint8_t>*> segs;
-            for (int k = first; k <= i; ++k) segs.push_back(&chunks[k]);
-            segs.push_back(&chunks[c]);
-            const PcmJunction::Metrics m = PcmJunction::scoreJunction(segs, i - first + 1, metas[first].headOffset);
+            const PcmJunction::Metrics m = left.score(chunks[c]);
             if (!m.valid) continue;
             Cand x; x.c = c; x.truth = (c == i + 1); x.postFailed = m.postFailed;
-            for (int k = 0; k < NM; ++k) x.v[k] = defs[k].f(m);
+            x.v[0] = m.flux;
             const GranuleSpectrum B = m2head(i, c);
             x.m2ok = A.valid && B.valid;
             double s = 0;
@@ -191,21 +125,7 @@ int main(int argc, char** argv) {
         junctions.push_back(std::move(cs));
     }
 
-    // z-score each PCM metric over all candidates (log1p first: they're heavy-tailed), sum.
-    {
-        vector<double> mu(NM, 0), sd(NM, 0); long cnt = 0;
-        for (auto& cs : junctions) for (auto& x : cs) { ++cnt; for (int k = 0; k < NM; ++k) mu[k] += log1p(x.v[k]); }
-        for (int k = 0; k < NM; ++k) mu[k] /= max(1L, cnt);
-        for (auto& cs : junctions) for (auto& x : cs) for (int k = 0; k < NM; ++k) sd[k] += pow(log1p(x.v[k]) - mu[k], 2);
-        for (int k = 0; k < NM; ++k) sd[k] = sqrt(sd[k] / max(1L, cnt)) + 1e-12;
-        for (auto& cs : junctions) for (auto& x : cs) {
-            double z = 0;
-            for (int k = 0; k < NM; ++k) z += (log1p(x.v[k]) - mu[k]) / sd[k];
-            x.v[COMBO] = z;
-        }
-    }
-
-    printf("\n== Gate 2: rank of true successor among structural candidates ==\n");
+    printf("\n== Rank of the true successor among structural candidates ==\n");
     printf("  junctions with deg>=2: %d considered, %zu scored, %d silent (excluded), %d skipped\n",
            considered, junctions.size(), silentJ, skippedJ);
     printf("  frames with no output on the post side: true %.3f/junction, wrong %.3f/candidate\n",
@@ -235,7 +155,7 @@ int main(int argc, char** argv) {
             if (less == 0 && eq == 0) ++r1;
         }
         auto med = [](vector<double> v) { if (v.empty()) return 0.0; nth_element(v.begin(), v.begin() + v.size() / 2, v.end()); return v[v.size() / 2]; };
-        const char* name = k < NM ? defs[k].name : (k == M2 ? "M2-L2" : "pcmCombo");
+        const char* name = k == M2 ? "bandL2" : "flux";
         printf("  %-10s %7.3f %7.1f%% %9.2f %9.2f   %.3g / %.3g   (n=%ld)\n", name, auc(tv, wv),
                cnt ? 100.0 * r1 / cnt : 0.0, cnt ? rankSum / cnt : 0.0, cnt ? baseSum / cnt : 0.0,
                med(tv), med(wv), cnt);
@@ -243,8 +163,8 @@ int main(int argc, char** argv) {
 
     // DFS-relevant, like-for-like comparison: only candidates whose post side decoded fully
     // (postFailed == 0 - a reservoir underflow there is what the DFS reservoir check already
-    // rejects, and its zero-filled gap hands flux a free spike) AND that Milestone 2 could
-    // score; only junctions where the true successor qualifies and >= 1 wrong one remains.
+    // rejects, and its zero-filled gap hands flux a free spike) AND that the partial decoder
+    // could score; only junctions where the true successor qualifies and >= 1 wrong one remains.
     // flux and M2 are ranked on exactly the same candidate sets.
     {
         vector<double> tf, wf, tm, wm;
@@ -268,7 +188,7 @@ int main(int argc, char** argv) {
         printf("\n  like-for-like (reservoir-decodable + M2-scorable candidates, same sets): %ld junctions, "
                "random mean rank %.2f\n", cnt, cnt ? base / cnt : 0.0);
         printf("    flux   AUC %.3f  rank-1 %5.1f%%  meanRank %.2f\n", auc(tf, wf), cnt ? 100.0 * r1f / cnt : 0.0, cnt ? rf / cnt : 0.0);
-        printf("    M2-L2  AUC %.3f  rank-1 %5.1f%%  meanRank %.2f\n", auc(tm, wm), cnt ? 100.0 * r1m / cnt : 0.0, cnt ? rm / cnt : 0.0);
+        printf("    bandL2 AUC %.3f  rank-1 %5.1f%%  meanRank %.2f\n", auc(tm, wm), cnt ? 100.0 * r1m / cnt : 0.0, cnt ? rm / cnt : 0.0);
     }
 
     // ---- Objective alignment (2-opt swap test): for true edges a->b and c->d, where the
@@ -277,13 +197,10 @@ int main(int argc, char** argv) {
     // argmin of summed flux, global objective searches (matching/beam) are a dead end.
     {
         map<pair<int,int>, double> fx; // (i, cand) -> flux, true context
-        int ji = 0;
-        for (int i = 1; i + 1 < n; ++i) (void)i;
         for (auto& cs : junctions) {
             int i = -1;
             for (auto& x : cs) if (x.truth) i = x.c - 1;
             for (auto& x : cs) fx[{i, x.c}] = x.v[0];
-            ++ji;
         }
         long swaps = 0, trueWins = 0, ties = 0;
         for (auto& kv : fx) {
@@ -313,12 +230,13 @@ int main(int argc, char** argv) {
             if (adj[i].size() >= 2 || preds[i + 1].size() >= 2) ++branchTrue;
         }
         for (int i = 0; i < n; ++i) if (adj[i].size() >= 2) ++branchOut;
-        for (auto mode : {EdgeLock::Mode::Robust, EdgeLock::Mode::Median}) {
+        {
             long dec = 0;
-            const auto all = EdgeLock::findConfidentEdges(chunks, metas, adj, 0, 1.0, maxCtx, mode, &dec,
-                                                          nullptr, 1, warm.empty() ? nullptr : &warm);
-            printf("\n== Confident-edge locking, %s mode (maxCtx=%d, %ld window decodes) ==\n",
-                   mode == EdgeLock::Mode::Robust ? "robust" : "median", maxCtx, dec);
+            EdgeLock::FluxMemo memo;
+            const auto all = EdgeLock::findConfidentEdges(chunks, metas, adj, 0, 1.0, maxCtx, memo,
+                                                          Config::fromEnv(0, nullptr).threads,
+                                                          warm.empty() ? nullptr : &warm, &dec);
+            printf("\n== Confident-edge locking (maxCtx=%d, %ld window decodes) ==\n", maxCtx, dec);
             printf("  true edges at a branch point (out- or in-degree >= 2): %ld; chunks with out-degree >= 2: %ld\n",
                    branchTrue, branchOut);
             printf("  %6s %7s %8s %9s %10s %16s\n", "tau", "locks", "wrong", "precision", "coverage", "outdeg>=2 after");

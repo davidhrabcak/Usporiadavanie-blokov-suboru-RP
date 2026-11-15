@@ -6,8 +6,7 @@
 #include "scoring/junction_scorer.hpp"
 #include "search/reconstruct.hpp"
 
-// Writes output.mp3 in the order found, with the headerless chunks put into the slots after
-// their demanders (by PCM flux, SlotFill), and scores it against the source order. Returns the
+// Writes output.mp3 in the order found and scores it against the source order. Returns the
 // process exit code.
 int writeOutput(const Problem& p, JunctionScorer& scorer, const Reconstruction& r, const Config& cfg);
 

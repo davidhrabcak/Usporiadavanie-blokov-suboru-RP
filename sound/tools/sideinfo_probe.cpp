@@ -123,7 +123,7 @@ int main(int argc, char** argv) {
 
     vector<ChunkMeta> metas;
     metas.reserve(n);
-    for (int i = 0; i < n; ++i) metas.push_back(computeChunkMeta(i, chunks[i], profile));
+    for (int i = 0; i < n; ++i) metas.push_back(computeChunkMeta(chunks[i], profile));
 
     vector<ChunkSI> si(n);
     for (int i = 0; i < n; ++i) {
@@ -180,10 +180,9 @@ int main(int argc, char** argv) {
     }
 
     const auto adj = buildAdjacency(metas);
-    const auto outdeg = computeOutDegree(adj, n);
     {
         int hist[8] = {0};
-        for (int i = 0; i < n; ++i) hist[min(outdeg[i], 7)]++;
+        for (int i = 0; i < n; ++i) hist[min(static_cast<int>(adj[i].size()), 7)]++;
         printf("out-degree histogram: {0:%d 1:%d 2:%d 3:%d 4:%d 5:%d 6:%d 7+:%d}\n",
                hist[0], hist[1], hist[2], hist[3], hist[4], hist[5], hist[6], hist[7]);
     }

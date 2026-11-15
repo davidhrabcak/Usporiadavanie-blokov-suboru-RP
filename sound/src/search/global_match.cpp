@@ -8,6 +8,7 @@
 #include <limits>
 #include <queue>
 #include <unordered_map>
+#include <unordered_set>
 
 using namespace std;
 
@@ -16,9 +17,8 @@ namespace {
 class Matcher {
 public:
     Matcher(const vector<Supernode>& sn, const vector<vector<int>>& superAdj, const int startSuper,
-            const vector<vector<int>>& chunkAdj, const vector<ChunkMeta>& metas,
-            const std::unordered_set<uint64_t>* forbidden)
-        : sn_(sn), superAdj_(superAdj), startSuper_(startSuper), metas_(metas), forbidden_(forbidden),
+            const vector<vector<int>>& chunkAdj, const vector<ChunkMeta>& metas)
+        : sn_(sn), superAdj_(superAdj), startSuper_(startSuper), metas_(metas),
           N_(static_cast<int>(sn.size())), preds_(chunkAdj.size()), ctxOf_(N_) {
         // chunk-level predecessors in the current (locked) graph, for single-chunk contexts
         for (size_t a = 0; a < chunkAdj.size(); ++a) for (int b : chunkAdj[a]) preds_[b].push_back((int)a);
@@ -120,7 +120,7 @@ public:
         for (int s = 0; s < N; ++s) {
             add(S, s, 0);
             add(N + s, T, 0);
-            for (int t : superAdj_[s]) if (t != startSuper_ && !banned(s, t)) add(s, N + t, std::llround(c(s, t) * SCALE));
+            for (int t : superAdj_[s]) if (t != startSuper_) add(s, N + t, std::llround(c(s, t) * SCALE));
             if (mayEnd(s)) add(s, N + startSuper_, std::llround(neutral_ * SCALE));
         }
         const long long INF = std::numeric_limits<long long>::max() / 4;
@@ -179,7 +179,7 @@ public:
         std::unordered_set<uint64_t> isEdge;
         vector<vector<int>> spred(N);
         for (int s = 0; s < N; ++s) for (int t : superAdj_[s]) { isEdge.insert(ekey(s, t)); spred[t].push_back(s); }
-        auto edge = [&](int s, int t) { return t < 0 ? mayEnd(s) : isEdge.count(ekey(s, t)) > 0 && !banned(s, t); };
+        auto edge = [&](int s, int t) { return t < 0 ? mayEnd(s) : isEdge.count(ekey(s, t)) > 0; };
         while (!cyc.empty()) {
             vector<int> pos(N, -1);
             for (int i = 0; i < (int)path.size(); ++i) pos[path[i]] = i;
@@ -192,7 +192,7 @@ public:
                     const int u = cy[k], v = cy[(k + 1) % m];
                     for (int x : spred[v]) {
                         const int i = pos[x];
-                        if (i < 0 || banned(x, v)) continue;
+                        if (i < 0) continue;
                         const int y = (i + 1 < (int)path.size()) ? path[i + 1] : -1;
                         if (!edge(u, y)) continue;
                         const double d = c(x, v) + c(u, y) - c(x, y) - c(u, v);
@@ -216,9 +216,6 @@ public:
     }
 
 private:
-    bool banned(int s, int t) const {
-        return forbidden_ && forbidden_->count(((uint64_t)(unsigned)s << 32) | (unsigned)t) > 0;
-    }
     uint64_t ekey(int s, int t) const { return (uint64_t)s * (uint64_t)(N_ + 1) + (uint64_t)t; }
     double c(int s, int t) const {   // t == -1: END
         if (t < 0) return neutral_;
@@ -244,7 +241,6 @@ private:
     const vector<vector<int>>& superAdj_;
     const int startSuper_;
     const vector<ChunkMeta>& metas_;
-    const std::unordered_set<uint64_t>* forbidden_;
     const int N_;
     vector<vector<int>> preds_;
     vector<vector<int>> ctxOf_;
@@ -259,9 +255,9 @@ MatchResult globalMatch(const vector<vector<uint8_t>>& chunks, const vector<Supe
                         const vector<vector<int>>& superAdj, const int startSuper,
                         const vector<vector<int>>& chunkAdj, const vector<ChunkMeta>& metas,
                         EdgeLock::FluxMemo& memo, const int threads, const EdgeLock::WarmChains* warm,
-                        const long maxDecodes, const std::unordered_set<uint64_t>* forbidden) {
+                        const long maxDecodes) {
     MatchResult res;
-    Matcher m(sn, superAdj, startSuper, chunkAdj, metas, forbidden);
+    Matcher m(sn, superAdj, startSuper, chunkAdj, metas);
     vector<std::array<int, 3>> windows;
     if (!m.chooseContexts(memo, maxDecodes, windows, res)) return res;
     res.decodes = EdgeLock::scoreWindows(chunks, metas, windows, memo, threads, warm);

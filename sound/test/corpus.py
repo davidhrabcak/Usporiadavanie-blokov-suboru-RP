@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Tests for rp. Python 3 standard library only. Run from sound/.
 
-  test/corpus.py fixtures               the files in test/ (whole files, 1 KB chunks, 20 s budget)
-  test/corpus.py musiclib               the musiclib/ corpus (whole files, 1 and 4 KB chunks)
+  test/corpus.py fixtures               the files in test/ (4 KB chunks, 20 s search budget)
+  test/corpus.py musiclib               the musiclib/ corpus (4 KB chunks)
   test/corpus.py score REPORT.json      the metrics of one rp report (CI: --expect-exact)
 
 A suite (test/corpus_suites.json) runs rp on every input, resumes where it stopped (results are
 kept per suite and binary), and writes RESULTS.csv + RESULTS.md (the summary).
 Comparing two runs is done by hand on those files. RP_* variables set when calling are passed to
-rp (an A/B run gets its own results file). Options: --match SUBSTRING..., --jobs N.
+rp (an A/B run gets its own results file; RP_CHUNK_SIZE replaces the suite's chunk sizes).
+Options: --match SUBSTRING..., --jobs N.
 
 The metrics depend only on the order rp outputs, not on how it found it or on the file format:
 rp's RP_REPORT JSON carries `status`, `n` (chunks in the stream) and `order` (the source index of
@@ -25,8 +26,8 @@ For a partial path the denominators stay n, so missing chunks count as wrong.
   budget_exhausted  the search stopped on its time or node budget
   wall_s            rp's wall-clock time (load to exit; not CPU time, so threads don't add up)
 
-Derived files (manifest, cut inputs, logs, full reports with the order, results) go to the
-gitignored musiclib/.derived/.
+Derived files (manifest, logs, full reports with the order, results) go to the gitignored
+musiclib/.derived/.
 """
 import argparse, concurrent.futures as cf, csv, gzip, hashlib, json, os, shutil, subprocess, sys, tempfile, time
 
@@ -120,8 +121,7 @@ def cell(v):
     return "" if v is None else v
 
 # --------------------------------------------------------------------------------------------
-# MPEG audio frames: the manifest's format columns and the secN cut. Other formats need their
-# own describe() and cut().
+# MPEG audio frames: the manifest's format columns.
 
 BITRATES = {  # (mpeg1?, layer) -> kbps by index
     (True, 1): [0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448],
@@ -194,18 +194,6 @@ def describe(d):
                 duration_s=round(sum(h["spf"] for _, h in frames) / h0["sr"], 1))
 
 
-def cut_seconds(d, secs):
-    """The first `secs` seconds of whole frames, from the first frame (empty bit reservoir).
-    Mid-track stream-copy cuts are not offered: their first frames' reservoir points before
-    the cut."""
-    frames = frames_of(d)
-    first, end, samples = frames[0][0], frames[0][0], 0
-    for o, h in frames:
-        if samples >= secs * h["sr"]:
-            break
-        end, samples = o + h["len"], samples + h["spf"]
-    return d[first:end]
-
 # --------------------------------------------------------------------------------------------
 # Inputs
 
@@ -248,26 +236,11 @@ def manifest(corpus, derived):
     return [r for r in rows if str(r.get("frames")) != "0"]
 
 
-def materialize(corpus, derived, row, recipe):
-    """recipe: `orig` (the file as it is) or `secN` (its first N seconds)."""
-    src = os.path.join(corpus, row["path"])
-    if recipe == "orig":
-        return src
-    if not recipe.startswith("sec"):
-        sys.exit("unknown recipe " + recipe)
-    out = os.path.join(derived, "inputs", f"{row['id']}_{recipe}.mp3")
-    if not os.path.exists(out):
-        os.makedirs(os.path.dirname(out), exist_ok=True)
-        with open(out + ".tmp", "wb") as f:
-            f.write(cut_seconds(open(src, "rb").read(), int(recipe[3:])))
-        os.replace(out + ".tmp", out)
-    return out
-
 # --------------------------------------------------------------------------------------------
 # Running a suite
 
 
-RESULT_COLS = ["run_id", "class", "binary", "suite", "chunk_size", "id", "recipe", "name", "format", "mode",
+RESULT_COLS = ["run_id", "class", "binary", "suite", "chunk_size", "id", "name", "format", "mode",
                "kbps", "sample_rate", "status", "error", "rc", "timed_out", "n"] + METRIC_COLS + ["log"]
 
 
@@ -301,7 +274,7 @@ def row_of(rep):
 
 
 def one_run(job):
-    rp, binary, suite, env, chunk, inp, row, recipe, derived, run_id = job
+    rp, binary, suite, env, chunk, inp, row, derived, run_id = job
     t0 = time.time()
     rc, timed_out, out, rep = run_rp(rp, inp, dict(env, RP_SEED="1", RP_CHUNK_SIZE=str(chunk), RP_THREADS=str(THREADS)))
     log = os.path.join(derived, "logs", run_id + ".log.gz")   # the run's stdout
@@ -313,7 +286,7 @@ def one_run(job):
         with gzip.open(os.path.join(derived, "reports", run_id + ".json.gz"), "wt") as f:
             json.dump(rep, f)
     r = {c: "" for c in RESULT_COLS}
-    r.update(run_id=run_id, binary=binary, suite=suite, chunk_size=chunk, id=row["id"], recipe=recipe,
+    r.update(run_id=run_id, binary=binary, suite=suite, chunk_size=chunk, id=row["id"],
              name=row["path"], rc=rc, timed_out=int(timed_out), log=os.path.relpath(log, derived),
              **{k: row.get(k, "") for k in ("format", "mode", "kbps", "sample_rate")})
     r.update(row_of(rep))
@@ -334,6 +307,7 @@ def cmd_suite(args):
     binary = hashlib.sha1(open(rp, "rb").read()).hexdigest()[:12]
     extra = {k: v for k, v in os.environ.items() if k.startswith("RP_")}   # an A/B run
     env = dict(suite.get("env", {}), **extra)
+    chunks = [int(extra["RP_CHUNK_SIZE"])] if "RP_CHUNK_SIZE" in extra else suite["chunk"]
     tag = f"{args.suite}-{binary}" + ("-" + hashlib.sha1(json.dumps(extra, sort_keys=True).encode()).hexdigest()[:6]
                                       if extra else "")
     results = os.path.join(derived, "results", tag + ".csv")
@@ -343,14 +317,13 @@ def cmd_suite(args):
         with open(results) as f:
             have = {r["run_id"]: r for r in csv.DictReader(f)}
     jobs = []
-    for chunk in suite["chunk"]:
+    for chunk in chunks:
         for row in rows:
-            run_id = hashlib.sha1(f"{tag}|{json.dumps(env, sort_keys=True)}|{chunk}|{row['id']}|{suite['recipe']}"
-                                  .encode()).hexdigest()[:16]
+            run_id = hashlib.sha1(f"{tag}|{json.dumps(env, sort_keys=True)}|{chunk}|{row['id']}".encode()).hexdigest()[:16]
             if run_id not in have:
-                jobs.append((rp, binary, args.suite, env, chunk, materialize(corpus, derived, row, suite["recipe"]),
-                             row, suite["recipe"], derived, run_id))
-    print(f"{args.suite}: {len(rows)} inputs x {len(suite['chunk'])} chunk sizes, {len(jobs)} runs to do, "
+                jobs.append((rp, binary, args.suite, env, chunk, os.path.join(corpus, row["path"]), row, derived,
+                             run_id))
+    print(f"{args.suite}: {len(rows)} inputs x {len(chunks)} chunk sizes, {len(jobs)} runs to do, "
           f"binary {binary}" + (f", extra env {extra}" if extra else ""), flush=True)
     new = not os.path.exists(results)
     with open(results, "a", newline="") as f, cf.ThreadPoolExecutor(args.jobs) as ex:
@@ -429,16 +402,6 @@ def summary(R, results, out):
                     [[g] + [f"{sum(r['class'] == 'EXACT' for r in by_chunk[c] if fmt(r) == g)} / "
                             f"{sum(fmt(r) == g for r in by_chunk[c])}" for c in chunks]
                      for g in sorted({fmt(r) for r in R})]))
-    bins = [0, 0.25, 0.5, 0.75, 0.9, 1.0001]   # where the complete-but-wrong orders fall
-    wrong = [r for r in R if r["status"] == "complete" and r["exact"] != "true"]
-    if wrong:
-        def b(v):
-            return next(i for i in range(len(bins) - 1) if float(v) < bins[i + 1])
-        lab = [f"{bins[i]:g}-{min(bins[i + 1], 1):g}" for i in range(len(bins) - 1)]
-        md.append("\n## Complete but not exact: neighbor_acc (rows) x position_acc (columns), runs\n")
-        md.append(table(["neighbor \\ position"] + lab,
-                        [[lab[i]] + [sum(1 for r in wrong if b(r["neighbor_acc"]) == i and b(r["position_acc"]) == j)
-                                     for j in range(len(lab))] for i in reversed(range(len(lab)))]))
     md.append("\n## Per input (class, neighbor_acc)\n")
     at = {(r["name"], int(r["chunk_size"])): r for r in R}
 
@@ -471,7 +434,7 @@ def main():
     for name in json.load(open(SUITES)):
         p = sub.add_parser(name)
         p.add_argument("--match", nargs="+", help="only inputs whose path contains one of these")
-        p.add_argument("--jobs", type=int, default=8)   # rp is mostly single-threaded; 10 OOM-killed a 6 GB 1 KB run on 14 GB
+        p.add_argument("--jobs", type=int, default=8)   # x THREADS scoring threads each
         p.set_defaults(func=cmd_suite, suite=name)
     s = sub.add_parser("score")
     s.add_argument("report")

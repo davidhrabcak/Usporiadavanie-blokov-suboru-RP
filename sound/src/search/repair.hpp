@@ -1,6 +1,7 @@
 #ifndef RP_REPAIR_HPP
 #define RP_REPAIR_HPP
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <string>
@@ -36,11 +37,11 @@
 // test7_short gained 3.4).
 class OrderRepair {
 public:
-    // `origIndexOf` (diagnostic, may be null): source position of each chunk, for the
-    // "[vs source: ...]" log lines.
+    // `origIndexOf` (diagnostic): source position of each chunk, for the "[vs source: ...]"
+    // log lines.
     OrderRepair(const std::vector<std::vector<uint8_t>>& chunks, const std::vector<ChunkMeta>& metas,
                 JunctionScorer& scorer, const std::vector<std::vector<int>>& adjFull,
-                const StreamProfile& profile, const Config::Repair& opt, const std::vector<int>* origIndexOf);
+                const StreamProfile& profile, const Config::Repair& opt, const std::vector<int>& origIndexOf);
 
     // Repairs `seq` in place and returns the number of moves applied. `gap` (optional) gets the
     // stability margin of the final order: how much the summed flux would rise under the
@@ -75,6 +76,7 @@ private:
     // Suspect filter: a move can only fix the ordering by cutting a wrong junction, and wrong
     // splices are usually high-flux (pcm_probe: true median ~1.05, wrong ~3). Marks the K worst
     // junctions (plus, for an invalid order, the junctions just before each reservoir break).
+    int suspectCount() const { return std::max(16, n_ / 20); }
     std::vector<char> suspectJunctions() const;
     // Evaluates one candidate; keeps it in `moves` if it beats the current cost.
     void consider(std::vector<Seg>&& segs, std::string&& what, std::vector<Move>& moves, long& candidates);
@@ -92,7 +94,7 @@ private:
     const int sideInfo_;
     const int maxReservoir_;
     const Config::Repair opt_;
-    const std::vector<int>* origIndexOf_;
+    const std::vector<int>& origIndexOf_;
     std::unordered_set<uint64_t> edge_;
     std::vector<std::vector<int>> preds_;
 

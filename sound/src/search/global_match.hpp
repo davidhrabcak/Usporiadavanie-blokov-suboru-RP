@@ -3,13 +3,12 @@
 
 #include <cstdint>
 #include <string>
-#include <unordered_set>
 #include <vector>
 #include "graph/supernodes.hpp"
 #include "mp3/chunk_meta.hpp"
 #include "scoring/edge_lock.hpp"
 
-// Global min-cost successor matching (method 1 of "global search on summed flux").
+// Global min-cost successor matching (HOW_IT_WORKS 4.12).
 // The DFS uses flux locally: one wrong early pick strands it. Instead, give EVERY supernode
 // exactly one successor and one predecessor so that the summed edge cost (log1p of the median
 // junction flux) is minimal - an assignment problem, solved exactly by successive shortest
@@ -33,13 +32,10 @@ struct MatchResult {
 
 // `chunkAdj`: the chunk graph the supernodes were built from (for single-chunk contexts).
 // Window fluxes are read from and added to `memo`, scored on `threads` threads. `maxDecodes`
-// (RP_MATCH_MAX_DECODES) caps the new window decodes. `forbidden` (optional): supernode arcs
-// s->t, keyed (s << 32) | t, the matching may not use (the iterated matching forbids the arcs
-// at reservoir breaks).
+// (RP_MATCH_MAX_DECODES) caps the new window decodes.
 MatchResult globalMatch(const std::vector<std::vector<uint8_t>>& chunks, const std::vector<Supernode>& sn,
                         const std::vector<std::vector<int>>& superAdj, int startSuper,
                         const std::vector<std::vector<int>>& chunkAdj, const std::vector<ChunkMeta>& metas,
-                        EdgeLock::FluxMemo& memo, int threads, const EdgeLock::WarmChains* warm, long maxDecodes,
-                        const std::unordered_set<uint64_t>* forbidden = nullptr);
+                        EdgeLock::FluxMemo& memo, int threads, const EdgeLock::WarmChains* warm, long maxDecodes);
 
 #endif

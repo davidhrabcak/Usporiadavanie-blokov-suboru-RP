@@ -75,6 +75,18 @@ bool advanceReservoirChunk(int& level,
                            const int sideInfo,
                            const int maxReservoir);
 
+// Main-data continuity across the junction a -> b. Encoders write main data back to back: a
+// frame's main_data_begin is exactly the reservoir level the previous frame left (in whole
+// bytes), unless the reservoir was full and the surplus was dropped (measured 2026-11-15: equal
+// in 95-100% of frames on 23 of 24 CBR/VBR files). Starting from the level after a's last complete
+// frame - which depends on that frame alone - this returns the bytes of reservoir left unused by
+// the frame split across the junction and by b's first complete frame: 0 = b continues a's main
+// data exactly ("tight"); > 0 = it fits but leaves a hole; -1 = the reservoir check fails;
+// -2 = can't be told (a has no complete frame, the split frame's side info is unreadable, or
+// the reservoir was full).
+int junctionSlack(const ChunkMeta& a, const ChunkMeta& b, const std::vector<uint8_t>& bBytes,
+                  int sideInfo, int maxReservoir);
+
 // Whether the whole order `seq` (chunk indices into `metas` / `chunks`) passes the check,
 // starting from an empty reservoir.
 bool reservoirValid(const std::vector<ChunkMeta>& metas, const std::vector<std::vector<uint8_t>>& chunks,

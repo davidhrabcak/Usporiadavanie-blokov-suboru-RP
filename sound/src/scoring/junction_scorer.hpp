@@ -5,7 +5,6 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
-#include <optional>
 #include <unordered_map>
 #include <vector>
 #include "config.hpp"
@@ -16,7 +15,7 @@
 // How well does chunk b continue the path that ends in chunk a? Three terms, all used only to
 // rank candidates (never to reject an edge):
 //   gain      |Δ global_gain| + |Δ big_values| / 32 across the boundary (side info only);
-//   spectral  L2 distance of the 12-band energy of the two boundary granules (Milestone 2);
+//   spectral  L2 distance of the 12-band energy of the two boundary granules (partial decode);
 //   PCM       the spectral-flux spike when the junction is decoded to audio (pcm_junction).
 // The spectral and PCM weights are calibrated per file (calibrateSpectral, calibratePcm).
 
@@ -27,8 +26,8 @@ constexpr int PCM_LEFT_MAX = 8;   // most path chunks a PCM window takes on its 
 // complete frame. -1 when unavailable (no complete frame / side info didn't fit).
 // Measured with sideinfo_probe (CLAUDE.md, Findings): `global_gain` (granule loudness) is the dominant
 // junction-continuity signal - |Δ global_gain| ranks the true successor #1 in ~60-74% of VBR
-// branch points (vs ~30% for the graph's own order). A2: adding a small |Δ big_values|
-// (spectral-occupancy) term robustly nudges rank-1 up ~1-3pp on every fixture.
+// branch points (vs ~30% for the graph's own order). Adding a small |Δ big_values|
+// (spectral-occupancy) term nudges rank-1 up ~1-3pp on every fixture.
 struct BoundaryGain {
     int ggFirst = -1, ggLast = -1;   // global_gain
     int bvFirst = -1, bvLast = -1;   // big_values
@@ -43,13 +42,12 @@ struct FluxSum {
 class JunctionScorer {
 public:
     // Fixed penalty for a junction whose global_gain is unknown on either side: above the 255
-    // max real delta, so an ordering that resolves more junctions scores better, unknowns sort
-    // last, and the running sum stays finite (needed for the best-of branch-and-bound).
+    // max real delta, so unknowns sort last.
     static constexpr int UNKNOWN_JUNCTION_COST = 384;
 
     // Reads the boundary gains and sizes the PCM window (prints its size when it isn't 3).
     // `chunks` and `metas` are referenced, not copied: they must outlive the scorer and keep
-    // their elements in place (metas' gapAfter flags may still change).
+    // their elements in place.
     JunctionScorer(const std::vector<std::vector<uint8_t>>& chunks, const std::vector<ChunkMeta>& metas,
                    const StreamProfile& profile, long chunkSize, const Config& cfg);
 
@@ -58,9 +56,8 @@ public:
     bool pcmOn() const { return pcm_; }
 
     // Junction cost of putting a supernode whose first chunk is `b` right after one whose last
-    // chunk is `a`: |Δ global_gain| + |Δ big_values|/32 across that boundary (A2 - the /32
-    // matches the z-scored 1.0*gg + 0.15*bv the probe found robust). Used for both DFS
-    // exploration order and the best-of score.
+    // chunk is `a`: |Δ global_gain| + |Δ big_values|/32 across that boundary (the /32 matches
+    // the z-scored 1.0*gg + 0.15*bv the probe found robust).
     int gainCost(int a, int b) const;
     // Spectral term for `candHead` after `curTail` (whose predecessor is `curPrev`, -1 none):
     // the trailing spectrum needs `curTail`'s predecessor and the leading one needs `curTail`
@@ -78,10 +75,10 @@ public:
     // Summed pcmRaw over every junction of `seq`.
     FluxSum summedFlux(const std::vector<int>& seq);
 
-    // Scales the spectral term so a median random junction contributes ~3 (skipped when
-    // RP_SPEC_SCALE is set). Clears the spectral memo.
+    // Scales the spectral term so a median random junction contributes ~3. Clears the
+    // spectral memo.
     void calibrateSpectral();
-    // Scales the PCM term so its spread over real structural edges of `adj` is RP_PCM_W times
+    // Scales the PCM term so its spread over real structural edges of `adj` is PCM_WEIGHT times
     // the spread of gain + spectral, and sets the neutral value; turns the term off when
     // ranking (RP_RANK) or the term (RP_PCM) is off. Clears the PCM memo.
     void calibratePcm(const std::vector<std::vector<int>>& adj);
@@ -93,11 +90,9 @@ private:
     const std::vector<ChunkMeta>& metas_;
     const bool isLayerIII_;
     const bool rank_;
-    const std::optional<double> specScaleOverride_;
-    const double pcmWeight_;
     std::vector<BoundaryGain> boundaryGain_;
 
-    // Milestone 2 spectral term. Memoised by (predecessor, chunk); distinct keys ~= edge count.
+    // Spectral term (partial decode). Memoised by (predecessor, chunk); distinct keys ~= edge count.
     bool spec_ = true;
     int sampleRate_ = 44100;
     double specScale_ = 10.0;

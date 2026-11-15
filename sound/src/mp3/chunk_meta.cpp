@@ -331,12 +331,10 @@ static int tailQuality(const int tailOverflow, const int tailPartialLen) {
  * Extract information needed for the struct ChunkMeta
  * @return New ChunkMeta.
  */
-ChunkMeta computeChunkMeta(const int chunkIndex,
-                           const vector<uint8_t>& chunk,
+ChunkMeta computeChunkMeta(const vector<uint8_t>& chunk,
                            const StreamProfile& expected,
                            const bool shortChunk) {
     ChunkMeta meta;
-    meta.chunkIndex     = chunkIndex;
     meta.headOffset     = 0;
     meta.tailOverflow   = 0;
     meta.tailPartialLen = 0;
@@ -372,7 +370,7 @@ ChunkMeta computeChunkMeta(const int chunkIndex,
         // Third key, ties only: a candidate whose side info is impossible loses (it used to be
         // "earlier offset wins"). At 320 kbps / 1 KB a chunk holds at most one real frame
         // start, so any false sync before it tied and won, giving the chunk a wrong tail
-        // (1-7 true-order breaks per musiclib track; HOW_IT_WORKS 4.18).
+        // (1-7 true-order breaks per musiclib track).
         const bool plausible = sideInfoPlausible(chunk, off, h) != 0;
         if (quality > bestQuality || (quality == bestQuality && count > bestCount) ||
             (quality == bestQuality && count == bestCount && plausible && !bestPlausible)) {
@@ -417,39 +415,6 @@ ChunkMeta computeChunkMeta(const int chunkIndex,
     }
 
     return meta;
-}
-
-/**
- * Creates StreamProfile structure from input chunk
- *
- * @param chunk Input chunk from which  profile is derived.
- * @param out Output struct StreamProfile
- * @return True if the profile was constructed successfully.
- */
-bool detectCBR(const vector<uint8_t>& stream, const StreamProfile& prof, int& kbpsOut, const int minFrames) {
-    int i = 0, frames = 0, kbps = -1;
-    while (i + 4 <= static_cast<int>(stream.size())) {
-        Header h;
-        if (!readHeaderAt(stream, i, prof, h)) break;
-        const int len = h.getFrameLength();
-        if (len <= 0) break;
-        const int br = h.getBitrate();
-        if (kbps < 0) kbps = br;
-        else if (br != kbps) return false; // a second bitrate -> not CBR
-        // A Xing (as opposed to Info) header marks the stream as VBR even if these first
-        // frames happen to share a bitrate - bail so we don't wrongly filter.
-        if (frames == 0 && isXingFrame(stream, i, h)) {
-            const int tag = i + 4 + h.crcBytes() + sideInfoSize(h.getVersionID(), h.isMono());
-            if (tag + 4 <= static_cast<int>(stream.size()) &&
-                std::memcmp(&stream[tag], "Xing", 4) == 0)
-                return false;
-        }
-        ++frames;
-        i += len;
-    }
-    if (frames < minFrames || kbps <= 0) return false;
-    kbpsOut = kbps;
-    return true;
 }
 
 bool deriveProfile(const vector<uint8_t>& chunk, StreamProfile& out) {
@@ -534,7 +499,7 @@ bool detectCBRUnordered(const vector<vector<uint8_t>>& chunks, const StreamProfi
     for (int i = 0; i < static_cast<int>(chunks.size()); ++i) {
         const auto& c = chunks[i];
         // A "Xing" (not "Info") tag at a chunk start can only be the stream's first frame and
-        // marks the stream as VBR, as in detectCBR.
+        // marks the stream as VBR even if the frames happen to share a bitrate.
         Header h0;
         if (readHeaderAt(c, 0, prof, h0) && isXingFrame(c, 0, h0)) {
             const int tag = 4 + h0.crcBytes() + sideInfoSize(h0.getVersionID(), h0.isMono());
@@ -543,7 +508,7 @@ bool detectCBRUnordered(const vector<vector<uint8_t>>& chunks, const StreamProfi
         }
         // One vote per chunk: the bitrate of the header at its chosen alignment. Complete frames
         // don't work here: a 320 kbps frame doesn't fit in a 1 KB chunk.
-        const ChunkMeta m = computeChunkMeta(i, c, prof);
+        const ChunkMeta m = computeChunkMeta(c, prof);
         if (!m.valid || m.headOffset + 4 > static_cast<int>(c.size())) continue;
         Header h;
         if (!Header::parse(&c[m.headOffset], h)) continue;
@@ -557,8 +522,8 @@ bool detectCBRUnordered(const vector<vector<uint8_t>>& chunks, const StreamProfi
     // A chunk can pick a false alignment, so allow 1% others. musiclib (107 tracks, 1 and 4 KB):
     // CBR files >= 99.75%, VBR <= 80.4%.
     if (best.first <= 0 || best.second * 100 < total * 99) return false;
-    // An Info frame at another bitrate (e.g. 64 kbps to fit the tag in a 32 kbps stream) made
-    // the ordered detectCBR see two bitrates; keep that verdict, or the filter rejects it.
+    // An Info frame at another bitrate (e.g. 64 kbps to fit the tag in a 32 kbps stream): not
+    // CBR, or the bitrate filter would reject that frame.
     for (int k : infoKbps) if (k != best.first) return false;
     kbpsOut = best.first;
     return true;

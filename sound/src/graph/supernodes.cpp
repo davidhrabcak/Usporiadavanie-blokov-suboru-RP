@@ -2,79 +2,45 @@
 
 using namespace std;
 
-vector<Supernode> buildSupernodes(
-        const vector<vector<int>>& adj,
-        const vector<int>& indeg,
-        const vector<int>& outdeg,
-        const int n,
-        const int start,
-        vector<vector<int>>& superAdj) {
+vector<Supernode> buildSupernodes(const vector<vector<int>>& adj, const int start,
+                                  vector<vector<int>>& superAdj) {
+    const int n = static_cast<int>(adj.size());
+    vector<int> indeg(n, 0), pred(n, -1);   // pred: a predecessor (the only one when indeg == 1)
+    for (int i = 0; i < n; ++i)
+        for (const int j : adj[i]) { ++indeg[j]; pred[j] = i; }
+
+    // i continues its predecessor's chain when it is that chunk's only successor and has no
+    // other predecessor; every other chunk heads a chain.
+    auto isHead = [&](const int i) {
+        return i == start || indeg[i] != 1 || adj[pred[i]].size() != 1;
+    };
 
     vector<int> chunkToSuper(n, -1);
     vector<Supernode> supernodes;
-
-    // Find chain heads: nodes that start a forced chain.
-    // A chain head is a node where we cannot extend a forced chain backwards,
-    // i.e. indeg != 1 or its predecessor has outdeg != 1.
-    // We detect them by: node is `start`, or indeg[node] != 1, or the unique
-    // predecessor has outdeg != 1.
-    vector<bool> isHead(n, false);
-    isHead[start] = true;
-    for (int i = 0; i < n; ++i) {
-        if (indeg[i] == 0) { isHead[i] = true; continue; }
-        if (indeg[i] > 1)  { isHead[i] = true; continue; }
-        // indeg[i] == 1: find predecessor
-        bool predOk = false;
-        for (int p = 0; p < n; ++p) {
-            for (int s : adj[p]) {
-                if (s == i && outdeg[p] == 1) { predOk = true; break; }
-            }
-            if (predOk) break;
-        }
-        if (!predOk) isHead[i] = true;
-    }
-
-    // Grow a chain from each head
-    for (int i = 0; i < n; ++i) {
-        if (!isHead[i]) continue;
+    auto grow = [&](int cur) {
         Supernode sn;
-        int cur = i;
-        while (true) {
-            if (chunkToSuper[cur] != -1) break; // already part of another supernode
+        while (chunkToSuper[cur] == -1) {
             chunkToSuper[cur] = static_cast<int>(supernodes.size());
             sn.chunks.push_back(cur);
-            if (outdeg[cur] == 1) {
-                const int next = adj[cur][0];
-                if (indeg[next] == 1) {
-                    cur = next;
-                    continue;
-                }
-            }
-            break;
+            if (adj[cur].size() != 1 || indeg[adj[cur][0]] != 1 || adj[cur][0] == start) break;
+            cur = adj[cur][0];
         }
-        supernodes.push_back(sn);
-    }
-
-    // Any chunk not yet assigned (cycle-only nodes, shouldn't happen in practice)
-    for (int i = 0; i < n; ++i) {
+        supernodes.push_back(std::move(sn));
+    };
+    for (int i = 0; i < n; ++i) if (isHead(i)) grow(i);
+    // chunks on a forced cycle have no head (not reachable in a valid order): one supernode each
+    for (int i = 0; i < n; ++i)
         if (chunkToSuper[i] == -1) {
             chunkToSuper[i] = static_cast<int>(supernodes.size());
             supernodes.push_back({{i}});
         }
-    }
 
-    const int sn = static_cast<int>(supernodes.size());
-    superAdj.assign(sn, {});
-
-    for (int si = 0; si < sn; ++si) {
-        const int tail = supernodes[si].chunks.back();
-        for (const int nb : adj[tail]) {
-            int sj = chunkToSuper[nb];
-            if (sj != si)
-                superAdj[si].push_back(sj);
+    superAdj.assign(supernodes.size(), {});
+    for (size_t si = 0; si < supernodes.size(); ++si)
+        for (const int nb : adj[supernodes[si].chunks.back()]) {
+            const int sj = chunkToSuper[nb];
+            if (sj != static_cast<int>(si)) superAdj[si].push_back(sj);
         }
-    }
-
     return supernodes;
 }
 

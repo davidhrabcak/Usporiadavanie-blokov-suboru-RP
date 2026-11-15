@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <vector>
 #include "config.hpp"
-#include "graph/chunk_graph.hpp"
 #include "mp3/chunk_meta.hpp"
 
 // What the reconstruction works on: the file cut into chunks and shuffled, the first chunk found
@@ -16,25 +15,12 @@ struct Problem {
     std::vector<int> origIndexOf;               // source position of each chunk (diagnostic)
     StreamProfile profile;                      // from chunk 0, + the CBR bitrate filter
     long chunkSize = 0;
-
-    // Frames longer than the chunk (HOW_IT_WORKS 4.18): the chunks with no frame header
-    // ("pool") are taken out before the shuffle and put into the slots after their demanders
-    // at output.
-    std::vector<std::vector<uint8_t>> pool;     // shuffled like the rest
-    std::vector<int> poolFull;                  // their index in the full source stream
-    std::vector<int> keptFull;                  // full-stream index of each chunk in `chunks` (source order); empty = no pool
-    int splitTails = 0;                         // split-tail chunks promoted on the true order
-
-    TrueOrderCheck truth;                       // gates AC-3, the reservoir arc filter and locking
 };
 
-// Reads cfg.input and builds the Problem: chunks, CBR detection, the headerless pool and the
-// true-order diagnostic (before the shuffle), the shuffle, the start chunk, the stream profile
-// and the per-chunk metadata. On a fatal error prints it, sets the run report's "error" and
-// returns false.
+// Reads cfg.input and builds the Problem: chunks, CBR detection, the shuffle, the start chunk,
+// the stream profile and the per-chunk metadata; then reports how the structural rule and the
+// reservoir model fare on the source order. On a fatal error prints it, sets the run report's
+// "error" and returns false.
 bool loadProblem(const Config& cfg, Problem& p);
-
-// The per-chunk metadata table (head offset, tail overflow, complete frames).
-void printChunkTable(const std::vector<ChunkMeta>& metas);
 
 #endif

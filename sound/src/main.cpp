@@ -3,8 +3,8 @@
 //   rp [input.mp3]      writes output.mp3; options are RP_* environment variables (config.hpp)
 //
 // The pipeline, one stage per call below:
-//   1. loadProblem     cut the file into chunks, check the true order (diagnostic), shuffle,
-//                      find the first chunk, derive the stream profile and per-chunk metadata
+//   1. loadProblem     cut the file into chunks, shuffle, find the first chunk, derive the
+//                      stream profile and per-chunk metadata
 //   2. JunctionScorer  how well one chunk continues another (side info, spectrum, PCM flux)
 //   3. buildGraph      which chunk can follow which (structure, bit reservoir, arc consistency)
 //   4. reconstruct     lock confident edges, collapse forced chains, search (DFS, global
@@ -33,10 +33,7 @@ int main(int argc, char* argv[]) {
 
     // References p.chunks and p.metas, which stay in place from here on.
     JunctionScorer scorer(p.chunks, p.metas, p.profile, p.chunkSize, cfg);
-    printChunkTable(p.metas);
-
-    const ChunkGraph graph = buildGraph(p.metas, p.chunks, p.pool, p.profile, p.chunkSize, p.splitTails,
-                                        p.truth, cfg, p.origIndexOf);
+    const ChunkGraph graph = buildGraph(p.metas, p.chunks, p.profile, cfg, p.origIndexOf);
     scorer.calibrateSpectral();
     scorer.calibratePcm(graph.adj);
 

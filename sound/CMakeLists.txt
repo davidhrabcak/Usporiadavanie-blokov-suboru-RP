@@ -6,8 +6,8 @@ find_package(Threads REQUIRED)
 
 # Everything but main(): rp and the dev tools link the same code.
 #   src/mp3      MPEG frame parsing, per-chunk metadata, Layer III side info / main data, bit reservoir
-#   src/graph    which chunk can follow which (adjacency, AC-3, gap slots for headerless chunks),
-#                staged into the search graph (chunk_graph), forced-chain collapse (supernodes)
+#   src/graph    which chunk can follow which (adjacency, AC-3), staged into the search graph
+#                (chunk_graph), forced-chain collapse (supernodes)
 #   src/scoring  junction costs for the ranking (junction_scorer: side info, spectrum, full-PCM
 #                flux via the vendored minimp3) and confident-edge locking
 #   src/search   ordering the supernodes: DFS with iterative broadening, global min-cost
@@ -32,8 +32,6 @@ add_library(rpcore STATIC
         src/mp3/reservoir.hpp
         src/graph/adjacency.cpp
         src/graph/adjacency.hpp
-        src/graph/slot_fill.cpp
-        src/graph/slot_fill.hpp
         src/graph/supernodes.cpp
         src/graph/supernodes.hpp
         src/graph/chunk_graph.cpp
@@ -45,6 +43,8 @@ add_library(rpcore STATIC
         src/scoring/edge_lock.hpp
         src/scoring/junction_scorer.cpp
         src/scoring/junction_scorer.hpp
+        src/search/chain_merge.cpp
+        src/search/chain_merge.hpp
         src/search/dfs.cpp
         src/search/dfs.hpp
         src/search/global_match.cpp
@@ -70,8 +70,6 @@ function(rp_tool name)
     target_link_libraries(${name} PRIVATE rpcore)
 endfunction()
 
-rp_tool(evaluate_order)       # compare an output .mp3 with the original, metric by metric
 rp_tool(sideinfo_probe)       # side-info continuity signals on the true order
 rp_tool(pcm_probe)            # full-PCM junction flux on the true order
-rp_tool(left_context_check)   # PcmJunction::LeftContext == scoreJunction, bit for bit (+ timing)
 rp_tool(graph_check)          # buildAdjacency agrees with canFollow on every pair (test/ci_sanity.sh)

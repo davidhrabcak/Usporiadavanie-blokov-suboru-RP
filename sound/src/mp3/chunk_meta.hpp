@@ -46,8 +46,7 @@ struct SideInfoResult {
 
 // Full per-granule/-channel Layer III side info (ISO 11172-3 2.4.1.7 / 13818-3). Everything a
 // decoder needs *except* the main-data payload itself. Populated by parseFrameSideInfoAt;
-// consumed by the side-info-only continuity probe (tools/sideinfo_probe.cpp) and, later,
-// Milestone 2's partial main-data decoder.
+// consumed by the junction ranking, the partial main-data decoder and tools/sideinfo_probe.cpp.
 struct GranuleSideInfo {
     uint16_t part23Length     = 0; // 12 bits - main-data bits for this granule/channel
     uint16_t bigValues        = 0; // 9 bits  - half the count of the big_values spectral region
@@ -92,7 +91,6 @@ struct FrameSlice {
 };
 
 struct ChunkMeta {
-    int                   chunkIndex;
     int                   headOffset;      // bytes before first complete frame header
     int                   tailOverflow;    // bytes of the partial tail frame already in this chunk
     int                   tailPartialLen;  // total length of tail partial frame (0 = no tail, -1 = unknown)
@@ -102,9 +100,6 @@ struct ChunkMeta {
     // (no frame header inside). It is then valid with headOffset = frameStarts[0] = its size
     // (the "next frame" would start right after its last byte) and has no successors.
     bool                  finalFragment = false;
-    // Demander (HOW_IT_WORKS 4.18): this chunk's tail frame contains the whole next
-    // chunk, so a headerless chunk always follows it. Set by main from findGapSlots.
-    bool                  gapAfter = false;
     StreamProfile         profile;
 
     // All byte offsets within this chunk where a valid, profile-matching frame header starts.
@@ -145,21 +140,13 @@ int sideInfoSize(int versionID, bool isMono);
 
 // `shortChunk`: this chunk is shorter than the others, i.e. the file's last chunk. Only then can
 // a chunk without any frame header be accepted (as a finalFragment).
-ChunkMeta computeChunkMeta(int chunkIndex,
-                           const std::vector<uint8_t>& chunk,
+ChunkMeta computeChunkMeta(const std::vector<uint8_t>& chunk,
                            const StreamProfile& expected,
                            bool shortChunk = false);
 
 // Derive a StreamProfile from the very first valid frame in a chunk.
 // Returns false if no valid header found.
 bool deriveProfile(const std::vector<uint8_t>& chunk, StreamProfile& out);
-
-// Walks consecutive frames from the start of `stream` (which must begin on a frame boundary)
-// and returns true iff at least `minFrames` profile-matching frames were parsed and every one
-// carried the same bitrate - i.e. the stream is constant-bitrate. `kbpsOut` gets that bitrate.
-// Conservative: any parse hiccup or a second bitrate value -> returns false (treat as VBR).
-bool detectCBR(const std::vector<uint8_t>& stream, const StreamProfile& prof,
-               int& kbpsOut, int minFrames = 8);
 
 // deriveProfile on every chunk, majority vote. Uses no chunk's position, so it works when the
 // first chunk is unknown. Returns false if no chunk holds a valid header.
@@ -172,9 +159,9 @@ struct StartCandidate { int index; bool xing; };
 std::vector<StartCandidate> findStartCandidates(const std::vector<std::vector<uint8_t>>& chunks,
                                                 const StreamProfile& prof);
 
-// detectCBR without the chunk order: true if >= 99% of the chunks' first headers (at their
-// chosen alignment, >= 8 chunks) share one bitrate, no chunk starts with a "Xing" (VBR) tag frame
-// and no chunk starts with an Info/VBRI frame at another bitrate.
+// Constant-bitrate detection without the chunk order: true if >= 99% of the chunks' first headers
+// (at their chosen alignment, >= 8 chunks) share one bitrate, no chunk starts with a "Xing" (VBR)
+// tag frame and no chunk starts with an Info/VBRI frame at another bitrate.
 bool detectCBRUnordered(const std::vector<std::vector<uint8_t>>& chunks, const StreamProfile& prof,
                         int& kbpsOut);
 

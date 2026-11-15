@@ -9,9 +9,11 @@
 
 using namespace std;
 
+static constexpr int MAX_PASSES = 50;   // most repair moves applied
+
 OrderRepair::OrderRepair(const vector<vector<uint8_t>>& chunks, const vector<ChunkMeta>& metas,
                          JunctionScorer& scorer, const vector<vector<int>>& adjFull,
-                         const StreamProfile& profile, const Config::Repair& opt, const vector<int>* origIndexOf)
+                         const StreamProfile& profile, const Config::Repair& opt, const vector<int>& origIndexOf)
     : chunks_(chunks), metas_(metas), scorer_(scorer), adjFull_(adjFull), isLayerIII_(profile.isLayerIII()),
       sideInfo_(sideInfoSize(profile.versionID, profile.isMono())),
       maxReservoir_(maxReservoirBytes(profile.versionID)), opt_(opt), origIndexOf_(origIndexOf),
@@ -26,8 +28,7 @@ bool OrderRepair::isEdge(const int a, const int b) const {
 
 int OrderRepair::trueJunctions(const vector<int>& seq) const {
     int tj = 0;
-    if (origIndexOf_)
-        for (size_t k = 1; k < seq.size(); ++k) if ((*origIndexOf_)[seq[k]] == (*origIndexOf_)[seq[k - 1]] + 1) ++tj;
+    for (size_t k = 1; k < seq.size(); ++k) if (origIndexOf_[seq[k]] == origIndexOf_[seq[k - 1]] + 1) ++tj;
     return tj;
 }
 
@@ -118,14 +119,12 @@ vector<int> OrderRepair::build(const vector<Seg>& segs) const {
 }
 
 vector<char> OrderRepair::suspectJunctions() const {
-    const int suspects = opt_.suspects ? *opt_.suspects : std::max(16, n_ / 20);
-    vector<char> bad(n_ + 1, suspects <= 0 ? 1 : 0);   // bad[k]: junction seq[k-1] -> seq[k]
-    if (suspects > 0) {
-        vector<pair<double, int>> js;
-        for (int k = 1; k < n_; ++k) js.push_back({jv_[k] < 0 ? 1e9 : jv_[k], k});
-        std::sort(js.begin(), js.end(), [](const pair<double, int>& x, const pair<double, int>& y) { return x.first > y.first; });
-        for (int q = 0; q < (int)js.size() && q < suspects; ++q) bad[js[q].second] = 1;
-    }
+    const int suspects = suspectCount();
+    vector<char> bad(n_ + 1, 0);   // bad[k]: junction seq[k-1] -> seq[k]
+    vector<pair<double, int>> js;
+    for (int k = 1; k < n_; ++k) js.push_back({jv_[k] < 0 ? 1e9 : jv_[k], k});
+    std::sort(js.begin(), js.end(), [](const pair<double, int>& x, const pair<double, int>& y) { return x.first > y.first; });
+    for (int q = 0; q < (int)js.size() && q < suspects; ++q) bad[js[q].second] = 1;
     if (cur_.breaks > 0)
         for (int k = 0; k < n_; ++k)
             if (PB_[k + 1] > PB_[k]) for (int d = 0; d <= 8; ++d) if (k - d >= 1) bad[k - d] = 1;
@@ -201,9 +200,8 @@ int OrderRepair::run(vector<int>& seq, double* gap) {
     n_ = static_cast<int>(seq.size());
     const double minFluxGain = opt_.minGain;
     // Phase 0 of each pass only evaluates moves that cut a suspect junction; phase 1 scans
-    // every move if phase 0 found nothing (opt.suspects = K, 0 = no filter). opt.budget (s)
-    // bounds the whole repair - when spent, the best move found so far is applied.
-    const int suspects = opt_.suspects ? *opt_.suspects : std::max(16, n_ / 20);
+    // every move if phase 0 found nothing. opt.budget (s) bounds the whole repair - when spent,
+    // the best move found so far is applied.
     deadline_ = chrono::steady_clock::now() +
         chrono::duration_cast<chrono::steady_clock::duration>(chrono::duration<double>(opt_.budget));
     outOfTime_ = false;
@@ -222,7 +220,7 @@ int OrderRepair::run(vector<int>& seq, double* gap) {
     trackBreaks_ = isLayerIII_ && PB_[n_] > 0;
     if (trackBreaks_) cur_.breaks = PB_[n_];
     int applied = 0;
-    for (int pass = 0; pass < opt_.passes && !outOfTime_; ++pass) {
+    for (int pass = 0; pass < MAX_PASSES && !outOfTime_; ++pass) {
         if (pass > 0) prepare();
         vector<int> pos(chunks_.size(), -1);
         for (int k = 0; k < n_; ++k) pos[seq[k]] = k;
@@ -232,7 +230,7 @@ int OrderRepair::run(vector<int>& seq, double* gap) {
 
         bool moved = false;
         double belowGain = -1;   // best rejected flux-only gain (< minFluxGain), -1 = none
-        for (int phase = suspects > 0 ? 0 : 1; phase < 2 && !moved && !outOfTime_; ++phase) {
+        for (int phase = 0; phase < 2 && !moved && !outOfTime_; ++phase) {
             if (phase == 1) std::fill(bad.begin(), bad.end(), 1);
             moves.clear();
             candidates = 0;

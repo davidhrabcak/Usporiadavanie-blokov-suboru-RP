@@ -1,8 +1,14 @@
 # MP3 chunk reconstruction - working notes
 
-Research prototype for **file carving**: an MP3 file is cut into equal chunks (`RP_CHUNK_SIZE`,
-default 1 KB) and shuffled; `rp` restores the order from the bytes alone - no filename, no
-metadata, no external state.
+Research prototype for **file carving** (Bachelor's thesis): an MP3 file is cut into equal
+chunks (`RP_CHUNK_SIZE`, default 4 KB) and shuffled; `rp` restores the order from the bytes
+alone - no filename, no metadata, no external state. Model situation: the file type is known and
+every block is present. Real fragmentation is milder (rarely more than 4 fragments), but the
+goal is the best algorithm for the full shuffle, not one that is merely good enough for that.
+
+**Scope rule (2026-11-15):** no code for cases that can't occur with real clusters. Frames
+larger than the chunk (headerless chunks, < 1.44 KB) were supported and removed; a chunk must
+hold a frame header. 1 KB remains usable as a stress test for streams with short frames.
 
 - `README.md` - quick start and layout.
 - `docs/HOW_IT_WORKS.md` - the algorithm stage by stage, results, references.
@@ -26,25 +32,25 @@ Includes are relative to `src/` (`#include "mp3/chunk_meta.hpp"`).
 | `src/main.cpp` | The pipeline in five calls: `loadProblem` → `JunctionScorer` → `buildGraph` → `reconstruct` → `writeOutput`. |
 | `src/config.*` | `Config::fromEnv`: every `RP_*` option, parsed once. `RP_REPORT` is read by `run_report.hpp`. |
 | `src/run_report.hpp` | `RP_REPORT`: one JSON object per run (for `test/corpus.py`). |
-| `src/pipeline/input.*` | `loadProblem`: chunks, CBR detection, headerless pool and true-order diagnostics (before the shuffle), shuffle, start chunk, profile, metadata. |
-| `src/pipeline/output.*` | `writeOutput`: slot assignment, `output.mp3`, provenance line, score vs source; `reportFailure`. |
+| `src/pipeline/input.*` | `loadProblem`: chunks, CBR detection, shuffle, start chunk, profile, metadata, source-order diagnostics. |
+| `src/pipeline/output.*` | `writeOutput`: `output.mp3`, provenance line, score vs source; `reportFailure`. |
 | `src/mp3/Header.*` | Decodes a 32-bit frame header (length, bitrate, rate, version, layer, mode, CRC). |
-| `src/mp3/frame_scanner.*` | Scans a whole file for frames; `chunksFromFirstFrame` cuts it into chunks. |
+| `src/mp3/frame_scanner.*` | Scans a whole file for frames; `chunksFromFirstFrame` cuts the audio (first frame to the trailing tags) into chunks. |
 | `src/mp3/chunk_meta.*` | `computeChunkMeta` (per-chunk alignment and tail), `deriveProfile`, side-info parsing incl. split frames (`decodeSplitFrameSideInfo`). |
-| `src/mp3/reservoir.*` | Bit-reservoir model: `advanceReservoirFrame` / `advanceReservoirChunk`, `reservoirValid` / `reservoirBreaks`. |
+| `src/mp3/reservoir.*` | Bit-reservoir model: `advanceReservoirFrame` / `advanceReservoirChunk`, `reservoirValid` / `reservoirBreaks`; `junctionSlack` (exact main-data continuity, used by the PoC only so far). |
 | `src/mp3/main_data_decoder.*`, `huffman_tables.*` | Partial Layer III decode (MPEG1, long blocks): Huffman → 12-band per-granule profile for the spectral ranking term. Bit-exact on ~46k granules. Tables from minimp3. |
-| `src/graph/adjacency.*` | `canFollow`, `buildAdjacency` (indexed), `propagateArcConsistency` (AC-3), gap edges and split tails for frames larger than the chunk. |
-| `src/graph/chunk_graph.*` | The search graph in stages: structural graph, `filterReservoirArcs`, AC-3, with their gates. `adjFull` (before AC-3) is the repair's move space. |
+| `src/graph/adjacency.*` | `canFollow`, `buildAdjacency` (indexed), `propagateArcConsistency` (AC-3). |
+| `src/graph/chunk_graph.*` | The search graph in stages: structural graph, `filterReservoirArcs`, AC-3. `adjFull` (before AC-3) is the repair's move space. |
 | `src/graph/supernodes.*` | Forced-chain collapse; `chunksOf`. |
-| `src/graph/slot_fill.*` | Assigns headerless chunks to the slots after their demanders (flux + header/CRC constraints, Hungarian). |
 | `src/scoring/junction_scorer.*` | The ranking terms (`gainCost` = \|Δglobal_gain\| + \|Δbig_values\|/32, `spectralCost`, `pcmCost`), memos, PCM window size, per-file calibration. |
-| `src/scoring/pcm_junction.*`, `pcm_decoder_impl.cpp` | Full decode of a chunk window with minimp3; spectral-flux spike at the junction; `LeftContext`. |
+| `src/scoring/pcm_junction.*`, `pcm_decoder_impl.cpp` | `LeftContext`: full decode of a chunk window with minimp3; spectral-flux spike at the junction. |
 | `src/scoring/edge_lock.*` | Confident-edge locking on median-context flux. |
-| `src/search/dfs.*` | Ranked, reservoir-pruned DFS over supernodes; beam, node cap, deadline, iterative broadening. |
+| `src/search/dfs.*` | Ranked, reservoir-pruned first-valid DFS over supernodes; beam, deadline, iterative broadening. |
 | `src/search/global_match.*` | Min-cost successor assignment (SSP) + cycle splicing. |
 | `src/search/repair.*` | Block-move / block-swap repair on (breaks, unmeasured, summed flux). |
 | `src/search/reconstruct.*` | The lock-tau schedule around locking, collapse, DFS, matching and repair. |
-| `tools/` | `graph_check` (CI), `pcm_probe`, `sideinfo_probe`, `left_context_check`, `evaluate_order`. |
+| `src/search/chain_merge.*` | `RP_CHAIN=1` proof of concept for CBR (segment growing on flux x continuity). Not a default; see Findings, CBR. |
+| `tools/` | `graph_check` (CI), `pcm_probe` (flux AUC / rank, lock precision), `sideinfo_probe` (side-info and partial-decode signals). |
 
 ### Data structures
 
@@ -52,20 +58,26 @@ Includes are relative to `src/` (`#include "mp3/chunk_meta.hpp"`).
   `hasCrc` (protection bit; a mismatch is a false sync), `isCBR` / `bitrateKbps` (CBR filter).
 - `ChunkMeta`: `headOffset`, `frameStarts` (sorted valid frame offsets), `frames` (complete frames),
   `tailOverflow` (bytes of the cut tail frame), `tailPartialLen` (its length, -1 if the header
-  is cut), `tailBytes`, `chunkHead[4]`, `finalFragment` (the file's short last chunk), `gapAfter`
-  (demander: a headerless chunk follows).
+  is cut), `tailBytes`, `chunkHead[4]`, `finalFragment` (the file's short last chunk).
 - `tailRemaining(m)`: `tailPartialLen - tailOverflow` if known, 0 if no tail, -1 if the header
   is split (Case 2).
 
 ### Pipeline details not in HOW_IT_WORKS
 
+- **Tags.** The leading ID3v2 tag and the trailing ID3v1 / Lyrics3v2 / APEv2 tags are found by
+  signature and left out of the chunks (`audioEnd`). A trailing tag used to break the last
+  junction (19 musiclib tracks at 4 KB, all SEARCH_FAIL).
 - **Profile.** `voteProfile` (majority of `deriveProfile` over all chunks) is used for start
-  finding, CBR detection and the headerless pool, so none of them depend on the true chunk 0.
+  finding and CBR detection, so neither depends on the true chunk 0.
   Then `deriveProfile` reads the first non-Xing frame of the found start; if the chunk holds only
   a Xing/Info/VBRI frame (a 320 kbps Info frame is 1045 B), that frame's header is used.
 - **CBR detection** (`detectCBRUnordered`): >= 99% of the chunks' first headers at one bitrate
   (CBR files >= 99.75%, VBR <= 80.4% on musiclib), no Xing frame at a chunk start, no Info/VBRI
   frame at another bitrate. The CBR filter then rejects other-bitrate syncs (0.3% of edges).
+- **Source-order diagnostics** (`checkSourceOrder`): `canFollow` and the reservoir model on the
+  true order, printed and reported (`pre_breaks`, `resv_breaks`). Diagnostic only: until
+  2026-11-15 they gated the reservoir filter, AC-3 and locking, which a real carver can't do.
+  In the 2026-11-09 musiclib run at 4 KB all 20 gated-off files failed anyway.
 - **Alignment** (`computeChunkMeta`): candidate offsets are ranked by tail quality (ends on a
   frame boundary > readable tail > 1-3-byte split header > orphaned), then frame count, then
   side-info plausibility (`sideInfoPlausible`, ties only). A Xing frame does not count as a frame.
@@ -81,7 +93,7 @@ Includes are relative to `src/` (`#include "mp3/chunk_meta.hpp"`).
 
 ```
 cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
-./build/rp [input.mp3]          # default input: Config::input
+./build/rp [input.mp3]          # default input: test/ci_sanity.mp3
 ```
 
 Output: `output.mp3` in the current directory, plus the provenance line and (because the
@@ -94,10 +106,11 @@ Only the synthetic `test/ci_sanity.mp3` is committed. `test/make_bitrate_variant
 `gen*/` (re-encoded clips at 32-320 kbps / VBR).
 
 **Tests** (from `sound/`):
-- `test/ci_sanity.sh build` - CI: `graph_check` (indexed graph == `canFollow` on every pair, 1
-  and 4 KB), then `rp` on `ci_sanity.mp3`, which must be EXACT.
-- `test/corpus.py fixtures` (files in `test/`, 1 KB, `RP_TIME_BUDGET=20`) and
-  `test/corpus.py musiclib` (whole files, 4 and 1 KB); suites in `test/corpus_suites.json`.
+- `test/ci_sanity.sh [build]` - CI: `graph_check` (indexed graph == `canFollow` on every pair),
+  then `rp` on `ci_sanity.mp3`, which must be EXACT; both at 1 and 4 KB.
+- `test/corpus.py fixtures` (files in `test/`, `RP_TIME_BUDGET=20`) and
+  `test/corpus.py musiclib` (whole files), both at 4 KB; suites in `test/corpus_suites.json`.
+  `RP_CHUNK_SIZE=1024 test/corpus.py ...` runs another chunk size.
   Resumable; results in `musiclib/.derived[/corpus-test]/results/SUITE-BINARY.csv` + `.md`.
   `--jobs N` (default 8), `--match S...`; `RP_*` variables are passed through (own results file).
   No baseline: compare two results files by hand.
@@ -123,38 +136,33 @@ All optional; defaults are deterministic.
 |---|---|---|
 | `RP_SEED` | 1 | shuffle seed; `random` = clock. |
 | `RP_START` | found | `pinned`: chunk 0 stays first and is not searched for. |
-| `RP_CHUNK_SIZE` | 1024 | chunk size in bytes (rp, pcm_probe). PCM windows are byte-capped, so cost doesn't grow with it. |
-| `RP_CBR` | on | `0` disables the CBR bitrate filter. |
-| `RP_GAP` | on | frames larger than the chunk: split tails as nodes, headerless chunks pooled and slotted at output. |
-| `RP_SLOT_FILL` | on | slot assignment by flux + constraints; `0` = pool order. |
-| `RP_SLOT_ORACLE` | off | diagnostic: skip the search, use the true order, only fill slots. |
-| `RP_RESV_FILTER` | auto | drop arcs that fail the reservoir check from a full reservoir. Auto = on when the reservoir model passes the true order. |
-| `RP_AC3` | auto | arc consistency. Auto = on when the pre-shuffle check has 0 breaks. |
-| `RP_RANK` | on | `global_gain` term in the DFS ranking. |
-| `RP_SPEC`, `RP_SPEC_SCALE` | on, auto | partial-decode spectral term and its weight (safe window ~8-15). |
-| `RP_PCM`, `RP_PCM_W` | on, 2 | PCM flux term and its weight relative to the others (insensitive in 0.5-100). |
-| `RP_PCM_LEFT` | auto | left side of a PCM window in chunks: max(3, ceil(4 × p90 frame / chunk)). Lock/matching windows use one less. |
-| `RP_LOCK` | auto | edge locking; auto = Layer III, 0 pre-shuffle breaks, under the decode cap. `1` forces. |
-| `RP_LOCK_TAU` | 1.5,1.25,1.1 | lock-margin schedule; each value is one attempt from the unlocked graph. |
-| `RP_LOCK_ROUNDS` | 8 | max lock/AC-3 rounds. |
-| `RP_LOCK_MAX_DECODES` | 640000 | skip locking above this many decodes per round (a count, so results don't depend on cores). |
+| `RP_CHUNK_SIZE` | 4096 | chunk size in bytes, >= 1024 (rp and the tools). PCM windows are byte-capped, so cost doesn't grow with it. |
 | `RP_THREADS` | all cores | scoring threads (results identical to 1 thread). |
-| `RP_MATCH` | 1 | global matching: `1` after a failed DFS, `2` before it, `0` off. |
-| `RP_MATCH_MAX_DECODES` | 100000 | matching decode cap; contexts are halved 8→1 until it fits, else skipped. |
-| `RP_MATCH_ITERS` | 0 | iterated matching (forbid arcs at breaks, re-solve). Changed no outcome. |
+| `RP_CBR` | on | `0` disables the CBR bitrate filter. |
+| `RP_RESV_FILTER` | on | drop arcs that fail the reservoir check from a full reservoir. |
+| `RP_AC3` | on | arc consistency (undone by itself on a contradiction). |
+| `RP_RANK` | on | junction-cost ranking in the DFS. |
+| `RP_SPEC` | on | partial-decode spectral term (weight calibrated per file). |
+| `RP_PCM` | on | PCM flux term; off also disables matching and repair. |
+| `RP_PCM_LEFT` | auto | left side of a PCM window in chunks: max(3, ceil(4 x p90 frame / chunk)). Lock/matching windows use one less. |
+| `RP_LOCK` | on | edge locking (Layer III). |
+| `RP_LOCK_TAU` | 1.5,1.25,1.1 | lock-margin schedule; each value is one attempt from the unlocked graph. |
+| `RP_LOCK_MAX_DECODES` | 640000 | skip locking above this many decodes per round (a count, so results don't depend on cores); `0` = no cap. |
+| `RP_MATCH` | on | global matching after a failed DFS. |
+| `RP_MATCH_MAX_DECODES` | 100000 | matching decode cap; contexts are halved 8->1 until it fits, else skipped. |
 | `RP_REPAIR` | on | block-move/swap repair on summed flux. |
 | `RP_REPAIR_MIN_GAIN` | 1.0 | min summed-log1p-flux gain for a flux-only move on a valid order. |
-| `RP_REPAIR_PASSES` | 50 | max repair moves. |
-| `RP_REPAIR_SUSPECTS` | max(16, n/20) | first look only at moves cutting the K worst junctions; `0` = all. |
 | `RP_REPAIR_BUDGET` | 60 | repair seconds; the best move found so far is still applied. |
-| `RP_BROADEN` | auto (>120 supernodes) | iterative broadening over beam K ∈ {1,2,3,4,6,9,∞}. |
-| `RP_BEAM` | unset | fixed beam width K. |
-| `RP_TIME_BUDGET` | 45 broaden / 30 best-of / none | search wall-clock limit (s). |
-| `RP_MAX_NODES` | 0 | cap on supernode placements. |
-| `RP_BESTOF` | off | keep searching for the min summed junction cost. Measured worse. |
+| `RP_TIME_BUDGET` | 45 broaden / 30-45 per lock attempt | DFS wall-clock limit (s). |
+| `RP_CHAIN` | off | `1`: CBR proof of concept (`chain_merge`), replaces locking. `RP_CHAIN_DIAG=1` prints its statistics. |
 | `RP_SCORE_ORDER` | off | print found vs true summed flux when not exact. |
 | `RP_REPORT` | unset | path for the JSON run report. |
-| `RP_PROGRESS` | ~10M | progress line every N placements. |
+
+Removed 2026-11-15 (measured worse, no effect, or outside the scope rule): `RP_GAP`,
+`RP_SLOT_FILL`, `RP_SLOT_ORACLE` (headerless chunks), `RP_BESTOF`, `RP_MATCH_ITERS`, `RP_MATCH=2`,
+`RP_BEAM`, `RP_BROADEN`, `RP_MAX_NODES`, `RP_PROGRESS`, `RP_SPEC_SCALE`, `RP_PCM_W` (fixed at 2),
+`RP_LOCK_ROUNDS` (8), `RP_REPAIR_PASSES` (50), `RP_REPAIR_SUSPECTS` (max(16, n/20)), and the
+"force" value `1` of the former auto switches.
 
 ---
 
@@ -180,23 +188,32 @@ is in HOW_IT_WORKS ch. 6.
 
 ## Open problems
 
+- **CBR (2026-11-15).** At 4 KB no CBR track of musiclib is exact (0/117; all 192 exact are
+  VBR). ~67 structural successors per chunk on a 2500-chunk 320 kbps track; flux ranks the true
+  one first for 52% only (perfect context too), and the decode caps switch locking and matching
+  off. Flux-only pairing strategies fail (uncapped matching: 51% true junctions; margin joining:
+  < 2% joined). Promising signal: exact main-data continuity (`junctionSlack`): wrong successors
+  pass 0.2-3%, most true ones do (1869/1874 on a 256 kbps track, but 256 of 2499 true
+  junctions on pURE and 83 of 1125 on Rock On Elm leave a hole; the rest are untestable). As a hard filter it fails (0-10% true
+  arcs have a hole). Next step: use it as a cost in the matching and the DFS ranking.
+  `RP_CHAIN=1` PoC (flux / 8 on tight edges): neighbor_acc 0.745 -> 0.781, 0.945 -> 0.951,
+  SEARCH_FAIL -> 0.912 complete, one track still fails; no exact result.
+- **Not re-measured after the 2026-11-15 cleanup:** the musiclib table below (binary
+  `4c3f912dd056`). Fixtures at 4 KB: all 38 orders identical before and after (29 EXACT, 4
+  STRUCTURAL, 5 WRONG); at 1 KB the same class counts (20 EXACT), orders differ only on failing
+  files with frames > 1 KB. The 19 musiclib tracks with a trailing tag (4 KB, 2026-11-15): 0
+  source-order breaks on all, 19 SEARCH_FAIL -> 6 EXACT, 7 WRONG, 6 SEARCH_FAIL.
+
 - **Wrong outputs.** The pipeline can return a complete, reservoir-valid, wrong order, and no
   label tells it apart (provenance and stability gap don't separate right from wrong). Two kinds:
   *search failures* (the true order is cheaper but more than one repair move away, or below the
   min-gain threshold) and *objective failures* (the wrong order has lower summed flux - Queen
   VBR 2/4 KB, bohemoan 2/4 KB, `CBR.mp3`). The second kind needs a better objective; edge probabilities with an exact
   most-probable-path solver (plan `cb53497`) were tried and abandoned.
-- **1 KB chunks.** 326/367 SEARCH_FAIL. At 256-320 kbps a chunk holds less than one frame, so
-  flux barely ranks successors (one right chunk). 1 KB is a stress test only: real file systems
-  allocate >= 4 KB clusters, and frames larger than the chunk need < ~1.44 KB. No further
-  algorithm work planned for it.
+- **1 KB chunks.** 326/367 SEARCH_FAIL (2026-11-09, with headerless support). At 256-320 kbps
+  a frame doesn't fit in a chunk; that case is now out of scope (scope rule above).
 - **Ambiguous start** on ~5% of musiclib (no Xing frame, many `main_data_begin == 0`). Possible
   tie-break: the candidate with no good-sounding structural predecessor.
-- **Gates use the true order.** The reservoir filter, AC-3 and locking run only when the rules
-  pass the unshuffled file. A real carver can't check this; a replacement gate isn't built.
-- **Trailing ID3v1 tag** after the last frame breaks the final junction (15 of 101 headerless
-  tracks at 1 KB).
-- **Headerless count mismatch** on some VBR tracks that mix split-tail lengths incl. `t = 3`.
 - **False-sync alignment inside a real frame.** A cross-candidate check ("reject offset X
   inside complete frame Y") is the known fix, not attempted (own aliasing risk). The protection
   bit check removed the known cases (`test7.mp3`).

@@ -3,27 +3,16 @@
 
 #include <vector>
 
-// Greedy forced-chain collapse: a supernode is a maximal forced chain, every interior node has
-// out-degree 1 and its successor has in-degree 1. The search orders supernodes, not chunks.
+// Forced-chain collapse: a supernode is a maximal chain in which every chunk but the last has
+// exactly one successor, and that successor has exactly one predecessor. The search orders
+// supernodes, not chunks.
 struct Supernode {
     std::vector<int> chunks;   // chunk indices in order
 };
 
-/**
- * Build supernodes and the adjacency list over them.
- * @param adj Adjacency list of the input graph.
- * @param indeg List of degrees of only incoming edges for each vertex.
- * @param outdeg List of degrees of only outgoing edges for each vertex.
- * @param n Number of vertices in the graph.
- * @param start The index of the first chunk (pinned, never shuffled).
- * @param superAdj Output adjacency list.
- * @return List of created supernodes.
- */
-std::vector<Supernode> buildSupernodes(const std::vector<std::vector<int>>& adj,
-                                       const std::vector<int>& indeg,
-                                       const std::vector<int>& outdeg,
-                                       int n,
-                                       int start,
+// Builds the supernodes of `adj` and the adjacency list over them (`superAdj`). `start` (the
+// first chunk) always begins a supernode.
+std::vector<Supernode> buildSupernodes(const std::vector<std::vector<int>>& adj, int start,
                                        std::vector<std::vector<int>>& superAdj);
 
 // The chunk sequence of a supernode order.

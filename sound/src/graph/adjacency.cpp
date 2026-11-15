@@ -2,17 +2,11 @@
 #include <algorithm>
 #include <unordered_map>
 
-#include "mp3/frame_scanner.hpp"
 
 using namespace std;
 
-/**
- * Checks if chunk 'b' has a known valid frame start in position 'rem'
- * @param  b Chunk where the frame may be found.
- * @param rem Index of possible frame start.
- * @return True if position rem is a known valid frame start in chunk b.
- */
-bool hasFrameAt(const ChunkMeta& b, const int rem) {
+// True if `rem` is one of b's frame starts.
+static bool hasFrameAt(const ChunkMeta& b, const int rem) {
     // frameStarts is sorted ascending
     const auto it = lower_bound(b.frameStarts.begin(), b.frameStarts.end(), rem);
     return it != b.frameStarts.end() && *it == rem;
@@ -40,10 +34,6 @@ static int reconstructTailHeaderOffset(const uint8_t* tailHead, const int tov,
     return frameLen - tov;
 }
 
-/**
- * Checks if chunk 'a' can be followed by chunk 'b'.
- * @return True if b is a valid continuation of chunk a.
- */
 bool canFollow(const ChunkMeta& a, const ChunkMeta& b) {
     if (!a.valid || !b.valid || a.finalFragment) return false;
 
@@ -108,7 +98,7 @@ vector<vector<int>> buildAdjacency(const vector<ChunkMeta>& metas) {
     }
 
     for (int i = 0; i < n; ++i) {
-        // Same rules as canFollow (test/graph_check checks it): an invalid chunk connects to
+        // Same rules as canFollow (tools/graph_check checks it): an invalid chunk connects to
         // nothing - its tailRemaining is 0, which would link it to every chunk with a frame at 0.
         if (!metas[i].valid || metas[i].finalFragment) continue; // (finalFragment: end of stream)
         int rem = tailRemaining(metas[i]);
@@ -148,7 +138,8 @@ vector<vector<int>> buildAdjacency(const vector<ChunkMeta>& metas) {
     return adj;
 }
 
-long propagateArcConsistency(vector<vector<int>>& adj, const int n, const int start) {
+long propagateArcConsistency(vector<vector<int>>& adj, const int start) {
+    const int n = static_cast<int>(adj.size());
     const vector<vector<int>> original = adj; // for rollback on contradiction
 
     vector<vector<int>> pred(n);
@@ -204,147 +195,4 @@ long propagateArcConsistency(vector<vector<int>>& adj, const int n, const int st
 
     if (contradiction) { adj = original; return -1; }
     return removed;
-}
-
-/**
- * Find the degree of incoming edges for every node.
- * @param adj Adjacency list of graph.
- * @param n Number of vertices in graph.
- * @return Degrees of incoming edges for each node.
- */
-vector<int> computeInDegree(const vector<vector<int>>& adj, const int n) {
-    vector<int> indeg(n, 0);
-    for (int i = 0; i < n; ++i)
-        for (const int j : adj[i])
-            indeg[j]++;
-    return indeg;
-}
-
-/**
- * Find the degree of outgoing edges for every node.
- * @param adj Adjacency list of graph.
- * @param n Number of vertices in graph.
- * @return Degrees of outgoing edges for each node.
- */
-vector<int> computeOutDegree(const vector<vector<int>>& adj, const int n) {
-    vector<int> outdeg(n, 0);
-    for (int i = 0; i < n; ++i)
-        outdeg[i] = static_cast<int>(adj[i].size());
-    return outdeg;
-}
-
-bool isHeaderless(const ChunkMeta& m, const size_t chunkBytes, const long chunkSize) {
-    return !m.valid && m.frameStarts.empty() && static_cast<long>(chunkBytes) == chunkSize;
-}
-
-GapSlots findGapSlots(const vector<ChunkMeta>& metas, const vector<vector<int>>& adj,
-                      const vector<vector<uint8_t>>& pool, const long chunkSize) {
-    const int n = static_cast<int>(metas.size());
-    const int C = static_cast<int>(chunkSize);
-    GapSlots g;
-    g.offsets.assign(n, {});
-    if (pool.empty()) return g;
-    for (int i = 0; i < n; ++i) {
-        const ChunkMeta& a = metas[i];
-        if (!a.valid || a.finalFragment) continue;
-        const int rem = tailRemaining(a);
-        if (rem >= C) {
-            if (rem - C < C) { g.offsets[i] = {rem - C}; ++g.case1; }
-            continue;
-        }
-        const int tov = a.tailOverflow;
-        if (rem >= 0 || tov < 1 || tov > 3) continue;
-        vector<int>& R = g.offsets[i];
-        for (const auto& m : pool) {
-            if (m.size() < 4) continue;
-            const int off = reconstructTailHeaderOffset(a.tailBytes.data(), tov, m.data(), a.profile);
-            if (off >= C && off - C < C) R.push_back(off - C);
-        }
-        sort(R.begin(), R.end());
-        R.erase(unique(R.begin(), R.end()), R.end());
-        if (R.empty()) continue;
-        if (!adj[i].empty()) { R.clear(); ++g.ambiguous; continue; }
-        ++g.case2;
-    }
-    return g;
-}
-
-bool canFollowGap(const ChunkMeta& b, const vector<int>& offsets) {
-    if (!b.valid) return false;
-    for (int off : offsets) if (hasFrameAt(b, off)) return true;
-    return false;
-}
-
-void addGapEdges(vector<vector<int>>& adj, const vector<ChunkMeta>& metas, const GapSlots& g) {
-    const int n = static_cast<int>(metas.size());
-    unordered_map<int, vector<int>> byFrameStart;
-    for (int j = 0; j < n; ++j)
-        if (metas[j].valid) for (int pos : metas[j].frameStarts) byFrameStart[pos].push_back(j);
-    for (int i = 0; i < n; ++i) {
-        if (g.offsets[i].empty()) continue;
-        vector<int> succ;
-        for (int off : g.offsets[i]) {
-            auto it = byFrameStart.find(off);
-            if (it == byFrameStart.end()) continue;
-            for (int j : it->second) if (j != i) succ.push_back(j);
-        }
-        sort(succ.begin(), succ.end());
-        succ.erase(unique(succ.begin(), succ.end()), succ.end());
-        adj[i] = std::move(succ);
-    }
-}
-
-SplitTails promoteSplitTails(vector<ChunkMeta>& metas, const vector<vector<uint8_t>>& chunks,
-                             const long chunkSize, const StreamProfile& prof, const uint8_t proto[4]) {
-    const int n = static_cast<int>(metas.size());
-    const int C = static_cast<int>(chunkSize);
-    SplitTails st;
-    for (int i = 0; i < n; ++i) {
-        const ChunkMeta& a = metas[i];
-        if (!a.valid || a.finalFragment) continue;
-        const int rem = tailRemaining(a);
-        if (rem >= C - 3 && rem <= C - 1) ++st.expected[C - rem];
-    }
-    for (int i = 0; i < n; ++i) {
-        ChunkMeta& m = metas[i];
-        const vector<uint8_t>& ch = chunks[i];
-        if (!isHeaderless(m, ch.size(), chunkSize)) continue;
-        int t = 0;
-        for (int tt = 3; tt >= 1 && !t; --tt) {
-            if (!st.expected[tt]) continue;
-            uint8_t hdr[4];
-            for (int k = 0; k < 4; ++k) hdr[k] = k < tt ? ch[C - tt + k] : proto[k];
-
-            Header h;
-            if (Header::parse(hdr, h) && prof.matches(h) && h.getFrameLength() > 0) t = tt;
-        }
-        if (!t) continue;
-        bool headCompletes = false;
-        for (int tt = 1; tt <= 2 && !headCompletes; ++tt) {
-            if (!st.expected[tt]) continue;
-            uint8_t hdr[4];
-            for (int k = 0; k < 4; ++k) hdr[k] = k < tt ? proto[k] : ch[k - tt];
-
-            Header h;
-            headCompletes = Header::parse(hdr, h) && prof.matches(h) && h.getFrameLength() > 0;
-        }
-        if (headCompletes) continue;
-        m.valid          = true;
-        m.finalFragment  = false;
-        m.headOffset     = C - t;
-        m.frameStarts    = {C - t};
-        m.frames.clear();
-        m.tailOverflow   = t;
-        m.tailPartialLen = -1;
-        m.tailBytes.assign(ch.end() - t, ch.end());
-        m.profile        = prof;
-        ++st.promoted[t];
-    }
-    return st;
-}
-
-int splitHeaderOffset(const ChunkMeta& a, const vector<uint8_t>& next) {
-    const int tov = a.tailOverflow;
-    if (a.tailPartialLen != -1 || tov < 1 || tov > 3 || next.size() < 4) return -1;
-    return reconstructTailHeaderOffset(a.tailBytes.data(), tov, next.data(), a.profile);
 }

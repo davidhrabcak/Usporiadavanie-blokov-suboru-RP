@@ -9,11 +9,14 @@
 using namespace std;
 
 static constexpr int BV_DIV = 32;
+// Spread of the PCM term relative to gain + spectral. The outcome was insensitive to it over
+// 0.5-100.
+static constexpr double PCM_WEIGHT = 2.0;
 
 JunctionScorer::JunctionScorer(const vector<vector<uint8_t>>& chunks, const vector<ChunkMeta>& metas,
                                const StreamProfile& profile, const long chunkSize, const Config& cfg)
     : chunks_(chunks), metas_(metas), isLayerIII_(profile.isLayerIII()), rank_(cfg.rank),
-      specScaleOverride_(cfg.specScale), pcmWeight_(cfg.pcmWeight), boundaryGain_(chunks.size()) {
+      boundaryGain_(chunks.size()) {
     // PCM window left side: grows past 3 chunks when frames are large vs the chunk size (320 kbps
     // at 1 KB measured ~0% of junctions otherwise). Sized on the 90th-percentile frame length so
     // a few large frames in a VBR stream don't widen every window. Shuffle-invariant.
@@ -37,7 +40,6 @@ JunctionScorer::JunctionScorer(const vector<vector<uint8_t>>& chunks, const vect
 
     sampleRate_ = profile.sampleRate;
     spec_ = cfg.spec;
-    if (cfg.specScale) specScale_ = *cfg.specScale;
     pcm_ = cfg.pcm;
     if (isLayerIII_) {
         for (size_t i = 0; i < metas.size(); ++i) {
@@ -72,10 +74,8 @@ const Mp3MainData::GranuleSpectrum* JunctionScorer::memoSpec(const bool head, co
     auto it = memo.find(key);
     if (it == memo.end()) {
         static const vector<uint8_t> empty;
-        // across a slot (headerless chunk not placed yet) the predecessor's bytes don't continue
-        const bool usePrev = prev >= 0 && !metas_[prev].gapAfter;
-        const vector<uint8_t>& pv = usePrev ? chunks_[prev] : empty;
-        const ChunkMeta* pm = usePrev ? &metas_[prev] : nullptr;
+        const vector<uint8_t>& pv = prev >= 0 ? chunks_[prev] : empty;
+        const ChunkMeta* pm = prev >= 0 ? &metas_[prev] : nullptr;
         const int off = head ? metas_[chunk].frames.front().offset : metas_[chunk].frames.back().offset;
         const Mp3MainData::FrameSpectra fsp =
             Mp3MainData::decodeChunkFrame(pm, pv, chunks_[chunk], metas_[chunk], off, sampleRate_);
@@ -101,11 +101,6 @@ double JunctionScorer::spectralCost(const int curPrev, const int curTail, const 
 
 double JunctionScorer::pcmRaw(const int* left, int nLeft, const int cand) {
     while (nLeft > 1 && !metas_[left[0]].valid) { ++left; --nLeft; }
-    // A window spanning a slot (a headerless chunk not placed yet) can't be decoded: neutral
-    // once calibrated, never "unmeasured" - the repair would otherwise bunch slots together
-    // to share such windows (HOW_IT_WORKS 4.18). Not memoised: neutral is set later.
-    for (int k = 0; k < nLeft; ++k)
-        if (metas_[left[k]].gapAfter) return pcmNeutral_ > 0 ? pcmNeutral_ : -1.0;
     PcmKey key;
     key.id.fill(-1);
     for (int k = 0; k < nLeft; ++k) key.id[k] = left[k];
@@ -153,9 +148,9 @@ FluxSum JunctionScorer::summedFlux(const vector<int>& seq) {
 
 // Sample random (prev, a, b) triples, take the median raw L2 distance, and scale so a median
 // junction contributes SPEC_TARGET (~a gentle nudge, well below a typical |Δglobal_gain|).
-// Removes the magic constant and adapts per file. RP_SPEC_SCALE overrides the result.
+// Adapts the weight per file.
 void JunctionScorer::calibrateSpectral() {
-    if (!spectralOn() || specScaleOverride_) return;
+    if (!spectralOn()) return;
     vector<int> validChunks;
     for (int i = 0; i < static_cast<int>(chunks_.size()); ++i)
         if (metas_[i].valid && !metas_[i].frames.empty()) validChunks.push_back(i);
@@ -187,14 +182,14 @@ void JunctionScorer::calibrateSpectral() {
 
 // z-score style: over a sample of real structural edges a->b with a plausible
 // (pcmLeft - 1)-chunk path context (... ->pp ->p->a, drawn from the graph's in-edges), scale
-// log1p(flux) so its spread is RP_PCM_W times the spread of gain + spectral. Unmeasurable
+// log1p(flux) so its spread is PCM_WEIGHT times the spread of gain + spectral. Unmeasurable
 // junctions get the median (neutral) value.
 void JunctionScorer::calibratePcm(const vector<vector<int>>& adj) {
     if (!(pcm_ && rank_)) {
         pcm_ = false;
         return;
     }
-    const double weight = pcmWeight_;
+    const double weight = PCM_WEIGHT;
     const int n = static_cast<int>(chunks_.size());
     vector<vector<int>> preds(n);
     for (int a = 0; a < n; ++a) for (int b : adj[a]) preds[b].push_back(a);

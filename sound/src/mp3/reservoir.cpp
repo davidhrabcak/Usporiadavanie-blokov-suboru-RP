@@ -25,13 +25,7 @@ bool advanceReservoirChunk(int& level,
     const int maxBits = maxReservoir * 8;
     bool creditedExactly = false;
 
-    if (prevMeta != nullptr && prevMeta->gapAfter) {
-        // A headerless chunk (not placed yet) sits between: the straddling frame's side info
-        // is in it. A full reservoir is sound - the check is monotone in the entry level
-        // (HOW_IT_WORKS 4.18).
-        level = maxBits;
-        creditedExactly = true;
-    } else if (prevMeta != nullptr && prevMeta->tailPartialLen > 0) {
+    if (prevMeta != nullptr && prevMeta->tailPartialLen > 0) {
         const SideInfoResult side = decodeSplitFrameSideInfo(*prevMeta, metaBytes);
         if (side.valid) {
             FrameSlice splitFrame{-1, prevMeta->tailPartialLen, 0, side.mainDataBegin, side.part23Bits};
@@ -51,6 +45,34 @@ bool advanceReservoirChunk(int& level,
     }
 
     return true;
+}
+
+int junctionSlack(const ChunkMeta& a, const ChunkMeta& b, const vector<uint8_t>& bBytes,
+                  const int sideInfo, const int maxReservoir) {
+    if (a.frames.empty()) return -2;
+    const int maxBits = maxReservoir * 8;
+    int level = maxBits;   // any level that lets a's last frame pass: its output level doesn't depend on it
+    if (!advanceReservoirFrame(level, a.frames.back(), sideInfo, maxReservoir)) return -2;
+    int slack = 0;
+    auto step = [&](const FrameSlice& f) {   // false: stop (result in `slack`)
+        if (level >= maxBits) { slack = -2; return false; }
+        const int unused = level / 8 - f.mainDataBegin;
+        if (unused < 0 || !advanceReservoirFrame(level, f, sideInfo, maxReservoir)) { slack = -1; return false; }
+        slack += unused;
+        return true;
+    };
+    if (a.tailPartialLen > 0) {
+        const SideInfoResult side = decodeSplitFrameSideInfo(a, bBytes);
+        if (!side.valid) return -2;
+        FrameSlice split{-1, a.tailPartialLen, 0, side.mainDataBegin, side.part23Bits};
+        split.crcBytes = (a.tailBytes[1] & 1) ? 0 : 2;
+        if (!step(split)) return slack;
+    } else if (a.tailOverflow != 0) {
+        return -2;   // split header: the frame's length is in b
+    }
+    if (b.frames.empty()) return slack;
+    step(b.frames.front());
+    return slack;
 }
 
 bool reservoirValid(const vector<ChunkMeta>& metas, const vector<vector<uint8_t>>& chunks,
