@@ -36,7 +36,7 @@ struct Config {
         long maxDecodes = 640000;                   // RP_LOCK_MAX_DECODES (0 = no cap)
     } lock;
 
-    std::string cont;                               // RP_CONT=fixed|cal: continuity cost (proof of concept)
+    bool cont = true;                               // RP_CONT: main-data continuity cost
     bool chain = false;                             // RP_CHAIN=1: segment growing (proof of concept)
 
     std::optional<double> timeBudget;               // RP_TIME_BUDGET: DFS seconds per lock attempt

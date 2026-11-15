@@ -84,8 +84,8 @@ public:
     // ranking (RP_RANK) or the term (RP_PCM) is off. Clears the PCM memo.
     void calibratePcm(const std::vector<std::vector<int>>& adj);
 
-    // RP_CONT proof of concept: pcmRaw adds the continuity cost of the junction to a measured
-    // flux. Set after calibration; `c` must outlive the scorer.
+    // RP_CONT: pcmRaw adds the continuity cost of the junction to a measured flux. Set after
+    // calibration (which uses the flux alone); `c` must outlive the scorer.
     void setContinuity(const Continuity* c) { cont_ = c; }
     const Continuity* continuity() const { return cont_; }
 

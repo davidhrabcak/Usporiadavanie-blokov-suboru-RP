@@ -38,9 +38,9 @@ int main(int argc, char* argv[]) {
     const ChunkGraph graph = buildGraph(p.metas, p.chunks, p.profile, cfg, p.origIndexOf);
     scorer.calibrateSpectral();
     scorer.calibratePcm(graph.adj);
-    std::unique_ptr<Continuity> cont;   // RP_CONT proof of concept
-    if (!cfg.cont.empty()) {
-        cont.reset(new Continuity(p.chunks, p.metas, graph.adjFull, p.profile, cfg.cont, p.origIndexOf));
+    std::unique_ptr<Continuity> cont;   // RP_CONT
+    if (cfg.cont && p.profile.isLayerIII()) {
+        cont.reset(new Continuity(p.chunks, p.metas, graph.adjFull, p.profile, p.origIndexOf));
         scorer.setContinuity(cont.get());
     }
 

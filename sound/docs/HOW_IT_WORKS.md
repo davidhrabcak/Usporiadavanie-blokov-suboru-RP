@@ -27,6 +27,7 @@ chapter 7 (the wrong outputs).
    - 4.5 The reservoir arc filter
    - 4.6 Arc consistency (AC-3), and the bug the filter exposed
    - 4.7 Listening to the junction: the PCM flux score
+   - 4.7a Exact main-data continuity
    - 4.8 `LeftContext`: decoding the left side only once
    - 4.9 Locking the obvious edges (confident-edge locking)
    - 4.10 Gluing forced chains: supernodes
@@ -456,6 +457,36 @@ of evidence.
 **Cost.** One window decode takes about 0.3-0.8 ms at 128 kbps and above, ~1.8 ms at
 32 kbps (more frames per byte). With tens of thousands of arrows and several contexts each,
 decoding is the main cost of the whole program. That is why the next section matters.
+
+### 4.7a Exact main-data continuity (since 2026-11-15)
+
+**The observation.** An encoder writes the audio data (main data) of consecutive frames back to
+back. So a frame's `main_data_begin` - how far back into the reservoir its data starts - is
+exactly the amount the previous frames left there, not just "at most" that (4.4 only checks
+"at most"). Two exceptions: the reservoir is full (some encoders then write the cap, others
+don't), and some encoders use a lower cap than the format allows (438 instead of 511).
+
+**What the program does.** For each arrow `a -> b` it computes the reservoir level after
+`a`'s last complete frame (that depends on that frame alone), steps through the frame split
+across the junction and `b`'s first frame, and compares each `main_data_begin` with
+`min(level, cap)`: equal everywhere = *tight*; smaller somewhere = a *hole* (bytes left
+unused); the reservoir at the cap and the encoder not known to write the cap = *at cap*; the
+junction can't be read (split header, side info cut off) = *unknown*. The encoder's cap is the
+largest `main_data_begin` in the file, and whether it writes the cap when full is checked on
+pairs of consecutive frames inside one chunk - those are true pairs by construction, so no
+chunk order is needed.
+
+**Why a cost and not a filter.** 0-10% of true junctions are holes on some files, and deleting
+them leaves no complete order (measured: as a filter, the matching found no perfect matching on
+4 of 5 CBR tracks). So each class only adds to the junction's flux cost: tight 0, at cap and
+unknown 0.5, hole 2 (in log1p-flux units). The DFS ranking, the repair and the matching all see
+it; the matching doesn't decode hole arrows at all, which lets it run under its decode cap on
+dense CBR graphs. Costs set per file from the class distributions gave the same outcomes.
+
+**What it changed** (2026-11-15, same binary, 4 KB): 32 CBR tracks, mean share of right
+junctions 0.653 -> 0.785, failed runs 6 -> 1 (no CBR track exact yet); 20 VBR tracks, exact
+10 -> 13 with no loss; 38 fixtures, exact 29 -> 34 (2 CBR fixtures got worse: the DFS now finds a
+slightly wrong order first where before the matching found the exact one).
 
 ### 4.8 `LeftContext`: decoding the left side only once
 
@@ -989,8 +1020,8 @@ In rough order of expected value per effort:
    testable true ones do (1869 of 1874 junctions on a 256 kbps track, which cuts 315
    candidates per chunk to 9; but only 699 tight vs 256 with a hole, and 1544 untestable, on
    a 320 kbps track whose reservoir often runs full). It can not be a filter - dropping every arrow that
-   leaves a hole removes 0-10% of the true ones, and then no complete path exists - so it has
-   to enter as a cost: in the matching's edge cost and the DFS ranking, ahead of flux.
+   leaves a hole removes 0-10% of the true ones, and then no complete path exists - so it
+   enters as a cost (4.7a, the default since 2026-11-15).
    `junctionSlack` (`reservoir.hpp`) computes it; `RP_CHAIN=1` is a first proof of concept
    that joins segments on flux with that factor. On 32 CBR tracks against the default (paired,
    2026-11-15) it raised the mean share of right junctions from 0.65 to 0.73 and turned 6

@@ -37,13 +37,14 @@ Includes are relative to `src/` (`#include "mp3/chunk_meta.hpp"`).
 | `src/mp3/Header.*` | Decodes a 32-bit frame header (length, bitrate, rate, version, layer, mode, CRC). |
 | `src/mp3/frame_scanner.*` | Scans a whole file for frames; `chunksFromFirstFrame` cuts the audio (first frame to the trailing tags) into chunks. |
 | `src/mp3/chunk_meta.*` | `computeChunkMeta` (per-chunk alignment and tail), `deriveProfile`, side-info parsing incl. split frames (`decodeSplitFrameSideInfo`). |
-| `src/mp3/reservoir.*` | Bit-reservoir model: `advanceReservoirFrame` / `advanceReservoirChunk`, `reservoirValid` / `reservoirBreaks`; `junctionSlack` (exact main-data continuity, used by the PoC only so far). |
+| `src/mp3/reservoir.*` | Bit-reservoir model: `advanceReservoirFrame` / `advanceReservoirChunk`, `reservoirValid` / `reservoirBreaks`; `frameSlack` / `junctionSlack` (exact main-data continuity). |
 | `src/mp3/main_data_decoder.*`, `huffman_tables.*` | Partial Layer III decode (MPEG1, long blocks): Huffman → 12-band per-granule profile for the spectral ranking term. Bit-exact on ~46k granules. Tables from minimp3. |
 | `src/graph/adjacency.*` | `canFollow`, `buildAdjacency` (indexed), `propagateArcConsistency` (AC-3). |
 | `src/graph/chunk_graph.*` | The search graph in stages: structural graph, `filterReservoirArcs`, AC-3. `adjFull` (before AC-3) is the repair's move space. |
 | `src/graph/supernodes.*` | Forced-chain collapse; `chunksOf`. |
 | `src/scoring/junction_scorer.*` | The ranking terms (`gainCost` = \|Δglobal_gain\| + \|Δbig_values\|/32, `spectralCost`, `pcmCost`), memos, PCM window size, per-file calibration. |
 | `src/scoring/pcm_junction.*`, `pcm_decoder_impl.cpp` | `LeftContext`: full decode of a chunk window with minimp3; spectral-flux spike at the junction. |
+| `src/scoring/continuity.*` | Classes every arc tight / at cap / hole / unknown by `junctionSlack` (encoder cap and full-reservoir rule read from in-chunk frame pairs); a fixed cost per class on top of the flux. |
 | `src/scoring/edge_lock.*` | Confident-edge locking on median-context flux. |
 | `src/search/dfs.*` | Ranked, reservoir-pruned first-valid DFS over supernodes; beam, deadline, iterative broadening. |
 | `src/search/global_match.*` | Min-cost successor assignment (SSP) + cycle splicing. |
@@ -144,6 +145,7 @@ All optional; defaults are deterministic.
 | `RP_RANK` | on | junction-cost ranking in the DFS. |
 | `RP_SPEC` | on | partial-decode spectral term (weight calibrated per file). |
 | `RP_PCM` | on | PCM flux term; off also disables matching and repair. |
+| `RP_CONT` | on | main-data continuity cost (tight 0, at cap / unknown 0.5, hole 2) in the DFS ranking, repair and matching; the matching doesn't decode hole arcs. Layer III. |
 | `RP_PCM_LEFT` | auto | left side of a PCM window in chunks: max(3, ceil(4 x p90 frame / chunk)). Lock/matching windows use one less. |
 | `RP_LOCK` | on | edge locking (Layer III). |
 | `RP_LOCK_TAU` | 1.5,1.25,1.1 | lock-margin schedule; each value is one attempt from the unlocked graph. |
@@ -208,7 +210,8 @@ is in HOW_IT_WORKS ch. 6.
   (locking ~99%), and on 320 kbps tracks with a full reservoir the wrong joins leave no
   perfect successor matching. Not a default. Next: continuity as a cost inside the matching
   (no forced joins), or joins with a fallback to the unjoined graph like the lock schedule.
-- **`RP_CONT` (continuity as a cost, never a filter), A/B 2026-11-15**, commit `9174916`, one
+- **`RP_CONT` (continuity as a cost, never a filter) - DEFAULT since 2026-11-15** (fixed
+  costs; the per-file calibration was dropped as it changed nothing). A/B 2026-11-15, commit `9174916`, one
   binary, arms run one after the other, 4 KB:
 
   | | default | `RP_CONT=cal` | `RP_CONT=fixed` |

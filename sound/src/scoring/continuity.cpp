@@ -1,8 +1,6 @@
 #include "scoring/continuity.hpp"
 
 #include <algorithm>
-#include <cmath>
-#include <iomanip>
 #include <iostream>
 #include "mp3/reservoir.hpp"
 
@@ -14,7 +12,7 @@ static Continuity::Class classOf(const int slack) {
 }
 
 Continuity::Continuity(const vector<vector<uint8_t>>& chunks, const vector<ChunkMeta>& metas,
-                       const vector<vector<int>>& adj, const StreamProfile& profile, const string& mode,
+                       const vector<vector<int>>& adj, const StreamProfile& profile,
                        const vector<int>& origIndexOf) {
     if (!profile.isLayerIII()) return;
     const int side = sideInfoSize(profile.versionID, profile.isMono());
@@ -50,22 +48,9 @@ Continuity::Continuity(const vector<vector<uint8_t>>& chunks, const vector<Chunk
             if (origIndexOf[b] == origIndexOf[a] + 1) ++trueArcs[c];   // diagnostic only
         }
 
-    if (mode == "fixed") {
-        cost_[Tight] = 0; cost_[AtCap] = 0.5; cost_[Hole] = 2.0; cost_[Unknown] = 0.5;
-    } else {
-        constexpr double K = 0.5, MAX_COST = 4.0;
-        const double nt = cnt[0] + cnt[1] + cnt[2], na = arcs[0] + arcs[1] + arcs[2];   // Unknown left out
-        double llr[4], best = 0;   // Unknown: ratio 1
-        llr[Unknown] = 0;
-        for (int c = 0; c < 3; ++c) {
-            llr[c] = std::log((cnt[c] + 1.0) / (nt + 3.0)) - std::log((arcs[c] + 1.0) / (na + 3.0));
-            if (arcs[c] > 0) best = std::max(best, llr[c]);   // a class no arc has can't set the scale
-        }
-        for (int c = 0; c < 4; ++c) cost_[c] = std::clamp(K * (best - llr[c]), 0.0, MAX_COST);
-    }
-    cout << "Continuity (" << mode << "): cap " << capEff << (fullRule ? ", full rule ON" : ", full rule off")
+    cout << "Continuity: cap " << capEff << (fullRule ? ", full rule ON" : ", full rule off")
          << " (" << atCapExact << "/" << atCap << " in-chunk pairs at the cap exact); tight/at cap/hole/unknown: in-chunk pairs "
          << cnt[0] << "/" << cnt[1] << "/" << cnt[2] << ", arcs " << arcs[0] << "/" << arcs[1] << "/" << arcs[2] << "/" << arcs[3]
          << " [vs source: true arcs " << trueArcs[0] << "/" << trueArcs[1] << "/" << trueArcs[2] << "/" << trueArcs[3]
-         << "], cost " << fixed << setprecision(2) << cost_[0] << "/" << cost_[1] << "/" << cost_[2] << "/" << cost_[3] << "\n";
+         << "]\n";
 }
