@@ -99,7 +99,12 @@ double JunctionScorer::spectralCost(const int curPrev, const int curTail, const 
     return specScale_ * std::sqrt(s);
 }
 
-double JunctionScorer::pcmRaw(const int* left, int nLeft, const int cand) {
+double JunctionScorer::pcmRaw(const int* left, const int nLeft, const int cand) {
+    const double v = pcmFlux(left, nLeft, cand);
+    return (v >= 0 && cont_ && nLeft > 0) ? v + cont_->cost(left[nLeft - 1], cand) : v;
+}
+
+double JunctionScorer::pcmFlux(const int* left, int nLeft, const int cand) {
     while (nLeft > 1 && !metas_[left[0]].valid) { ++left; --nLeft; }
     PcmKey key;
     key.id.fill(-1);
@@ -215,7 +220,7 @@ void JunctionScorer::calibratePcm(const vector<vector<int>>& adj) {
         const int p = nw > 1 ? walk[1] : -1;
         int left[PCM_LEFT_MAX];
         for (int k = 0; k < nw; ++k) left[k] = walk[nw - 1 - k];
-        const double raw = pcmRaw(left, nw, b);
+        const double raw = pcmFlux(left, nw, b);
         if (raw < 0) continue;
         double o = gainCost(a, b);
         if (spectralOn()) o += spectralCost(p, a, b);

@@ -10,6 +10,7 @@
 #include "config.hpp"
 #include "mp3/chunk_meta.hpp"
 #include "mp3/main_data_decoder.hpp"
+#include "scoring/continuity.hpp"
 #include "scoring/pcm_junction.hpp"
 
 // How well does chunk b continue the path that ends in chunk a? Three terms, all used only to
@@ -83,7 +84,14 @@ public:
     // ranking (RP_RANK) or the term (RP_PCM) is off. Clears the PCM memo.
     void calibratePcm(const std::vector<std::vector<int>>& adj);
 
+    // RP_CONT proof of concept: pcmRaw adds the continuity cost of the junction to a measured
+    // flux. Set after calibration; `c` must outlive the scorer.
+    void setContinuity(const Continuity* c) { cont_ = c; }
+    const Continuity* continuity() const { return cont_; }
+
 private:
+    double pcmFlux(const int* left, int nLeft, int cand);   // pcmRaw without the continuity cost
+    const Continuity* cont_ = nullptr;
     const Mp3MainData::GranuleSpectrum* memoSpec(bool head, int prev, int chunk);
 
     const std::vector<std::vector<uint8_t>>& chunks_;

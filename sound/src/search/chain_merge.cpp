@@ -46,7 +46,7 @@ vector<EdgeLock::LockedEdge> chainMerge(const vector<vector<uint8_t>>& chunks, c
     for (int a = 0; a < n; ++a) {
         isTight[a].assign(adj[a].size(), 0);
         for (size_t k = 0; k < adj[a].size(); ++k)
-            isTight[a][k] = junctionSlack(metas[a], metas[adj[a][k]], chunks[adj[a][k]], side, maxR) == 0;
+            isTight[a][k] = junctionSlack(metas[a], metas[adj[a][k]], chunks[adj[a][k]], side, maxR, maxR, false) == 0;
     }
     auto eff = [&](int a, size_t k) { return (flux[a][k] + FLOOR) / (isTight[a][k] ? TIGHT_BONUS : 1.0); };
     if (getenv("RP_CHAIN_DIAG")) {
@@ -57,12 +57,12 @@ vector<EdgeLock::LockedEdge> chainMerge(const vector<vector<uint8_t>>& chunks, c
             tight[a].assign(adj[a].size(), 0);
             for (size_t k = 0; k < adj[a].size(); ++k) {
                 const int b = adj[a][k];
-                const int sl = junctionSlack(metas[a], metas[b], chunks[b], side, maxR);
+                const int sl = junctionSlack(metas[a], metas[b], chunks[b], side, maxR, maxR, false);
                 const bool tr = origIndexOf[b] == origIndexOf[a] + 1;
-                if (tr) { ++trueN; if (sl == 0) ++trueTight; else if (sl == -2) ++trueUnk; else if (sl > 0) ++trueHole; else ++trueBad; }
-                else { ++wrongN; if (sl == 0) ++wrongTight; else if (sl == -2) ++wrongUnk; }
+                if (tr) { ++trueN; if (sl == 0) ++trueTight; else if (sl <= -2) ++trueUnk; else if (sl > 0) ++trueHole; else ++trueBad; }
+                else { ++wrongN; if (sl == 0) ++wrongTight; else if (sl <= -2) ++wrongUnk; }
                 if (sl == 0) { tight[a][k] = 1; ++tightOut[a]; ++tightIn[b]; }
-                if (sl == 0 || sl == -2) ++okOut[a];
+                if (sl == 0 || sl <= -2) ++okOut[a];
             }
         }
         long uniq = 0, uniqOk = 0, okSum = 0;

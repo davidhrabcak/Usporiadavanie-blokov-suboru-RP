@@ -6,6 +6,7 @@
 #include <vector>
 #include "graph/supernodes.hpp"
 #include "mp3/chunk_meta.hpp"
+#include "scoring/continuity.hpp"
 #include "scoring/edge_lock.hpp"
 
 // Global min-cost successor matching (HOW_IT_WORKS 4.12).
@@ -36,6 +37,7 @@ struct MatchResult {
 MatchResult globalMatch(const std::vector<std::vector<uint8_t>>& chunks, const std::vector<Supernode>& sn,
                         const std::vector<std::vector<int>>& superAdj, int startSuper,
                         const std::vector<std::vector<int>>& chunkAdj, const std::vector<ChunkMeta>& metas,
-                        EdgeLock::FluxMemo& memo, int threads, const EdgeLock::WarmChains* warm, long maxDecodes);
+                        EdgeLock::FluxMemo& memo, int threads, const EdgeLock::WarmChains* warm, long maxDecodes,
+                        const Continuity* cont = nullptr);
 
 #endif

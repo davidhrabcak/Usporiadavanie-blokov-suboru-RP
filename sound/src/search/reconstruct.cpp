@@ -241,7 +241,8 @@ void Reconstructor::search(const size_t lockAttempt) {
 bool Reconstructor::tryMatch(const size_t lockAttempt) {
     const auto t0 = chrono::steady_clock::now();
     MatchResult mr = globalMatch(chunks_, supernodes_, superAdj_, startSuper_, adj_, metas_, lockMemo_,
-                                 cfg_.threads, warmPtr_, cfg_.match.maxDecodes);
+                                 cfg_.threads, warmPtr_, cfg_.match.maxDecodes,
+                                 scorer_.continuity());
     const double secs = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
     cout << "Global matching: " << supernodes_.size() << " supernodes, " << mr.decodes << " decodes ("
          << mr.contexts << " ctx), "

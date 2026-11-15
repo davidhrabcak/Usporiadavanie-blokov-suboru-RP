@@ -39,6 +39,8 @@ add_library(rpcore STATIC
         src/scoring/pcm_junction.cpp
         src/scoring/pcm_junction.hpp
         src/scoring/pcm_decoder_impl.cpp
+        src/scoring/continuity.cpp
+        src/scoring/continuity.hpp
         src/scoring/edge_lock.cpp
         src/scoring/edge_lock.hpp
         src/scoring/junction_scorer.cpp

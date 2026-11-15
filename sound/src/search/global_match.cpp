@@ -17,8 +17,8 @@ namespace {
 class Matcher {
 public:
     Matcher(const vector<Supernode>& sn, const vector<vector<int>>& superAdj, const int startSuper,
-            const vector<vector<int>>& chunkAdj, const vector<ChunkMeta>& metas)
-        : sn_(sn), superAdj_(superAdj), startSuper_(startSuper), metas_(metas),
+            const vector<vector<int>>& chunkAdj, const vector<ChunkMeta>& metas, const Continuity* cont)
+        : sn_(sn), superAdj_(superAdj), startSuper_(startSuper), metas_(metas), cont_(cont),
           N_(static_cast<int>(sn.size())), preds_(chunkAdj.size()), ctxOf_(N_) {
         // chunk-level predecessors in the current (locked) graph, for single-chunk contexts
         for (size_t a = 0; a < chunkAdj.size(); ++a) for (int b : chunkAdj[a]) preds_[b].push_back((int)a);
@@ -66,6 +66,7 @@ public:
             const int a = sn_[s].chunks.back();
             for (int t : superAdj_[s]) {
                 const int b = sn_[t].chunks.front();
+                if (cont_ && cont_->hole(a, b)) continue;   // not decoded: neutral + the hole cost
                 for (int p : ctxOf_[s]) if (p != b && !f(p, a, b)) return false;
             }
         }
@@ -102,6 +103,9 @@ public:
             neutral_ = finite[finite.size() / 2];
         }
         for (auto& kv : cost_) if (std::isnan(kv.second)) kv.second = neutral_;
+        if (cont_)
+            for (int s = 0; s < N_; ++s)
+                for (int t : superAdj_[s]) cost_[ekey(s, t)] += cont_->cost(sn_[s].chunks.back(), sn_[t].chunks.front());
     }
 
     // Min-cost perfect matching, left = supernodes as predecessors, right = supernodes as
@@ -241,6 +245,7 @@ private:
     const vector<vector<int>>& superAdj_;
     const int startSuper_;
     const vector<ChunkMeta>& metas_;
+    const Continuity* cont_;
     const int N_;
     vector<vector<int>> preds_;
     vector<vector<int>> ctxOf_;
@@ -255,9 +260,9 @@ MatchResult globalMatch(const vector<vector<uint8_t>>& chunks, const vector<Supe
                         const vector<vector<int>>& superAdj, const int startSuper,
                         const vector<vector<int>>& chunkAdj, const vector<ChunkMeta>& metas,
                         EdgeLock::FluxMemo& memo, const int threads, const EdgeLock::WarmChains* warm,
-                        const long maxDecodes) {
+                        const long maxDecodes, const Continuity* cont) {
     MatchResult res;
-    Matcher m(sn, superAdj, startSuper, chunkAdj, metas);
+    Matcher m(sn, superAdj, startSuper, chunkAdj, metas, cont);
     vector<std::array<int, 3>> windows;
     if (!m.chooseContexts(memo, maxDecodes, windows, res)) return res;
     res.decodes = EdgeLock::scoreWindows(chunks, metas, windows, memo, threads, warm);

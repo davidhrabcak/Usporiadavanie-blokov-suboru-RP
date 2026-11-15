@@ -17,6 +17,8 @@
 #include "pipeline/input.hpp"
 #include "pipeline/output.hpp"
 #include "run_report.hpp"
+#include <memory>
+#include "scoring/continuity.hpp"
 #include "scoring/junction_scorer.hpp"
 #include "search/reconstruct.hpp"
 
@@ -36,6 +38,11 @@ int main(int argc, char* argv[]) {
     const ChunkGraph graph = buildGraph(p.metas, p.chunks, p.profile, cfg, p.origIndexOf);
     scorer.calibrateSpectral();
     scorer.calibratePcm(graph.adj);
+    std::unique_ptr<Continuity> cont;   // RP_CONT proof of concept
+    if (!cfg.cont.empty()) {
+        cont.reset(new Continuity(p.chunks, p.metas, graph.adjFull, p.profile, cfg.cont, p.origIndexOf));
+        scorer.setContinuity(cont.get());
+    }
 
     Reconstruction r;
     if (!reconstruct(p, graph, scorer, cfg, r)) return 1;

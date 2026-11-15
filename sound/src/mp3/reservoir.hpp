@@ -76,16 +76,21 @@ bool advanceReservoirChunk(int& level,
                            const int maxReservoir);
 
 // Main-data continuity across the junction a -> b. Encoders write main data back to back: a
-// frame's main_data_begin is exactly the reservoir level the previous frame left (in whole
-// bytes), unless the reservoir was full and the surplus was dropped (measured 2026-11-15: equal
-// in 95-100% of frames on 23 of 24 CBR/VBR files). Starting from the level after a's last complete
-// frame - which depends on that frame alone - this returns the bytes of reservoir left unused by
-// the frame split across the junction and by b's first complete frame: 0 = b continues a's main
-// data exactly ("tight"); > 0 = it fits but leaves a hole; -1 = the reservoir check fails;
-// -2 = can't be told (a has no complete frame, the split frame's side info is unreadable, or
-// the reservoir was full).
+// frame's main_data_begin is the reservoir level the previous frame left (in whole bytes),
+// capped at the largest pointer the encoder uses (`capEff`, <= maxReservoir; some encoders cap
+// lower). Starting from the level after a's last complete frame - which depends on that frame
+// alone - this returns the bytes of reservoir left unused by the frame split across the
+// junction and by b's first complete frame: 0 = b continues a's main data exactly ("tight");
+// > 0 = it fits but leaves a hole; -1 = the reservoir check fails; -2 = the reservoir was at the
+// cap and `fullRule` is off; -3 = can't be told (a has no complete frame, the split frame's
+// side info is unreadable or its header is split). `fullRule`: the encoder writes main_data_begin == capEff whenever the
+// level reaches the cap (true of some encoders only; see Continuity).
 int junctionSlack(const ChunkMeta& a, const ChunkMeta& b, const std::vector<uint8_t>& bBytes,
-                  int sideInfo, int maxReservoir);
+                  int sideInfo, int maxReservoir, int capEff, bool fullRule);
+
+// The classification step of junctionSlack for one frame entered at `level` (bits; updated).
+// Returns the unused bytes (>= 0), -1 (reservoir check fails) or -2 (at the cap, !fullRule).
+int frameSlack(int& level, const FrameSlice& f, int sideInfo, int maxReservoir, int capEff, bool fullRule);
 
 // Whether the whole order `seq` (chunk indices into `metas` / `chunks`) passes the check,
 // starting from an empty reservoir.

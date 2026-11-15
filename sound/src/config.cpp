@@ -60,6 +60,7 @@ Config Config::fromEnv(int argc, char* argv[]) {
     if (const char* v = env("RP_LOCK_TAU")) c.lock.taus = parseTaus(v);
     if (const char* v = env("RP_LOCK_MAX_DECODES")) c.lock.maxDecodes = std::atol(v);
 
+    if (const char* v = env("RP_CONT")) c.cont = v;
     if (const char* v = env("RP_CHAIN")) c.chain = v[0] == '1';
 
     if (const char* v = env("RP_TIME_BUDGET")) c.timeBudget = std::atof(v);
